@@ -191,7 +191,10 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
   };
 
   if (state === null || !state.bootstrapped) {
-    await store.commit({ source: id, packages: dedupeSnapshots(snapshots), events: [], outbox: [], state: nextState });
+    const seed = new Map<string, PackageSnapshot>();
+    if (kind === 'tick' && adapter.reconcile) for (const pkg of await adapter.reconcile(ctx)) seed.set(pkg.packageId, pkg);
+    for (const pkg of dedupeSnapshots(snapshots)) seed.set(pkg.packageId, pkg);
+    await store.commit({ source: id, packages: [...seed.values()], events: [], outbox: [], state: nextState });
     return { report: { status: 'cold-start', events: 0 }, jobs: [], fetched: true };
   }
 
