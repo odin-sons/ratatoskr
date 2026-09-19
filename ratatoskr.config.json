@@ -1,0 +1,23 @@
+{
+  "userAgent": "ratatoskr/0.1.0 (+https://github.com/odin-sons/ratatoskr; unofficial mod notifier)",
+  "sources": [
+    {
+      "id": "thunderstore:valheim",
+      "store": "thunderstore",
+      "community": "valheim",
+      "enabled": true
+    },
+    {
+      "id": "hexium:valheim",
+      "store": "hexium",
+      "community": "valheim",
+      "enabled": true
+    },
+    {
+      "id": "nexus:valheim",
+      "store": "nexus",
+      "community": "valheim",
+      "enabled": false
+    }
+  ]
+}
