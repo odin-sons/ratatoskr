@@ -1,0 +1,10 @@
+{
+  "2.3.0": [
+    "Fixed arrow drop",
+    "Reworked draw animation"
+  ],
+  "2.3.1": [
+    "Fixed crash on load",
+    "Added <b>config</b> option"
+  ]
+}

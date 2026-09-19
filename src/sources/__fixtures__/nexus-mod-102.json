@@ -1,0 +1,18 @@
+{
+  "name": "Better Bows",
+  "summary": "Bows, but better",
+  "description": "desc",
+  "picture_url": "https://staticdelivery.nexusmods.com/mods/3667/images/102-1.jpg",
+  "mod_id": 102,
+  "game_id": 3667,
+  "domain_name": "valheim",
+  "category_id": 4,
+  "version": "2.3.1",
+  "created_timestamp": 1788912000,
+  "updated_timestamp": 1789774200,
+  "author": "Fletcher",
+  "uploaded_by": "Fletcher",
+  "contains_adult_content": false,
+  "status": "published",
+  "available": true
+}

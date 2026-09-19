@@ -1,0 +1,3 @@
+{
+  "markdown": "# Changelog\n\n## 1.3.6\n\n- **No more duplicate pins.** The mod kept its \"already pinned here\" list in a file beside\n  the config, while the pins themselves live in your character save. Reinstalling the mod,\n  or anything else that clears the config folder, emptied that list while every pin it\n  described was still on your map - so the next time you walked past a deposit it pinned it\n  a second time."
+}

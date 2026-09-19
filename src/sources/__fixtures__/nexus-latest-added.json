@@ -1,0 +1,34 @@
+[
+  {
+    "name": "Fresh Arrival",
+    "summary": "A brand new mod",
+    "description": "desc",
+    "picture_url": "https://staticdelivery.nexusmods.com/mods/3667/images/300-1-1.jpg",
+    "mod_downloads": 5,
+    "mod_unique_downloads": 4,
+    "uid": 12884901999,
+    "mod_id": 104,
+    "game_id": 3667,
+    "allow_rating": true,
+    "domain_name": "valheim",
+    "category_id": 4,
+    "version": "1.0.0",
+    "endorsement_count": 1,
+    "created_timestamp": 1789775700,
+    "created_time": "2026-09-18T23:55:00.000+00:00",
+    "updated_timestamp": 1789775700,
+    "updated_time": "2026-09-18T23:55:00.000+00:00",
+    "author": "Newbie",
+    "uploaded_by": "Newbie",
+    "uploaded_users_profile_url": "https://www.nexusmods.com/users/1",
+    "contains_adult_content": false,
+    "status": "published",
+    "available": true,
+    "user": {
+      "member_id": 1,
+      "member_group_id": 4,
+      "name": "Newbie"
+    },
+    "endorsement": null
+  }
+]

@@ -1,0 +1,78 @@
+{
+  "bg_image_src": null,
+  "categories": [],
+  "community_name": "Valheim",
+  "has_more_pages": true,
+  "packages": [
+    {
+      "name": "zzzGenesisItemStacks",
+      "full_name": "GenesisMods-zzzGenesisItemStacks",
+      "owner": "GenesisMods",
+      "package_url": "https://valheim.hexium.gg/mods/GenesisMods/zzzGenesisItemStacks",
+      "version_number": "2.1.0",
+      "date_updated": "2026-09-18T23:14:08.000000Z",
+      "rating_score": 0,
+      "download_count": 3,
+      "is_pinned": false,
+      "is_deprecated": false,
+      "has_nsfw_content": false,
+      "categories": [],
+      "icon_url": "https://cdn.hexium.gg/upload/1351/icon.png",
+      "description": "Tamanhos de pilha e pesos configuraveis para todos os itens empilhaveis, vanilla",
+      "uuid4": "00000547-0000-4000-8000-000000000547"
+    },
+    {
+      "name": "MrDayNight",
+      "full_name": "GenesisMods-MrDayNight",
+      "owner": "GenesisMods",
+      "package_url": "https://valheim.hexium.gg/mods/GenesisMods/MrDayNight",
+      "version_number": "2.0.0",
+      "date_updated": "2026-09-18T23:13:39.000000Z",
+      "rating_score": 0,
+      "download_count": 3,
+      "is_pinned": false,
+      "is_deprecated": false,
+      "has_nsfw_content": false,
+      "categories": [],
+      "icon_url": "https://cdn.hexium.gg/upload/1350/icon.png",
+      "description": "Controle real da duracao do dia e da noite, separadamente. Muda a proporcao do c",
+      "uuid4": "00000546-0000-4000-8000-000000000546"
+    },
+    {
+      "name": "NordGuide",
+      "full_name": "GenesisMods-NordGuide",
+      "owner": "GenesisMods",
+      "package_url": "https://valheim.hexium.gg/mods/GenesisMods/NordGuide",
+      "version_number": "1.0.3",
+      "date_updated": "2026-09-18T23:13:16.000000Z",
+      "rating_score": 0,
+      "download_count": 1,
+      "is_pinned": false,
+      "is_deprecated": false,
+      "has_nsfw_content": false,
+      "categories": [],
+      "icon_url": "https://cdn.hexium.gg/upload/1349/icon.png",
+      "description": "Bussola discreta em estilo Skyrim, com marcadores dos pins do seu mapa. Integra ",
+      "uuid4": "00000545-0000-4000-8000-000000000545"
+    },
+    {
+      "name": "Mythworld",
+      "full_name": "Mythworld-Mythworld",
+      "owner": "Mythworld",
+      "package_url": "https://valheim.hexium.gg/mods/Mythworld/Mythworld",
+      "version_number": "1.0.0",
+      "date_updated": "2026-09-18T23:06:03.000000Z",
+      "rating_score": 0,
+      "download_count": 1,
+      "is_pinned": false,
+      "is_deprecated": false,
+      "has_nsfw_content": false,
+      "categories": [
+        "Modpack"
+      ],
+      "icon_url": "https://cdn.hexium.gg/upload/1348/icon.png",
+      "description": "Mod pack for the Mythworld server",
+      "uuid4": "00000544-0000-4000-8000-000000000544"
+    }
+  ]
+}

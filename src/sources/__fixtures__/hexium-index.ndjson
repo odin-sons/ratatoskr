@@ -1,0 +1,6 @@
+{"namespace":"denikson","name":"BepInExPack_Valheim","version_number":"5.4.2350","file_format":"zip","file_size":705576,"dependencies":[],"suggestions":[]}
+{"namespace":"Smoothbrain","name":"ConversionSizeAndSpeed","version_number":"1.0.18","file_format":"zip","file_size":41563,"dependencies":["denikson-BepInExPack_Valheim-5.4.2350"],"suggestions":[]}
+{"namespace":"Smoothbrain","name":"Building","version_number":"1.2.7","file_format":"zip","file_size":107075,"dependencies":["denikson-BepInExPack_Valheim-5.4.2350"],"suggestions":[]}
+{"namespace":"Smoothbrain","name":"Afterdeath","version_number":"1.0.9","file_format":"zip","file_size":4499764,"dependencies":["denikson-BepInExPack_Valheim-5.4.2350"],"suggestions":[]}
+{"namespace":"Smoothbrain","name":"Backpacks","version_number":"1.3.10","file_format":"zip","file_size":1071593,"dependencies":["denikson-BepInExPack_Valheim-5.4.2350"],"suggestions":[]}
+{"namespace":"OdinPlus","name":"OdinHorse","version_number":"1.7.1","file_format":"zip","file_size":10367091,"dependencies":["denikson-BepInExPack_Valheim-5.4.2350"],"suggestions":[]}
