@@ -1,0 +1,477 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { eventId, outboxId } from '../core/ids.ts';
+import type { CommitBatch } from '../core/ports.ts';
+import type { ModEvent, OutboxRow, PackageSnapshot, SourceState } from '../core/types.ts';
+import { D1Store } from './d1-store.ts';
+import { D1Shim } from './testing/d1-shim.ts';
+
+const SCHEMA = readFileSync(join(import.meta.dirname, '../../schema.sql'), 'utf8');
+const SOURCE = 'thunderstore:valheim';
+
+function pkg(id: string, over: Partial<PackageSnapshot> = {}): PackageSnapshot {
+  return {
+    source: SOURCE,
+    store: 'thunderstore',
+    packageId: id,
+    owner: id.split('-')[0] ?? 'Owner',
+    name: id.split('-')[1] ?? 'Name',
+    version: '1.0.0',
+    url: `https://thunderstore.io/c/valheim/p/${id}/`,
+    iconUrl: 'https://cdn.example/icon.png',
+    description: 'A mod',
+    categories: ['Tools', 'Misc'],
+    isNsfw: false,
+    isDeprecated: false,
+    updatedAt: '2026-09-18T10:00:00.000Z',
+    sizeBytes: 1234,
+    ...over,
+  };
+}
+
+function ev(p: PackageSnapshot, over: Partial<ModEvent> = {}): ModEvent {
+  return {
+    id: eventId(p.source, p.packageId, p.version),
+    kind: 'new',
+    versionFrom: null,
+    versionTo: p.version,
+    changelog: null,
+    changelogUrl: null,
+    createdAt: '2026-09-18T10:00:00.000Z',
+    pkg: p,
+    alsoOn: [],
+    ...over,
+  };
+}
+
+function ob(subId: string, e: ModEvent, over: Partial<OutboxRow> = {}): OutboxRow {
+  return {
+    id: outboxId(subId, e.id),
+    subscriptionId: subId,
+    eventId: e.id,
+    attempts: 0,
+    nextAttemptAt: '2026-09-18T10:00:00.000Z',
+    ...over,
+  };
+}
+
+function state(over: Partial<SourceState> = {}): SourceState {
+  return { id: SOURCE, cursor: '2026-09-18T10:00:00.000Z', etag: 'W/"abc"', bootstrapped: true, lastOkAt: '2026-09-18T10:00:01.000Z', ...over };
+}
+
+function batch(over: Partial<CommitBatch> = {}): CommitBatch {
+  return { source: SOURCE, packages: [], events: [], outbox: [], state: state(), ...over };
+}
+
+function count(shim: D1Shim, table: string): number {
+  return (shim.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+}
+
+function addSub(shim: D1Shim, id: string, over: { enabled?: number; filter?: string; mode?: string; interval?: number | null } = {}): void {
+  shim.db
+    .prepare('INSERT INTO subscriptions (id, guild_id, webhook_url, filter, mode, digest_interval_min, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(id, '123456789012345678', `https://discord.com/api/webhooks/123456789012345678/tok-${id}`, over.filter ?? '{}', over.mode ?? 'digest', over.interval === undefined ? 30 : over.interval, over.enabled ?? 1);
+}
+
+let shim: D1Shim;
+let store: D1Store;
+
+beforeEach(() => {
+  shim = new D1Shim();
+  shim.db.exec(SCHEMA);
+  store = new D1Store(shim.asD1());
+  shim.preparedSql.length = 0;
+});
+
+describe('schema.sql', () => {
+  it('applies twice without error', () => {
+    expect(() => shim.db.exec(SCHEMA)).not.toThrow();
+    expect(() => shim.db.exec(SCHEMA)).not.toThrow();
+  });
+});
+
+describe('source state', () => {
+  it('returns null for an unknown source', async () => {
+    expect(await store.getSourceState(SOURCE)).toBeNull();
+  });
+
+  it('round-trips state through commit', async () => {
+    await store.commit(batch());
+    expect(await store.getSourceState(SOURCE)).toEqual(state());
+  });
+
+  it('touchSource updates etag and last_ok_at but not cursor/bootstrapped', async () => {
+    await store.commit(batch());
+    await store.touchSource(state({ cursor: 'ignored', etag: 'new', bootstrapped: false, lastOkAt: 'later' }));
+    expect(await store.getSourceState(SOURCE)).toEqual(state({ etag: 'new', lastOkAt: 'later' }));
+  });
+
+  it('touchSource inserts when the source is unknown', async () => {
+    await store.touchSource(state({ bootstrapped: false }));
+    expect(await store.getSourceState(SOURCE)).toEqual(state({ bootstrapped: false }));
+  });
+});
+
+describe('commit', () => {
+  it('persists packages, events, outbox and state', async () => {
+    addSub(shim, 'sub1');
+    const p = pkg('Owner-Name');
+    const e = ev(p);
+    await store.commit(batch({ packages: [p], events: [e], outbox: [ob('sub1', e)] }));
+    expect(count(shim, 'packages')).toBe(1);
+    expect(count(shim, 'events')).toBe(1);
+    expect(count(shim, 'outbox')).toBe(1);
+    expect(shim.batchSizes).toEqual([4]);
+  });
+
+  it('stores release_key on events', async () => {
+    const e = ev(pkg('Some-Mod_Name'));
+    await store.commit(batch({ packages: [e.pkg], events: [e] }));
+    const row = shim.db.prepare('SELECT release_key FROM events').get() as { release_key: string };
+    expect(row.release_key).toBe('some|modname|1.0.0');
+  });
+
+  it('is one atomic batch: a failing package statement rolls back events, outbox and cursor', async () => {
+    await store.commit(batch({ state: state({ cursor: 'old' }) }));
+    const good = pkg('Owner-Good');
+    const e = ev(good);
+    const bad = { ...pkg('Owner-Bad'), version: null as unknown as string };
+    await expect(
+      store.commit(batch({ packages: [good, bad], events: [e], outbox: [ob('sub1', e)], state: state({ cursor: 'new' }) })),
+    ).rejects.toThrow();
+    expect(count(shim, 'packages')).toBe(0);
+    expect(count(shim, 'events')).toBe(0);
+    expect(count(shim, 'outbox')).toBe(0);
+    expect((await store.getSourceState(SOURCE))?.cursor).toBe('old');
+  });
+
+  it('rolls everything back when the final (cursor) statement fails', async () => {
+    const p = pkg('Owner-Name');
+    const e = ev(p);
+    shim.failWhen = (sql) => sql.includes('INTO sources');
+    await expect(store.commit(batch({ packages: [p], events: [e], outbox: [ob('sub1', e)] }))).rejects.toThrow('injected');
+    expect(count(shim, 'packages') + count(shim, 'events') + count(shim, 'outbox') + count(shim, 'sources')).toBe(0);
+  });
+
+  it('is idempotent on re-commit (INSERT OR IGNORE) and keeps delivered state untouched', async () => {
+    const p = pkg('Owner-Name');
+    const e = ev(p, { changelog: 'first' });
+    const b = batch({ packages: [p], events: [e], outbox: [ob('sub1', e)] });
+    await store.commit(b);
+    await store.markFailed(ob('sub1', e).id, '2026-09-18T11:00:00.000Z', false);
+    await store.commit({ ...b, events: [{ ...e, changelog: 'second' }] });
+    expect(count(shim, 'events')).toBe(1);
+    expect(count(shim, 'outbox')).toBe(1);
+    const row = shim.db.prepare('SELECT changelog FROM events').get() as { changelog: string };
+    expect(row.changelog).toBe('first');
+    const o = shim.db.prepare('SELECT attempts, next_attempt_at FROM outbox').get() as { attempts: number; next_attempt_at: string };
+    expect(o).toEqual({ attempts: 1, next_attempt_at: '2026-09-18T11:00:00.000Z' });
+  });
+
+  it('upserts packages on conflict', async () => {
+    await store.commit(batch({ packages: [pkg('Owner-Name')] }));
+    await store.commit(batch({ packages: [pkg('Owner-Name', { version: '2.0.0', description: 'changed', categories: ['X'] })] }));
+    const map = await store.getAllKnownVersions(SOURCE);
+    expect(map.get('Owner-Name')).toBe('2.0.0');
+    expect(count(shim, 'packages')).toBe(1);
+  });
+
+  it('keeps richer stored fields and sticky NSFW/deprecated flags when a later snapshot lacks them', async () => {
+    await store.commit(batch({ packages: [pkg('Owner-Name', { isNsfw: true, isDeprecated: true })] }));
+    await store.commit(
+      batch({
+        packages: [pkg('Owner-Name', { version: '2.0.0', iconUrl: null, description: null, sizeBytes: null, categories: [], isNsfw: false, isDeprecated: false })],
+      }),
+    );
+    const row = shim.db.prepare('SELECT * FROM packages WHERE package_id = ?').get('Owner-Name') as Record<string, unknown>;
+    expect(row).toMatchObject({
+      latest_version: '2.0.0',
+      icon_url: 'https://cdn.example/icon.png',
+      description: 'A mod',
+      size_bytes: 1234,
+      categories: '["Tools","Misc"]',
+      is_nsfw: 1,
+      is_deprecated: 1,
+    });
+  });
+
+  it('tolerates duplicate package ids in one batch (last wins)', async () => {
+    await store.commit(batch({ packages: [pkg('Owner-Name'), pkg('Owner-Name', { version: '3.0.0' })] }));
+    expect((await store.getAllKnownVersions(SOURCE)).get('Owner-Name')).toBe('3.0.0');
+  });
+
+  it('rejects a batch that mixes sources', async () => {
+    await expect(store.commit(batch({ packages: [pkg('Owner-Name', { source: 'hexium:valheim' })] }))).rejects.toThrow('mixes sources');
+    expect(shim.batchSizes).toEqual([]);
+  });
+
+  it('handles an empty batch (state only)', async () => {
+    await store.commit(batch());
+    expect(shim.batchSizes).toEqual([1]);
+  });
+
+  it('splits an oversized commit; cursor lands only in the final batch and a crash leaves state safe', async () => {
+    const pkgs = Array.from({ length: 2500 }, (_, i) => pkg(`Owner-Mod${i}`));
+    const events = pkgs.map((p) => ev(p));
+    const outbox = events.map((e) => ob('sub1', e));
+    shim.failWhen = (sql) => sql.includes('INTO sources');
+    await expect(store.commit(batch({ packages: pkgs, events, outbox }))).rejects.toThrow('injected');
+    expect(shim.batchSizes.length).toBeGreaterThan(1);
+    expect(count(shim, 'sources')).toBe(0);
+    expect(count(shim, 'events')).toBeGreaterThan(0);
+
+    shim.failWhen = null;
+    shim.batchSizes.length = 0;
+    await store.commit(batch({ packages: pkgs, events, outbox }));
+    expect(Math.max(...shim.batchSizes)).toBeLessThanOrEqual(100);
+    expect(count(shim, 'events')).toBe(2500);
+    expect(count(shim, 'outbox')).toBe(2500);
+    expect(count(shim, 'packages')).toBe(2500);
+    expect(await store.getSourceState(SOURCE)).not.toBeNull();
+  });
+});
+
+describe('getKnownVersions', () => {
+  it('returns only known ids', async () => {
+    await store.commit(batch({ packages: [pkg('A-One'), pkg('B-Two', { version: '2.0.0' })] }));
+    const map = await store.getKnownVersions(SOURCE, ['A-One', 'B-Two', 'C-Missing']);
+    expect([...map.entries()].sort()).toEqual([
+      ['A-One', '1.0.0'],
+      ['B-Two', '2.0.0'],
+    ]);
+  });
+
+  it('scopes to the source', async () => {
+    await store.commit(batch({ packages: [pkg('A-One')] }));
+    expect((await store.getKnownVersions('hexium:valheim', ['A-One'])).size).toBe(0);
+  });
+
+  it('returns an empty map without querying for no ids', async () => {
+    expect((await store.getKnownVersions(SOURCE, [])).size).toBe(0);
+    expect(shim.preparedSql).toEqual([]);
+  });
+
+  it('chunks more than 100 ids under the bound-parameter limit in a single batch call', async () => {
+    const pkgs = Array.from({ length: 250 }, (_, i) => pkg(`Owner-Mod${i}`));
+    await store.commit(batch({ packages: pkgs }));
+    shim.preparedSql.length = 0;
+    shim.batchSizes.length = 0;
+    const map = await store.getKnownVersions(SOURCE, [...pkgs.map((p) => p.packageId), 'Owner-Nope']);
+    expect(map.size).toBe(250);
+    expect(shim.batchSizes).toEqual([3]);
+    for (const sql of shim.preparedSql) {
+      expect((sql.match(/\?/g) ?? []).length).toBeLessThanOrEqual(100);
+    }
+  });
+});
+
+describe('getAllKnownVersions', () => {
+  it('returns every package of the source', async () => {
+    await store.commit(batch({ packages: [pkg('A-One'), pkg('B-Two')] }));
+    expect((await store.getAllKnownVersions(SOURCE)).size).toBe(2);
+    expect((await store.getAllKnownVersions('nexus:valheim')).size).toBe(0);
+  });
+});
+
+describe('listSubscriptions', () => {
+  it('parses filters, applies default interval and skips disabled', async () => {
+    addSub(shim, 's1', { filter: '{"kinds":["new"],"allowNsfw":true}', interval: null });
+    addSub(shim, 's2', { enabled: 0 });
+    const subs = await store.listSubscriptions();
+    expect(subs).toEqual([
+      {
+        id: 's1',
+        guildId: '123456789012345678',
+        webhookUrl: 'https://discord.com/api/webhooks/123456789012345678/tok-s1',
+        filter: { kinds: ['new'], allowNsfw: true },
+        mode: 'digest',
+        digestIntervalMin: 30,
+        enabled: true,
+      },
+    ]);
+  });
+});
+
+describe('takeDue', () => {
+  async function seed(): Promise<{ events: ModEvent[] }> {
+    addSub(shim, 'sub1');
+    const events = ['A-One', 'B-Two', 'C-Three'].map((id, i) =>
+      ev(pkg(id, { version: `1.0.${i}`, categories: ['Cat'] }), {
+        versionFrom: i === 0 ? null : '0.9.0',
+        kind: i === 0 ? 'new' : 'update',
+        changelog: `notes ${id}`,
+        changelogUrl: `https://cl/${id}`,
+      }),
+    );
+    await store.commit(
+      batch({
+        packages: events.map((e) => e.pkg),
+        events,
+        outbox: [
+          ob('sub1', events[0]!, { nextAttemptAt: '2026-09-18T10:03:00.000Z' }),
+          ob('sub1', events[1]!, { nextAttemptAt: '2026-09-18T10:01:00.000Z' }),
+          ob('sub1', events[2]!, { nextAttemptAt: '2026-09-18T10:02:00.000Z' }),
+        ],
+      }),
+    );
+    return { events };
+  }
+
+  it('joins everything, oldest first', async () => {
+    const { events } = await seed();
+    const due = await store.takeDue('2026-09-18T12:00:00.000Z', 10);
+    expect(due.map((d) => d.event.pkg.packageId)).toEqual(['B-Two', 'C-Three', 'A-One']);
+    const first = due[0]!;
+    expect(first.row).toEqual({
+      id: outboxId('sub1', events[1]!.id),
+      subscriptionId: 'sub1',
+      eventId: events[1]!.id,
+      attempts: 0,
+      nextAttemptAt: '2026-09-18T10:01:00.000Z',
+    });
+    expect(first.subscription.webhookUrl).toContain('/webhooks/');
+    expect(first.event).toEqual({
+      ...events[1]!,
+      pkg: { ...events[1]!.pkg, version: '1.0.1' },
+    });
+  });
+
+  it('respects the limit and the due time', async () => {
+    await seed();
+    expect((await store.takeDue('2026-09-18T12:00:00.000Z', 2)).length).toBe(2);
+    expect((await store.takeDue('2026-09-18T10:01:30.000Z', 10)).map((d) => d.event.pkg.packageId)).toEqual(['B-Two']);
+    expect(await store.takeDue('2026-09-18T10:00:00.000Z', 10)).toEqual([]);
+  });
+
+  it('excludes parked rows and disabled subscriptions', async () => {
+    const { events } = await seed();
+    await store.markFailed(outboxId('sub1', events[1]!.id), '2026-09-18T10:01:00.000Z', true);
+    expect((await store.takeDue('2026-09-18T12:00:00.000Z', 10)).length).toBe(2);
+    shim.db.exec("UPDATE subscriptions SET enabled = 0 WHERE id = 'sub1'");
+    expect(await store.takeDue('2026-09-18T12:00:00.000Z', 10)).toEqual([]);
+  });
+
+  it('maps package fields faithfully', async () => {
+    const { events } = await seed();
+    const [d] = await store.takeDue('2026-09-18T12:00:00.000Z', 1);
+    const p = d!.event.pkg;
+    expect(p).toEqual({ ...events[1]!.pkg, version: '1.0.1' });
+    expect(p.categories).toEqual(['Cat']);
+    expect(p.isNsfw).toBe(false);
+  });
+});
+
+describe('markDelivered / markFailed / setEventChangelog', () => {
+  it('markDelivered removes rows and chunks large id lists', async () => {
+    const pkgs = Array.from({ length: 250 }, (_, i) => pkg(`Owner-Mod${i}`));
+    const events = pkgs.map((p) => ev(p));
+    const outbox = events.map((e) => ob('sub1', e));
+    await store.commit(batch({ packages: pkgs, events, outbox }));
+    shim.preparedSql.length = 0;
+    await store.markDelivered(outbox.map((o) => o.id));
+    expect(count(shim, 'outbox')).toBe(0);
+    expect(shim.preparedSql.length).toBe(3);
+    await expect(store.markDelivered([])).resolves.toBeUndefined();
+  });
+
+  it('markFailed bumps attempts and reschedules', async () => {
+    const e = ev(pkg('A-One'));
+    const o = ob('sub1', e);
+    await store.commit(batch({ packages: [e.pkg], events: [e], outbox: [o] }));
+    await store.markFailed(o.id, '2026-09-18T10:05:00.000Z', false);
+    await store.markFailed(o.id, '2026-09-18T10:10:00.000Z', false);
+    expect(shim.db.prepare('SELECT attempts, next_attempt_at, parked FROM outbox').get()).toEqual({
+      attempts: 2,
+      next_attempt_at: '2026-09-18T10:10:00.000Z',
+      parked: 0,
+    });
+  });
+
+  it('markFailed parks the row', async () => {
+    const e = ev(pkg('A-One'));
+    const o = ob('sub1', e);
+    await store.commit(batch({ packages: [e.pkg], events: [e], outbox: [o] }));
+    await store.markFailed(o.id, '2026-09-18T10:05:00.000Z', true);
+    expect((shim.db.prepare('SELECT parked FROM outbox').get() as { parked: number }).parked).toBe(1);
+  });
+
+  it('setEventChangelog updates the event', async () => {
+    const e = ev(pkg('A-One'));
+    await store.commit(batch({ packages: [e.pkg], events: [e] }));
+    await store.setEventChangelog(e.id, 'notes', 'https://cl');
+    expect(shim.db.prepare('SELECT changelog, changelog_url FROM events').get()).toEqual({ changelog: 'notes', changelog_url: 'https://cl' });
+    await store.setEventChangelog(e.id, null, null);
+    expect(shim.db.prepare('SELECT changelog, changelog_url FROM events').get()).toEqual({ changelog: null, changelog_url: null });
+  });
+});
+
+describe('recentEventsByReleaseKey', () => {
+  it('finds the same release across stores within the window', async () => {
+    const a = pkg('Some-Mod', { source: 'thunderstore:valheim', store: 'thunderstore' });
+    const b = pkg('some-mod', { source: 'hexium:valheim', store: 'hexium', url: 'https://hexium/some-mod' });
+    const c = pkg('Some-Mod', { version: '2.0.0' });
+    const ea = ev(a, { createdAt: '2026-09-18T10:00:00.000Z' });
+    const eb = ev(b, { createdAt: '2026-09-18T10:05:00.000Z' });
+    const ec = ev(c, { createdAt: '2026-09-18T10:06:00.000Z' });
+    await store.commit(batch({ packages: [a, c], events: [ea, ec] }));
+    await store.commit(batch({ source: 'hexium:valheim', packages: [b], events: [eb], state: state({ id: 'hexium:valheim' }) }));
+
+    const key = 'some|mod|1.0.0';
+    const all = await store.recentEventsByReleaseKey(key, '2026-09-18T00:00:00.000Z');
+    expect(all.map((e) => e.pkg.store)).toEqual(['thunderstore', 'hexium']);
+    expect(all[1]!.pkg.url).toBe('https://hexium/some-mod');
+    const later = await store.recentEventsByReleaseKey(key, '2026-09-18T10:01:00.000Z');
+    expect(later.map((e) => e.pkg.store)).toEqual(['hexium']);
+    expect(await store.recentEventsByReleaseKey('nope|nope|1', '2026-09-18T00:00:00.000Z')).toEqual([]);
+  });
+});
+
+describe('EXPLAIN QUERY PLAN', () => {
+  it('every query the store issues is index-backed (no SCAN)', async () => {
+    addSub(shim, 'sub1');
+    const p = pkg('Owner-Name');
+    const e = ev(p);
+    const o = ob('sub1', e);
+    await store.getSourceState(SOURCE);
+    await store.commit(batch({ packages: [p], events: [e], outbox: [o] }));
+    await store.touchSource(state());
+    await store.getKnownVersions(SOURCE, ['Owner-Name']);
+    await store.getAllKnownVersions(SOURCE);
+    await store.listSubscriptions();
+    await store.recentEventsByReleaseKey('k', '2026-01-01T00:00:00.000Z');
+    await store.takeDue('2026-09-19T00:00:00.000Z', 10);
+    await store.markFailed(o.id, '2026-09-19T00:00:00.000Z', false);
+    await store.setEventChangelog(e.id, 'x', null);
+    await store.markDelivered([o.id]);
+
+    const distinct = [...new Set(shim.preparedSql)];
+    expect(distinct.length).toBeGreaterThanOrEqual(11);
+
+    const failures: string[] = [];
+    for (const sql of distinct) {
+      const plan = shim.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as { detail: string }[];
+      const details = plan.map((r) => r.detail).filter((d) => !/CONSTANT ROW/.test(d));
+      for (const d of details) {
+        if (/^SCAN /.test(d)) failures.push(`${sql.slice(0, 60)} => ${d}`);
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+
+  it('takeDue drives off the partial due index without a sort', async () => {
+    await store.takeDue('2026-09-19T00:00:00.000Z', 10);
+    const sql = shim.preparedSql.find((s) => s.includes('FROM outbox o'))!;
+    const plan = (shim.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as { detail: string }[]).map((r) => r.detail);
+    expect(plan.some((d) => d.includes('SEARCH o USING INDEX idx_outbox_due'))).toBe(true);
+    expect(plan.some((d) => d.includes('TEMP B-TREE'))).toBe(false);
+  });
+
+  it('recentEventsByReleaseKey uses the release index', async () => {
+    await store.recentEventsByReleaseKey('k', 'z');
+    const sql = shim.preparedSql.find((s) => s.includes('e.release_key'))!;
+    const plan = (shim.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as { detail: string }[]).map((r) => r.detail);
+    expect(plan.some((d) => d.includes('idx_events_release (release_key=? AND created_at>?)'))).toBe(true);
+  });
+});
