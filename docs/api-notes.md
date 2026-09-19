@@ -32,15 +32,23 @@ Item fields **[source]**: `namespace`, `name`, `description`, `icon_url`,
 `is_deprecated`, `is_nsfw`, `is_pinned`, `community_identifier`.
 
 `latest_version_number`, `install_url`, `download_url` are marked optional in
-their schema with a TODO saying the backend serializer is still rolling out and
-the frontend deployed first. **Verify live whether the version number is
-present.** If absent, resolve it with:
+their schema. **[live]** (2026-09) the listing does **not** return the version
+number; `categories` are objects (`{id, name, slug}`), and the default query is
+`nsfw=False&deprecated=False`, so NSFW and deprecated packages never appear.
+Pinned packages sit at the head with an old `last_updated`. Resolve the version
+with:
 
 ```
 GET /api/cyberstorm/package/{namespace}/{name}/versions/
 ```
 
-one request per changed package (a handful per tick).
+one request per changed package, capped per tick. **[live]** The response is an
+array of `{version_number, datetime_created, download_url, ...}` in no
+guaranteed order — take the maximum `datetime_created`.
+
+**[live]** Conditional requests: no `ETag`, but `Last-Modified` is sent and
+`If-Modified-Since` returns a real 304. `Cache-Control: public, max-age=60`.
+The adapter stores the validator in the `etag` slot as `lm:<Last-Modified>`.
 
 This is not in the public Swagger; r2modman calls parts of the cyberstorm API
 undocumented. It is what the production site runs on, but treat breakage as a
@@ -74,16 +82,19 @@ array of chunk URLs; each chunk is gzipped JSON of packages with
 Thunderstore themselves recommend against it for large communities; it has hit
 response size limits for e.g. `riskofrain2`. Do not use from a Worker.
 
-**[assumed]** `/api/experimental/package-index/` probably exists here too (it
-does on Hexium). If so, use it for reconciliation exactly as on Hexium.
+**[live]** `/api/experimental/package-index/` 302-redirects to an 83 MB gzipped
+JSON covering every game; the per-community
+`/c/{community}/api/v1/package-listing-index/` is 13 chunks of ~1.3 MB gzip
+(~14 MB raw) each. Neither is workable from a Worker, so Thunderstore has no
+reconciliation.
 
 ---
 
 ## Hexium
 
-Base: `https://{game}.hexium.gg` for listings, `https://hexium.gg` for
-`/api/experimental/package/...` per Gale. The asymmetry is real — do not
-assume one host for both.
+Base: `https://{game}.hexium.gg` for the listing, index, package detail and
+changelog. `hexium.gg` also serves changelogs but cannot resolve
+`frontend/p/...` (404). Gale uses the bare host for `/api/experimental/package/...`.
 
 ### Cyberstorm
 
@@ -140,17 +151,26 @@ Described as "Newline-delimited JSON stream of all packages (latest version per
 mod)". NDJSON, one line per package, no version history. Valheim has 1062
 packages.
 
-**[assumed]** Line shape — verify with `curl … | head -1`. Expected to carry
-`date_updated` and a version.
+**[live]** Line shape:
 
-Read it without parsing the whole thing: one pass over the raw text with
-`indexOf('"date_updated":"', pos)`, compare the following 24 characters to the
-stored cursor lexicographically (ISO-8601 sorts correctly as a string), and
-`JSON.parse` only the lines that match. Do not `split('\n')` — that allocates
-a thousand strings for nothing.
+```
+{"namespace","name","version_number","file_format","file_size","dependencies":[],"suggestions":[]}
+```
 
-If served with `Content-Encoding: gzip`, `fetch` decompresses natively, outside
-the JS CPU budget.
+There is **no `date_updated`**, no description, icon, categories or NSFW flag.
+Valheim: 1063 lines, ~377 KB, chunked `application/x-ndjson`, no trailing
+newline, **no `ETag` or `Last-Modified`**. Serve it from `{game}.hexium.gg`
+(Valheim only); `hexium.gg` returns every game merged (1116 lines).
+
+So updates are detected by comparing `version_number` against the stored latest
+version, not by a timestamp cursor. Read the body with a single `indexOf` pass —
+no `split('
+')`, no full `JSON.parse`. A real scan takes ~1.5 ms cold.
+Metadata for changed packages comes from `frontend/p/{namespace}/{name}/`,
+capped per tick.
+
+Because the index carries no NSFW/deprecated flags, those flags are sticky on
+upsert (`old OR new`) and unknown for packages first seen via the index.
 
 ### Changelog, per version
 

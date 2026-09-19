@@ -59,17 +59,18 @@ undocumented sort parameters were tested and are ignored. So Hexium runs on a
 - every tick: `frontend/packages?page=1` — 20 items, cheap, authoritative for
   new packages
 - every 3rd tick (~15 min): `package-index` NDJSON scan — the only way to see
-  updates to existing packages
+  updates to existing packages. The index has no timestamps, so the scan
+  compares each line's `version_number` with the stored latest version and
+  reports only the packages whose version differs
 
 Updates on Hexium therefore arrive with up to 15 minutes of latency. That is
 acceptable for a digest that fires every 30 minutes anyway, and it cuts index
-traffic from 288 to 96 fetches a day. Send `If-None-Match` — if Hexium honours
-it, most of those cost nothing at all.
+traffic from 288 to 96 fetches a day. Neither the listing nor the index honours
+`If-None-Match` (no `ETag`, no `Last-Modified`), so every scan is a full
+~380 KB download; do not raise the cadence without measuring.
 
-Do not raise the index cadence to every tick without measuring: ~1000 lines of
-NDJSON is on the order of several hundred kilobytes, and 288 pulls a day of it
-is a noticeable amount of someone else's bandwidth for no latency gain that
-survives the digest interval.
+On cold start the index is also fetched once to seed every package silently,
+otherwise the first reconciliation would announce the whole catalogue as new.
 
 ### Reconciliation
 
@@ -310,15 +311,19 @@ for why that matters for Nexus specifically.
 
 ## Open questions
 
-1. ~~Sorted listing on Hexium~~ — resolved, negative. The undocumented sort
-   parameters are ignored. Hexium runs on the split cadence above.
-   Size, encoding and `ETag` support of `package-index` still need measuring
-   before the cadence is final.
-2. Does Thunderstore's cyberstorm listing currently return
-   `latest_version_number`? If not, one extra request per changed package.
-3. Exact line shape of `/api/experimental/package-index/` on Hexium, and
-   whether Thunderstore exposes the same endpoint.
-4. Does either store honour `If-None-Match` on the listing endpoints?
-5. Final degradation ladder formats.
-6. Measured CPU per tick — needs a real deployment to confirm the 10 ms budget
-   holds with NDJSON scanning.
+Resolved live in 2026-09 (see `docs/api-notes.md`):
+
+- Hexium sorted listing — negative; split cadence above.
+- Thunderstore cyberstorm listing has no `latest_version_number`; versions come
+  from `/versions/`, capped per tick.
+- Hexium `package-index` line shape — no `date_updated`, version comparison.
+- Conditional requests — Thunderstore supports `If-Modified-Since` only,
+  Hexium supports neither.
+
+Still open:
+
+1. Final degradation ladder formats — implemented in `src/render`; L3 (grouped
+   by author) saves little over L2 because URLs dominate.
+2. Measured CPU per tick — needs a real deployment to confirm the 10 ms budget.
+3. Nexus response shapes are unverified (no API key during development).
+4. Persisting `alsoOn` for a release already delivered on another store.
