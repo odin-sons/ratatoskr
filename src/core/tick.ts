@@ -15,6 +15,7 @@ import { drainOutbox, type Renderer } from './drain.ts';
 import { compileFilter } from './filter.ts';
 import { fanOut, type CompiledSubscription } from './fanout.ts';
 import type { Clock, PollContext, Sender, SourceAdapter, Store } from './ports.ts';
+import { sanitizeLogText } from './report.ts';
 import type { AppConfig, ModEvent, PackageSnapshot, SourceId, SourceState } from './types.ts';
 
 export type { Renderer } from './drain.ts';
@@ -156,7 +157,7 @@ async function purgeDelivered(deps: TickDeps, now: Date): Promise<number> {
   try {
     return await deps.store.purgeDelivered(cutoff, OUTBOX_PURGE_BATCH);
   } catch (err) {
-    console.warn(`purge of delivered outbox rows failed: ${errorMessage(err)}`);
+    console.warn(`purge of delivered outbox rows failed: ${sanitizeLogText(errorMessage(err))}`);
     return 0;
   }
 }
@@ -270,9 +271,11 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
       : snapshots.length === 0
         ? new Map<string, string>()
         : await store.getKnownVersions(id, [...new Set(snapshots.map((s) => s.packageId))]);
-  const { events } = diffSnapshots(known, snapshots, now);
+  const { events: detected } = diffSnapshots(known, snapshots, now);
+  const seen = detected.length === 0 ? new Set<string>() : await store.existingEventIds(detected.map((e) => e.id));
+  const events = seen.size === 0 ? detected : detected.filter((e) => !seen.has(e.id));
   const { rows, detailedEventIds } = await fanOut(events, run.subs, store, now);
-  await store.commit({ source: id, packages: events.map((e) => e.pkg), events, outbox: rows, state: nextState });
+  await store.commit({ source: id, packages: detected.map((e) => e.pkg), events, outbox: rows, state: nextState });
 
   const jobs = events.filter((e) => detailedEventIds.has(e.id)).map((event) => ({ adapter, ctx, event }));
   return { report: { status: 'ok', events: events.length }, jobs, fetched: true };

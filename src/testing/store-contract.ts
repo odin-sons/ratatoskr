@@ -74,7 +74,7 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
         const e = event(1);
         const r = row(SUB, e);
         await store.commit(batch([e], [r]));
-        await store.markFailed(r.id, '2026-09-19T11:00:00.000Z', false);
+        await store.markFailedMany([r.id], '2026-09-19T11:00:00.000Z', false);
         await store.commit(batch([e], [r]));
         const [due] = await store.takeDue(NOW, 10);
         expect(due!.row).toMatchObject({ attempts: 1, nextAttemptAt: '2026-09-19T11:00:00.000Z' });
@@ -157,8 +157,8 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
         const { store } = await setup();
         const [a, b, c] = [event(1), event(2), event(3)] as [ModEvent, ModEvent, ModEvent];
         await store.commit(batch([a, b, c], [row(SUB, a), row(SUB, b), row(SUB, c)]));
-        await store.markFailed(row(SUB, a).id, T0, true);
-        for (let i = 0; i < OUTBOX_MAX_ATTEMPTS; i++) await store.markFailed(row(SUB, b).id, T0, false);
+        await store.markFailedMany([row(SUB, a).id], T0, true);
+        for (let i = 0; i < OUTBOX_MAX_ATTEMPTS; i++) await store.markFailedMany([row(SUB, b).id], T0, false);
         expect((await store.takeDue(NOW, 10)).map((x) => x.event.id)).toEqual([c.id]);
       });
 
@@ -190,14 +190,14 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
       });
     });
 
-    describe('markFailed', () => {
+    describe('markFailedMany', () => {
       it('bumps attempts and reschedules the row', async () => {
         const { store } = await setup();
         const e = event(1);
         const r = row(SUB, e);
         await store.commit(batch([e], [r]));
-        await store.markFailed(r.id, '2026-09-19T11:00:00.000Z', false);
-        await store.markFailed(r.id, '2026-09-19T13:00:00.000Z', false);
+        await store.markFailedMany([r.id], '2026-09-19T11:00:00.000Z', false);
+        await store.markFailedMany([r.id], '2026-09-19T13:00:00.000Z', false);
         expect(await store.takeDue(NOW, 10)).toEqual([]);
         const [due] = await store.takeDue('2026-09-19T13:00:00.000Z', 10);
         expect(due!.row).toMatchObject({ attempts: 2, nextAttemptAt: '2026-09-19T13:00:00.000Z' });
@@ -208,13 +208,126 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
         const e = event(1);
         const r = row(SUB, e);
         await store.commit(batch([e], [r]));
-        await store.markFailed(r.id, T0, true);
+        await store.markFailedMany([r.id], T0, true);
         expect(await store.takeDue('2099-01-01T00:00:00.000Z', 10)).toEqual([]);
       });
 
       it('ignores an unknown row id', async () => {
         const { store } = await setup();
-        await expect(store.markFailed('missing', T0, false)).resolves.toBeUndefined();
+        await expect(store.markFailedMany(['missing'], T0, false)).resolves.toBeUndefined();
+      });
+
+      it('accepts an empty list', async () => {
+        const { store } = await setup();
+        await expect(store.markFailedMany([], T0, false)).resolves.toBeUndefined();
+      });
+
+      it('bumps every listed row once and leaves the others alone', async () => {
+        const { store } = await setup();
+        const [a, b, c] = [event(1), event(2), event(3)] as [ModEvent, ModEvent, ModEvent];
+        await store.commit(batch([a, b, c], [row(SUB, a), row(SUB, b), row(SUB, c)]));
+        await store.markFailedMany([row(SUB, a).id, row(SUB, b).id, 'missing'], '2026-09-19T13:00:00.000Z', false);
+        const due = await store.takeDue('2026-09-19T13:00:00.000Z', 10);
+        const byEvent = new Map(due.map((d) => [d.event.id, d.row]));
+        expect(byEvent.get(a.id)).toMatchObject({ attempts: 1, nextAttemptAt: '2026-09-19T13:00:00.000Z' });
+        expect(byEvent.get(b.id)).toMatchObject({ attempts: 1, nextAttemptAt: '2026-09-19T13:00:00.000Z' });
+        expect(byEvent.get(c.id)).toMatchObject({ attempts: 0, nextAttemptAt: T0 });
+      });
+
+      it('parks every listed row', async () => {
+        const { store } = await setup();
+        const [a, b] = [event(1), event(2)] as [ModEvent, ModEvent];
+        await store.commit(batch([a, b], [row(SUB, a), row(SUB, b)]));
+        await store.markFailedMany([row(SUB, a).id, row(SUB, b).id], T0, true);
+        expect(await store.takeDue('2099-01-01T00:00:00.000Z', 10)).toEqual([]);
+      });
+
+      it('handles more ids than one statement can bind, bumping each row exactly once', async () => {
+        const { store } = await setup();
+        const n = CLOUDFLARE.d1MaxBoundParams * 2 + 7;
+        const events = Array.from({ length: n }, (_, i) => event(i));
+        const outbox = events.map((e) => row(SUB, e));
+        await store.commit(batch(events, outbox));
+        await store.markFailedMany(outbox.map((r) => r.id), '2026-09-19T13:00:00.000Z', false);
+        const due = await store.takeDue('2026-09-19T13:00:00.000Z', n);
+        expect(due).toHaveLength(n);
+        expect(due.every((d) => d.row.attempts === 1)).toBe(true);
+      });
+    });
+
+    describe('rescheduleRows', () => {
+      it('accepts an empty list and unknown ids', async () => {
+        const { store } = await setup();
+        await expect(store.rescheduleRows([], NOW)).resolves.toBeUndefined();
+        await expect(store.rescheduleRows(['missing'], NOW)).resolves.toBeUndefined();
+      });
+
+      it('moves the listed rows without bumping attempts', async () => {
+        const { store } = await setup();
+        const [a, b] = [event(1), event(2)] as [ModEvent, ModEvent];
+        await store.commit(batch([a, b], [row(SUB, a), row(SUB, b)]));
+        await store.markFailedMany([row(SUB, a).id], T0, false);
+        await store.rescheduleRows([row(SUB, a).id], '2026-09-19T13:00:00.000Z');
+        expect((await store.takeDue(NOW, 10)).map((d) => d.event.id)).toEqual([b.id]);
+        const due = await store.takeDue('2026-09-19T13:00:00.000Z', 10);
+        expect(due.find((d) => d.event.id === a.id)!.row).toMatchObject({ attempts: 1, nextAttemptAt: '2026-09-19T13:00:00.000Z' });
+      });
+
+      it('leaves delivered and parked rows as they are', async () => {
+        const { store } = await setup();
+        const [a, b] = [event(1), event(2)] as [ModEvent, ModEvent];
+        await store.commit(batch([a, b], [row(SUB, a), row(SUB, b)]));
+        await store.markDelivered([row(SUB, a).id], NOW);
+        await store.markFailedMany([row(SUB, b).id], T0, true);
+        await store.rescheduleRows([row(SUB, a).id, row(SUB, b).id], '2026-09-19T13:00:00.000Z');
+        expect(await store.takeDue('2099-01-01T00:00:00.000Z', 10)).toEqual([]);
+      });
+
+      it('handles more ids than one statement can bind', async () => {
+        const { store } = await setup();
+        const n = CLOUDFLARE.d1MaxBoundParams * 2 + 7;
+        const events = Array.from({ length: n }, (_, i) => event(i));
+        const outbox = events.map((e) => row(SUB, e));
+        await store.commit(batch(events, outbox));
+        await store.rescheduleRows(outbox.map((r) => r.id), '2026-09-19T13:00:00.000Z');
+        expect(await store.takeDue(NOW, n)).toEqual([]);
+        const due = await store.takeDue('2026-09-19T13:00:00.000Z', n);
+        expect(due).toHaveLength(n);
+        expect(due.every((d) => d.row.attempts === 0)).toBe(true);
+      });
+    });
+
+    describe('existingEventIds', () => {
+      it('returns the requested ids that exist and ignores the rest', async () => {
+        const { store } = await setup();
+        const [a, b, c] = [event(1), event(2), event(3)] as [ModEvent, ModEvent, ModEvent];
+        await store.commit(batch([a, b], []));
+        expect(await store.existingEventIds([a.id, b.id, c.id, 'missing'])).toEqual(new Set([a.id, b.id]));
+      });
+
+      it('returns an empty set for no ids', async () => {
+        const { store } = await setup();
+        expect((await store.existingEventIds([])).size).toBe(0);
+      });
+
+      it('still knows an event after its outbox rows were purged', async () => {
+        const { store } = await setup();
+        const a = event(1);
+        await store.commit(batch([a], [row(SUB, a)]));
+        await store.markDelivered([row(SUB, a).id], '2026-09-01T00:00:00.000Z');
+        expect(await store.purgeDelivered('2026-09-10T00:00:00.000Z', 100)).toBe(1);
+        expect(await store.existingEventIds([a.id])).toEqual(new Set([a.id]));
+      });
+
+      it('answers more ids than one statement can bind, duplicates included', async () => {
+        const { store } = await setup();
+        const n = CLOUDFLARE.d1MaxBoundParams * 2 + 5;
+        const events = Array.from({ length: n }, (_, i) => event(i));
+        await store.commit(batch(events, []));
+        const ids = events.map((e) => e.id);
+        const found = await store.existingEventIds([...ids, ids[0]!, 'missing']);
+        expect(found.size).toBe(n);
+        expect(found.has(ids[n - 1]!)).toBe(true);
       });
     });
 
@@ -294,7 +407,7 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
         await store.commit(batch(events, events.map((e) => row(SUB, e))));
         await store.markDelivered([row(SUB, old).id], new Date(Date.parse(NOW) - 10 * DAY_MS).toISOString());
         await store.markDelivered([row(SUB, recent).id], new Date(Date.parse(NOW) - DAY_MS).toISOString());
-        await store.markFailed(row(SUB, failed).id, T0, true);
+        await store.markFailedMany([row(SUB, failed).id], T0, true);
 
         const cutoff = new Date(Date.parse(NOW) - 7 * DAY_MS).toISOString();
         expect(await store.purgeDelivered(cutoff, 100)).toBe(1);

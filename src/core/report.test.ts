@@ -99,4 +99,29 @@ describe('sanitizeLogText', () => {
     expect(sanitizeLogText('a\n  b http://x.invalid/p?q=1 c')).toBe('a b [url] c');
     expect(sanitizeLogText('z'.repeat(MAX_LOGGED_TEXT_CHARS + 50))).toHaveLength(MAX_LOGGED_TEXT_CHARS);
   });
+
+  it.each([
+    ['upper-case scheme', 'failed HTTPS://DISCORD.COM/API/WEBHOOKS/1/SecretTok again'],
+    ['mixed-case scheme', 'failed Https://discord.com/api/webhooks/1/SecretTok again'],
+    ['scheme-less host', 'failed discord.com/api/webhooks/123456789012345678/SecretTok again'],
+    ['scheme-less legacy host', 'failed discordapp.com/api/webhooks/123456789012345678/SecretTok again'],
+    ['upper-case scheme-less path', 'failed DISCORD.COM/API/WEBHOOKS/1/SecretTok again'],
+    ['bare api path', 'failed /api/webhooks/1/SecretTok again'],
+    ['versioned api path', 'failed POST api/v10/webhooks/1/SecretTok again'],
+    ['path without api', 'failed webhooks/1/SecretTok again'],
+    ['query after the token', 'failed discord.com/api/webhooks/1/SecretTok?wait=true&thread_id=9 again'],
+    ['id and token pair', 'failed 123456789012345678/AbCdEfGhIjKlMnOpQrStUvWxSecretTok again'],
+    ['other scheme', 'failed wss://gateway.invalid/SecretTok again'],
+  ])('redacts %s', (_name, text) => {
+    const clean = sanitizeLogText(text);
+    expect(clean).not.toContain('SecretTok');
+    expect(clean).not.toContain('SECRETTOK');
+    expect(clean).not.toMatch(/discord/i);
+    expect(clean.startsWith('failed ')).toBe(true);
+    expect(clean.endsWith(' again')).toBe(true);
+  });
+
+  it('keeps ordinary text that merely mentions the word webhook', () => {
+    expect(sanitizeLogText('webhook rejected: HTTP 404')).toBe('webhook rejected: HTTP 404');
+  });
 });

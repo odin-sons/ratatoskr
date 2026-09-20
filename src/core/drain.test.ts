@@ -10,7 +10,7 @@ import {
 } from '../testing/fakes.ts';
 import { makeHarness, type Harness } from '../testing/harness.ts';
 import { SubrequestBudget } from './budget.ts';
-import { DIGEST_FIT_ATTEMPTS, DISCORD, OUTBOX_BACKOFF, OUTBOX_MAX_ATTEMPTS, TICK_BUDGET } from './constants.ts';
+import { DIGEST_FIT_ATTEMPTS, DISCORD, OUTBOX_BACKOFF, OUTBOX_MAX_ATTEMPTS, POISON_ISOLATION_MAX_ITEMS, TICK_BUDGET } from './constants.ts';
 import { backoffSeconds, collapseEquivalent, drainOutbox, scheduleFailure } from './drain.ts';
 import { outboxId } from './ids.ts';
 import { renderDigest, renderImmediate } from '../render/index.ts';
@@ -547,5 +547,273 @@ describe('drain: subrequest budget', () => {
     const report = await drain(h, now, budget);
     expect(report.sent).toBe(3);
     expect(h.sender.calls).toHaveLength(3);
+  });
+});
+
+const WEBHOOK_A = 'https://discord.invalid/api/webhooks/1/aaa';
+const WEBHOOK_B = 'https://discord.invalid/api/webhooks/2/bbb';
+
+describe('drain: batched failure bookkeeping', () => {
+  it('fails a 400-row digest with a single store call', async () => {
+    const h = makeHarness();
+    const updates = evs(400).map((e) => ({ ...e, kind: 'update' as const, versionFrom: '0.9.0' }));
+    await enqueue(h, makeSubscription({ mode: 'digest' }), updates);
+    h.sender.fallback = () => serverError(500);
+    const markFailedMany = vi.spyOn(h.store, 'markFailedMany');
+    const reschedule = vi.spyOn(h.store, 'rescheduleRows');
+    const report = await drain(h);
+    expect(report.failed).toBe(1);
+    expect(markFailedMany).toHaveBeenCalledTimes(1);
+    expect(markFailedMany.mock.calls[0]![0]).toHaveLength(400);
+    expect(reschedule).not.toHaveBeenCalled();
+    expect(h.store.outboxRows().every((r) => r.attempts === 1)).toBe(true);
+  });
+
+  it('uses one call per distinct schedule when rows carry different attempt counts', async () => {
+    const h = makeHarness();
+    const events = evs(6);
+    await enqueue(h, makeSubscription({ mode: 'digest' }), events);
+    await h.store.markFailedMany(events.slice(0, 3).map((e) => outboxId('sub-1', e.id)), FIXED_NOW_ISO, false);
+    h.sender.fallback = () => serverError(500);
+    const markFailedMany = vi.spyOn(h.store, 'markFailedMany');
+    await drain(h);
+    expect(markFailedMany).toHaveBeenCalledTimes(2);
+    expect(h.store.outboxRows().map((r) => r.attempts)).toEqual([2, 2, 2, 1, 1, 1]);
+  });
+});
+
+describe('drain: a failing webhook does not starve healthy ones', () => {
+  const later = new Date(now.getTime() + 300_000);
+
+  async function seed(h: Harness, mode: 'immediate' | 'digest', failingRows: number): Promise<void> {
+    await enqueue(h, makeSubscription({ id: 'bad', webhookUrl: WEBHOOK_A, mode }), evs(failingRows, 'A'), '2026-09-19T11:00:00.000Z');
+    await enqueue(h, makeSubscription({ id: 'good', webhookUrl: WEBHOOK_B, mode }), evs(3, 'B'), '2026-09-19T11:30:00.000Z');
+    h.sender.fallback = (call) => (call.webhookUrl === WEBHOOK_A ? serverError(500) : { ok: true });
+  }
+
+  it('serves the healthy immediate subscription on the very next tick', async () => {
+    const h = makeHarness();
+    await seed(h, 'immediate', 450);
+    await drain(h);
+    expect(h.sender.callsTo(WEBHOOK_B)).toHaveLength(0);
+    await drain(h, later);
+    expect(h.sender.callsTo(WEBHOOK_B)).toHaveLength(3);
+  });
+
+  it('serves the healthy digest subscription on the very next tick', async () => {
+    const h = makeHarness();
+    h.renderer.perMessage = 1;
+    await seed(h, 'digest', 450);
+    await drain(h);
+    await drain(h, later);
+    expect(h.sender.callsTo(WEBHOOK_B)).toHaveLength(3);
+  });
+
+  it('reschedules the untried rows of the window in one call without bumping their attempts', async () => {
+    const h = makeHarness();
+    await seed(h, 'immediate', 450);
+    const reschedule = vi.spyOn(h.store, 'rescheduleRows');
+    await drain(h);
+    expect(reschedule).toHaveBeenCalledTimes(1);
+    expect(reschedule.mock.calls[0]![0]).toHaveLength(TICK_BUDGET.maxOutboxRows - 1);
+    const rows = h.store.outboxRows().filter((r) => r.subscriptionId === 'bad');
+    const retryAt = new Date(now.getTime() + OUTBOX_BACKOFF.baseSeconds * 1000).toISOString();
+    const window = rows.slice(0, TICK_BUDGET.maxOutboxRows);
+    expect(window.every((r) => r.nextAttemptAt === retryAt)).toBe(true);
+    expect(window.filter((r) => r.attempts === 1)).toHaveLength(1);
+    expect(window.filter((r) => r.attempts === 0)).toHaveLength(TICK_BUDGET.maxOutboxRows - 1);
+    expect(rows.slice(TICK_BUDGET.maxOutboxRows).every((r) => r.nextAttemptAt === '2026-09-19T11:00:00.000Z')).toBe(true);
+  });
+
+  it('honours retry_after for the untried rows of a rate-limited webhook', async () => {
+    const h = makeHarness();
+    await seed(h, 'immediate', 10);
+    h.sender.fallback = (call) => (call.webhookUrl === WEBHOOK_A ? rateLimited(90) : { ok: true });
+    await drain(h);
+    const retryAt = new Date(now.getTime() + 90_000).toISOString();
+    expect(h.store.outboxRows().filter((r) => r.subscriptionId === 'bad').every((r) => r.nextAttemptAt === retryAt)).toBe(true);
+    expect(h.sender.callsTo(WEBHOOK_B)).toHaveLength(3);
+  });
+
+  it('also reschedules rows of another subscription that shares the failing webhook', async () => {
+    const h = makeHarness();
+    await enqueue(h, makeSubscription({ id: 'one', webhookUrl: WEBHOOK_A, mode: 'immediate' }), evs(2, 'A'));
+    await enqueue(h, makeSubscription({ id: 'two', webhookUrl: WEBHOOK_A, mode: 'immediate' }), evs(2, 'B'));
+    h.sender.fallback = () => serverError(500);
+    await drain(h);
+    const retryAt = new Date(now.getTime() + OUTBOX_BACKOFF.baseSeconds * 1000).toISOString();
+    expect(h.store.outboxRows().every((r) => r.nextAttemptAt === retryAt)).toBe(true);
+    expect(h.store.outboxRows().filter((r) => r.attempts === 1)).toHaveLength(1);
+  });
+
+  it('leaves rows deferred only by a cap or the budget where they are', async () => {
+    const h = makeHarness();
+    await enqueue(h, makeSubscription({ mode: 'immediate' }), evs(DISCORD.webhookRequestsPer2s + 3));
+    const reschedule = vi.spyOn(h.store, 'rescheduleRows');
+    await drain(h);
+    expect(reschedule).not.toHaveBeenCalled();
+    expect(h.store.pendingRows().every((r) => r.nextAttemptAt === FIXED_NOW_ISO)).toBe(true);
+  });
+
+  it('does not reschedule rows already delivered before the webhook started failing', async () => {
+    const h = makeHarness();
+    await enqueue(h, makeSubscription({ mode: 'immediate' }), evs(4));
+    h.sender.enqueue({ ok: true }, serverError(500));
+    await drain(h);
+    const rows = h.store.outboxRows();
+    expect(rows.filter((r) => r.delivered)).toHaveLength(1);
+    expect(rows.filter((r) => !r.delivered && r.attempts === 1)).toHaveLength(1);
+    expect(rows.filter((r) => !r.delivered && r.attempts === 0)).toHaveLength(2);
+  });
+});
+
+describe('drain: unrenderable events', () => {
+  const warnSpy = () => vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+  function poison(h: Harness, ids: Set<string>) {
+    const original = h.renderer.renderDigest.bind(h.renderer);
+    return vi.spyOn(h.renderer, 'renderDigest').mockImplementation((events, opts) => {
+      if (events.some((e) => ids.has(e.id))) throw new Error('cannot render');
+      return original(events, opts);
+    });
+  }
+
+  it('parks one poison event of a 50-event digest and delivers the other 49', async () => {
+    const h = makeHarness();
+    const events = evs(50);
+    const bad = events[17]!;
+    await enqueue(h, makeSubscription({ mode: 'digest' }), events);
+    const render = poison(h, new Set([bad.id]));
+    const warn = warnSpy();
+    try {
+      const report = await drain(h);
+      expect(report).toMatchObject({ sent: 1, failed: 1, parked: 1, deferred: 0 });
+      const delivered = h.sender.calls[0]!.payload.content!.replace('digest:', '').split(',');
+      expect(delivered).toEqual(events.filter((e) => e.id !== bad.id).map((e) => e.id));
+      const rows = h.store.outboxRows();
+      expect(rows.filter((r) => r.delivered)).toHaveLength(49);
+      expect(rows.find((r) => r.eventId === bad.id)).toMatchObject({ parked: true, delivered: false, attempts: 1 });
+      expect(rows.filter((r) => !r.delivered && r.eventId !== bad.id)).toEqual([]);
+      expect(rows.filter((r) => r.eventId !== bad.id).every((r) => r.attempts === 0)).toBe(true);
+      expect(render.mock.calls.length).toBeLessThanOrEqual(2 * Math.ceil(Math.log2(50)) + 3);
+      const lines = warn.mock.calls.map((c) => c.map(String).join(' '));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain(bad.id);
+      expect(lines[0]).not.toContain('discord.invalid');
+      expect(lines[0]).not.toContain('cannot render');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('isolates several poison events and never retries them', async () => {
+    const h = makeHarness();
+    const events = evs(50);
+    const bad = new Set([events[0]!.id, events[24]!.id, events[49]!.id]);
+    await enqueue(h, makeSubscription({ mode: 'digest' }), events);
+    poison(h, bad);
+    const warn = warnSpy();
+    try {
+      const report = await drain(h);
+      expect(report).toMatchObject({ failed: 3, parked: 3 });
+      expect(h.store.outboxRows().filter((r) => r.delivered)).toHaveLength(47);
+      expect(h.store.pendingRows()).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+    const calls = h.sender.calls.length;
+    await drain(h, new Date(now.getTime() + 3_600_000));
+    expect(h.sender.calls).toHaveLength(calls);
+  });
+
+  it('parks every row of a poison event that absorbed an equivalent release from another store', async () => {
+    const h = makeHarness();
+    const ts = makeEvent({ pkg: { store: 'thunderstore', owner: 'Au', name: 'Mod', version: '3.0.0' } });
+    const hx = makeEvent({ pkg: { store: 'hexium', owner: 'Au', name: 'Mod', version: '3.0.0' } });
+    const fine = makeEvent({ pkg: { packageId: 'Fine-Mod', owner: 'Fine', name: 'Mod' } });
+    const sub = makeSubscription({ mode: 'digest' });
+    await enqueue(h, sub, [ts, fine]);
+    await enqueue(h, sub, [hx]);
+    poison(h, new Set([ts.id]));
+    const warn = warnSpy();
+    try {
+      const report = await drain(h);
+      expect(report.parked).toBe(2);
+    } finally {
+      warn.mockRestore();
+    }
+    expect(h.store.outboxRows().filter((r) => r.parked)).toHaveLength(2);
+    expect(h.store.outboxRows().filter((r) => r.delivered)).toHaveLength(1);
+  });
+
+  it('stays within the isolation budget when every event of the digest is unrenderable', async () => {
+    const h = makeHarness();
+    const events = evs(100);
+    await enqueue(h, makeSubscription({ mode: 'digest' }), events);
+    const render = poison(h, new Set(events.map((e) => e.id)));
+    const warn = warnSpy();
+    try {
+      const report = await drain(h);
+      expect(report.sent).toBe(0);
+      expect(report.parked).toBeGreaterThan(0);
+      expect(report.parked + report.deferred).toBe(100);
+      const rendered = render.mock.calls.reduce((sum, call) => sum + call[0].length, 0);
+      const detailedPrefix = DISCORD.webhookRequestsPer2s * DISCORD.embedsPerMessage;
+      expect(rendered).toBeLessThanOrEqual(POISON_ISOLATION_MAX_ITEMS + 3 * detailedPrefix);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps making progress across ticks when isolation is cut short', async () => {
+    const h = makeHarness();
+    const events = evs(100);
+    await enqueue(h, makeSubscription({ mode: 'digest' }), events);
+    poison(h, new Set(events.map((e) => e.id)));
+    const warn = warnSpy();
+    let ticks = 0;
+    try {
+      while (h.store.pendingRows().length > 0 && ticks < 100) await drain(h, new Date(now.getTime() + ticks++ * 300_000));
+    } finally {
+      warn.mockRestore();
+    }
+    expect(h.store.pendingRows()).toEqual([]);
+    expect(h.store.outboxRows().every((r) => r.parked)).toBe(true);
+    expect(ticks).toBeGreaterThan(1);
+  });
+
+  it('falls back to a transient failure when no single event reproduces the error', async () => {
+    const h = makeHarness();
+    await enqueue(h, makeSubscription({ mode: 'digest' }), evs(4));
+    const original = h.renderer.renderDigest.bind(h.renderer);
+    vi.spyOn(h.renderer, 'renderDigest').mockImplementation((events, opts) => {
+      if (events.length > 1) throw new Error('combination only');
+      return original(events, opts);
+    });
+    const report = await drain(h);
+    expect(report).toMatchObject({ sent: 0, failed: 1, parked: 0 });
+    expect(h.store.pendingRows().every((r) => r.attempts === 1)).toBe(true);
+  });
+
+  it('parks an immediate event whose render throws and still sends the others', async () => {
+    const h = makeHarness();
+    const events = evs(3);
+    await enqueue(h, makeSubscription({ mode: 'immediate' }), events);
+    vi.spyOn(h.renderer, 'renderImmediate').mockImplementation((event) => {
+      if (event.id === events[1]!.id) throw new Error('cannot render');
+      return { content: `immediate:${event.id}`, allowed_mentions: { parse: [] } };
+    });
+    const warn = warnSpy();
+    try {
+      const report = await drain(h);
+      expect(report).toMatchObject({ sent: 2, failed: 1, parked: 1 });
+      const lines = warn.mock.calls.map((c) => c.map(String).join(' '));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain(events[1]!.id);
+    } finally {
+      warn.mockRestore();
+    }
+    expect(h.store.outboxRows().find((r) => r.eventId === events[1]!.id)).toMatchObject({ parked: true });
+    expect(h.store.pendingRows()).toEqual([]);
   });
 });

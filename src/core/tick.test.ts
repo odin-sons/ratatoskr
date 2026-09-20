@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { describe, expect, it } from 'vitest';
-import { FakeAdapter, FIXED_NOW_ISO, clientError, makeSnapshot, makeSubscription, okPoll, rateLimited } from '../testing/fakes.ts';
+import { describe, expect, it, vi } from 'vitest';
+import { FakeAdapter, FIXED_NOW_ISO, clientError, makeEvent, makeSnapshot, makeSubscription, okPoll, rateLimited } from '../testing/fakes.ts';
 import { makeHarness, type Harness } from '../testing/harness.ts';
 import { DISCORD, TICK_BUDGET } from './constants.ts';
 import { eventId, outboxId } from './ids.ts';
@@ -156,6 +156,49 @@ describe('runTick: crash safety', () => {
     expect(h.store.outboxRows()).toHaveLength(1);
     expect(h.store.outboxRows()[0]).toMatchObject({ id: row!.id, delivered: true });
     expect(h.sender.calls).toHaveLength(1);
+  });
+});
+
+describe('runTick: releases that already have an event', () => {
+  it('neither stores nor fans out an event that exists, but still upserts the package and advances the cursor', async () => {
+    const adapter = new FakeAdapter({ id: TS });
+    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription()] });
+    bootstrap(h, TS, { 'A-One': '2.0.0' });
+    const old = makeEvent({ pkg: { packageId: 'A-One', owner: 'A', name: 'One', version: '1.0.0' }, changelog: 'kept' });
+    h.store.events.set(old.id, old);
+    const spy = vi.spyOn(h.store, 'existingEventIds');
+
+    adapter.enqueue(okPoll([snap('A-One', '1.0.0'), snap('B-Two', '1.0.0')], { cursor: 'c1' }));
+    const report = await runTick(h.deps, scheduled);
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(report.sources[TS]).toEqual({ status: 'ok', events: 1 });
+    expect(h.sender.calls).toHaveLength(1);
+    expect(h.store.events.get(old.id)).toMatchObject({ changelog: 'kept' });
+    expect(h.store.outboxRows().map((r) => r.eventId)).toEqual([eventId(TS, 'B-Two', '1.0.0')]);
+    expect(h.store.packages.get(`${TS}|A-One`)).toMatchObject({ version: '1.0.0' });
+    expect(h.store.sources.get(TS)!.cursor).toBe('c1');
+  });
+
+  it('fetches no changelog for an event that already exists', async () => {
+    const adapter = new FakeAdapter({ id: TS });
+    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription()] });
+    bootstrap(h, TS, { 'A-One': '2.0.0' });
+    const old = makeEvent({ pkg: { packageId: 'A-One', owner: 'A', name: 'One', version: '1.0.0' } });
+    h.store.events.set(old.id, old);
+    adapter.enqueue(okPoll([snap('A-One', '1.0.0')]));
+    const report = await runTick(h.deps, scheduled);
+    expect(report.changelogFetches).toBe(0);
+  });
+
+  it('does not query the store when nothing changed', async () => {
+    const adapter = new FakeAdapter({ id: TS });
+    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription()] });
+    bootstrap(h, TS, { 'A-One': '1.0.0' });
+    const spy = vi.spyOn(h.store, 'existingEventIds');
+    adapter.enqueue(okPoll([snap('A-One', '1.0.0')]));
+    await runTick(h.deps, scheduled);
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 

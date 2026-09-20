@@ -3,11 +3,19 @@ import type { TickReport } from './tick.ts';
 
 export const MAX_LOGGED_TEXT_CHARS = 200;
 
-const URL_PATTERN = /https?:\/\/\S+/g;
+const SCHEME_URL_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi;
+const WEBHOOK_PATH_PATTERN = /\S*webhooks\/\S*/gi;
+const WEBHOOK_ID_TOKEN_PATTERN = /\b\d{17,20}\/[\w-]{20,}/g;
 
-/** One line, without URLs (they may carry webhook tokens), capped in length. */
+/** One line, without URLs or webhook paths (they carry tokens), capped in length. */
 export function sanitizeLogText(text: string): string {
-  return text.replace(URL_PATTERN, '[url]').replace(/\s+/g, ' ').trim().slice(0, MAX_LOGGED_TEXT_CHARS);
+  return text
+    .replace(SCHEME_URL_PATTERN, '[url]')
+    .replace(WEBHOOK_PATH_PATTERN, '[url]')
+    .replace(WEBHOOK_ID_TOKEN_PATTERN, '[url]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, MAX_LOGGED_TEXT_CHARS);
 }
 
 export interface RunLogInput {

@@ -5,7 +5,8 @@ import { outboxId } from '../core/ids.ts';
 import type { CommitBatch } from '../core/ports.ts';
 import { FIXED_NOW_ISO, makeEvent, makeSnapshot, makeSubscription } from './fakes.ts';
 import { MemoryStore } from './memory-store.ts';
-import { runStoreContract } from './store-contract.ts';
+import { runRedeliveryScenario } from './redelivery-scenario.ts';
+import { runStoreContract, type StoreContractEnv } from './store-contract.ts';
 
 const state = { id: 'thunderstore:valheim', cursor: 'c', etag: null, bootstrapped: true, lastOkAt: null };
 
@@ -22,7 +23,7 @@ function batch(store: MemoryStore, over: Partial<CommitBatch> = {}): CommitBatch
   };
 }
 
-runStoreContract('MemoryStore', () => {
+function createMemoryEnv(): StoreContractEnv {
   const store = new MemoryStore();
   return {
     store,
@@ -32,7 +33,10 @@ runStoreContract('MemoryStore', () => {
       if (sub) store.subscriptions.set(id, { ...sub, enabled });
     },
   };
-});
+}
+
+runStoreContract('MemoryStore', createMemoryEnv);
+runRedeliveryScenario('MemoryStore', createMemoryEnv);
 
 describe('MemoryStore', () => {
   it('commits packages, events, outbox and state together', async () => {
@@ -86,12 +90,12 @@ describe('MemoryStore', () => {
     expect(await store.takeDue(FIXED_NOW_ISO, 10)).toHaveLength(2);
     expect(await store.takeDue(FIXED_NOW_ISO, 1)).toHaveLength(1);
 
-    await store.markFailed(outboxId('sub-1', events[0]!.id), FIXED_NOW_ISO, true);
+    await store.markFailedMany([outboxId('sub-1', events[0]!.id)], FIXED_NOW_ISO, true);
     const due = await store.takeDue(FIXED_NOW_ISO, 10);
     expect(due.map((d) => d.event.id)).toEqual([events[1]!.id]);
 
     const id = outboxId('sub-1', events[1]!.id);
-    for (let i = 0; i < OUTBOX_MAX_ATTEMPTS; i++) await store.markFailed(id, FIXED_NOW_ISO, false);
+    for (let i = 0; i < OUTBOX_MAX_ATTEMPTS; i++) await store.markFailedMany([id], FIXED_NOW_ISO, false);
     expect(await store.takeDue(FIXED_NOW_ISO, 10)).toEqual([]);
   });
 

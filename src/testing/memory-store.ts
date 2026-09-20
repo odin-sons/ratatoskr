@@ -164,12 +164,27 @@ export class MemoryStore implements Store {
     return purged;
   }
 
-  async markFailed(outboxId: string, nextAttemptAtIso: string, parked: boolean): Promise<void> {
-    const row = this.outbox.get(outboxId);
-    if (!row) return;
-    row.attempts += 1;
-    row.nextAttemptAt = nextAttemptAtIso;
-    if (parked) row.parked = true;
+  async markFailedMany(outboxIds: string[], nextAttemptAtIso: string, parked: boolean): Promise<void> {
+    for (const id of new Set(outboxIds)) {
+      const row = this.outbox.get(id);
+      if (!row) continue;
+      row.attempts += 1;
+      row.nextAttemptAt = nextAttemptAtIso;
+      if (parked) row.parked = true;
+    }
+  }
+
+  async rescheduleRows(outboxIds: string[], nextAttemptAtIso: string): Promise<void> {
+    for (const id of outboxIds) {
+      const row = this.outbox.get(id);
+      if (row && !row.delivered && !row.parked) row.nextAttemptAt = nextAttemptAtIso;
+    }
+  }
+
+  async existingEventIds(eventIds: string[]): Promise<Set<string>> {
+    const found = new Set<string>();
+    for (const id of eventIds) if (this.events.has(id)) found.add(id);
+    return found;
   }
 
   async setEventChangelog(eventId: string, changelog: string | null, changelogUrl: string | null): Promise<void> {

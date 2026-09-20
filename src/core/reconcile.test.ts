@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { FakeAdapter, FIXED_NOW_ISO, makeEvent, makeSnapshot, makeSubscription, okPoll } from '../testing/fakes.ts';
 import { makeHarness, type Harness } from '../testing/harness.ts';
 import { CADENCE, DELIVERED_RETENTION_DAYS, OUTBOX_PURGE_BATCH } from './constants.ts';
@@ -206,6 +206,23 @@ describe('runReconcile: purge of delivered rows', () => {
     const report = await runReconcile(h.deps, scheduled, 0);
     expect(report.sources[TS]).toEqual({ status: 'ok', events: 1 });
     expect(report.purged).toBe(0);
+  });
+
+  it('logs a purge failure without urls or webhook tokens', async () => {
+    const h = makeHarness();
+    h.store.purgeDelivered = async () => {
+      throw new Error('D1 error near HTTPS://x.invalid/q and discord.com/api/webhooks/1/SecretTok');
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await runReconcile(h.deps, scheduled, 0);
+      const lines = warn.mock.calls.map((c) => c.map(String).join(' '));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('purge');
+      expect(lines[0]).not.toMatch(/SecretTok|discord|x.invalid/i);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('never purges on a tick run', async () => {

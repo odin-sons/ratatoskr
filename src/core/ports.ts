@@ -63,8 +63,14 @@ export interface Store {
   /** Deletes at most `limit` rows delivered before `olderThanIso`; returns how many were deleted. */
   purgeDelivered(olderThanIso: string, limit: number): Promise<number>;
 
-  /** Reschedule (or park when `parked`) a failed row and bump `attempts`. */
-  markFailed(outboxId: string, nextAttemptAtIso: string, parked: boolean): Promise<void>;
+  /** Reschedule (or park when `parked`) failed rows and bump their `attempts`; one round trip for any number of ids. */
+  markFailedMany(outboxIds: string[], nextAttemptAtIso: string, parked: boolean): Promise<void>;
+
+  /** Moves undelivered, unparked rows to `nextAttemptAtIso` without touching `attempts`; one round trip for any number of ids. */
+  rescheduleRows(outboxIds: string[], nextAttemptAtIso: string): Promise<void>;
+
+  /** The subset of `eventIds` present in `events`. Events are never deleted, so this outlives the outbox retention. */
+  existingEventIds(eventIds: string[]): Promise<Set<string>>;
 
   /** Stores the extracted changelog (and its full-changelog URL) on an already-committed event. */
   setEventChangelog(eventId: string, changelog: string | null, changelogUrl: string | null): Promise<void>;

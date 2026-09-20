@@ -68,6 +68,9 @@ export const OUTBOX_PURGE_BATCH = 1000;
 /** Proportional re-renders tried when a digest exceeds its message allowance, before the prefix is halved. */
 export const DIGEST_FIT_ATTEMPTS = 3;
 
+/** Events rendered (summed over probes) while isolating unrenderable events of one digest; bounds CPU on the failure path. */
+export const POISON_ISOLATION_MAX_ITEMS = TICK_BUDGET.maxOutboxRows;
+
 /** Outbox rows whose attempts reach this are parked, not retried. */
 export const OUTBOX_MAX_ATTEMPTS = 8;
 
@@ -94,7 +97,7 @@ export const CHANGELOG_EXCERPT_MAX = 1000;
 export const NEXUS_RATE_LIMIT = { perHour: 2000, perDay: 20000 } as const;
 
 /** Hard ceiling on listing/index response size we are willing to scan (bytes). */
-export const MAX_SCAN_BYTES = 8 * 1024 * 1024;
+export const MAX_SCAN_BYTES = 6 * 1024 * 1024;
 
 export const PROJECT = {
   name: 'ratatoskr',
