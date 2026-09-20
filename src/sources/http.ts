@@ -82,8 +82,7 @@ async function readLimited(response: Response, url: string, limit: number): Prom
     return text;
   }
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  const parts: string[] = [];
+  const chunks: Uint8Array[] = [];
   let bytes = 0;
   for (;;) {
     const { done, value } = await reader.read();
@@ -93,10 +92,19 @@ async function readLimited(response: Response, url: string, limit: number): Prom
       await reader.cancel();
       throw new ResponseTooLargeError(url, limit);
     }
-    parts.push(decoder.decode(value, { stream: true }));
+    chunks.push(value);
   }
-  parts.push(decoder.decode());
-  return parts.join('');
+  return new TextDecoder().decode(chunks.length === 1 ? chunks[0] : concat(chunks, bytes));
+}
+
+function concat(chunks: Uint8Array[], bytes: number): Uint8Array {
+  const all = new Uint8Array(bytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    all.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return all;
 }
 
 export async function conditionalGet(ctx: PollContext, url: string, opts: GetOptions = {}): Promise<GetResult> {

@@ -3,10 +3,10 @@ import type { PackageSnapshot, SourceConfig } from '../core/types.ts';
 import type { PollContext, PollResult, SourceAdapter, Store } from '../core/ports.ts';
 import { extractChangelog } from '../changelog/extract.ts';
 import { CADENCE } from '../core/constants.ts';
-import { SOURCE_BUDGET } from './budget.ts';
+import { CHANGELOG_MAX_BYTES, CURSOR_FUTURE_SLACK_MS, SOURCE_BUDGET } from './budget.ts';
 import { UnexpectedShapeError, isRecord, parseJson, safeSlug, str } from './guards.ts';
 import { conditionalGet, describeError, skipOnError } from './http.ts';
-import { normalizeIso } from './iso.ts';
+import { clampToNow, maxIso, normalizeIso } from './iso.ts';
 import { scanPackageDump, type DumpRecord, type DumpScan } from './hexium-dump.ts';
 
 const SEED_PREFIX = 'seed:';
@@ -22,10 +22,16 @@ export function parseCursor(cursor: string | null | undefined): Progress {
     const sep = rest.indexOf(':');
     const next = Number(sep === -1 ? rest : rest.slice(0, sep));
     if (!Number.isInteger(next) || next < 0) return null;
-    return { kind: 'seed', next, mark: sep === -1 ? null : rest.slice(sep + 1) };
+    return { kind: 'seed', next, mark: sep === -1 ? null : normalizeIso(rest.slice(sep + 1)) };
   }
   const iso = normalizeIso(cursor);
   return iso === null ? null : { kind: 'time', iso };
+}
+
+function clampProgress(progress: Progress, now: Date): Progress {
+  if (progress === null) return null;
+  if (progress.kind === 'time') return { kind: 'time', iso: clampToNow(progress.iso, now) };
+  return { ...progress, mark: progress.mark === null ? null : clampToNow(progress.mark, now) };
 }
 
 export class HexiumAdapter implements SourceAdapter {
@@ -55,7 +61,7 @@ export class HexiumAdapter implements SourceAdapter {
 
   private async pollInner(ctx: PollContext): Promise<PollResult> {
     if (!safeSlug(this.config.community)) throw new Error('invalid community slug');
-    const progress = parseCursor(ctx.state?.cursor);
+    const progress = clampProgress(parseCursor(ctx.state?.cursor), ctx.now);
     if (ctx.state === null || !ctx.state.bootstrapped || progress === null || progress.kind === 'seed') {
       return this.seedSlice(ctx, progress?.kind === 'seed' ? progress : null);
     }
@@ -86,9 +92,10 @@ export class HexiumAdapter implements SourceAdapter {
     const scan = scanPackageDump(text, null, (r) => packages.push(this.snapshot(r)), {
       slice: { index: Math.min(index, count - 1), count },
       wantDetail: () => false,
+      notAfter: this.cursorCeiling(ctx),
     });
     this.assertUsable(scan, packages.length, text.length);
-    if (scan.failed > 0) throw new UnexpectedShapeError(`${scan.failed} dump records could not be read`);
+    this.warnSkipped(scan);
 
     const mark = progress?.mark ?? scan.maxUpdated;
     const last = index >= count - 1;
@@ -105,26 +112,31 @@ export class HexiumAdapter implements SourceAdapter {
   private async scanSince(ctx: PollContext, cursor: string): Promise<PollResult> {
     const text = await this.fetchDump(ctx);
     const packages: PackageSnapshot[] = [];
-    const scan = scanPackageDump(text, cursor, (r) => packages.push(this.snapshot(r)));
+    const scan = scanPackageDump(text, cursor, (r) => packages.push(this.snapshot(r)), { notAfter: this.cursorCeiling(ctx) });
     this.assertUsable(scan, packages.length, text.length);
-
-    const clean = scan.failed === 0;
-    if (!clean) console.warn(`[${this.config.id}] ${scan.failed} dump records could not be read; cursor held back`);
+    this.warnSkipped(scan);
     return {
       status: 'ok',
       packages,
-      cursor: clean ? (scan.maxUpdated ?? cursor) : cursor,
+      cursor: maxIso(cursor, scan.maxUpdated),
       etag: ctx.state?.etag ?? null,
-      complete: clean,
+      complete: true,
     };
+  }
+
+  private cursorCeiling(ctx: PollContext): string {
+    return new Date(ctx.now.getTime() + CURSOR_FUTURE_SLACK_MS).toISOString();
+  }
+
+  private warnSkipped(scan: DumpScan): void {
+    if (scan.failed > 0) console.warn(`[${this.config.id}] unreadable dump records skipped: ${scan.failed}`);
   }
 
   private assertUsable(scan: DumpScan, extracted: number, bytes: number): void {
     if (scan.records === 0 && bytes > 2) throw new UnexpectedShapeError('package dump has no recognisable records');
+    if (scan.aborted) throw new UnexpectedShapeError('package dump records are unreadable');
     if (scan.records > 0 && scan.maxUpdated === null) throw new UnexpectedShapeError('package dump timestamps are unreadable');
-    if (scan.records > 0 && extracted === 0 && scan.failed === scan.records) {
-      throw new UnexpectedShapeError('no package dump record could be read');
-    }
+    if (scan.failed > 0 && extracted === 0) throw new UnexpectedShapeError('no package dump record could be read');
   }
 
   /** Creation-ordered page 1; catches new packages on ticks that skip the dump. Cursor is left to the dump scan. */
@@ -170,7 +182,7 @@ export class HexiumAdapter implements SourceAdapter {
       iconUrl: str(item.icon_url),
       description: str(item.description),
       categories: Array.isArray(item.categories) ? item.categories.filter((c): c is string => typeof c === 'string') : [],
-      isNsfw: item.has_nsfw_content === true,
+      isNsfw: item.has_nsfw_content !== false,
       isDeprecated: item.is_deprecated === true,
       updatedAt,
       sizeBytes: null,
@@ -185,6 +197,7 @@ export class HexiumAdapter implements SourceAdapter {
       owner: r.owner,
       name: r.name,
       version: r.version,
+      previousVersion: r.previousVersion,
       url: this.packageUrl(r.owner, r.name),
       iconUrl: r.iconUrl,
       description: r.description,
@@ -204,7 +217,7 @@ export class HexiumAdapter implements SourceAdapter {
   async reconcile(ctx: PollContext): Promise<PackageSnapshot[]> {
     if (!safeSlug(this.config.community)) throw new Error('invalid community slug');
     const count = SOURCE_BUDGET.hexiumDumpSlices;
-    const index = Math.floor(ctx.now.getTime() / MS_PER_DAY) % count;
+    const index = (ctx.sliceHint ?? Math.floor(ctx.now.getTime() / MS_PER_DAY)) % count;
     const text = await this.fetchDump(ctx);
     const known = await this.store.getAllKnownVersions(this.config.id);
 
@@ -214,7 +227,7 @@ export class HexiumAdapter implements SourceAdapter {
       wantDetail: (owner, name, version) => known.get(`${owner}-${name}`) !== version,
     });
     this.assertUsable(scan, out.length, text.length);
-    if (scan.failed > 0) console.warn(`[${this.config.id}] reconcile skipped ${scan.failed} unreadable dump records`);
+    this.warnSkipped(scan);
     return out;
   }
 
@@ -225,7 +238,7 @@ export class HexiumAdapter implements SourceAdapter {
   ): Promise<{ excerpt: string | null; url: string | null }> {
     try {
       const api = `${this.origin}/api/experimental/package/${encodeURIComponent(pkg.owner)}/${encodeURIComponent(pkg.name)}/${encodeURIComponent(version)}/changelog/`;
-      const res = await conditionalGet(ctx, api, { validator: null });
+      const res = await conditionalGet(ctx, api, { validator: null, maxBytes: CHANGELOG_MAX_BYTES });
       if (res.status !== 'ok') return { excerpt: null, url: null };
       const body = parseJson(res.text);
       const markdown = isRecord(body) && typeof body.markdown === 'string' ? body.markdown : null;

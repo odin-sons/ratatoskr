@@ -146,6 +146,20 @@ describe('NexusAdapter.poll', () => {
     expect(fake.callsTo('/mods/103.json')).toHaveLength(0);
   });
 
+  it('clamps a stored cursor from the future to now, so newer mods are not skipped forever', async () => {
+    const fake = routes([[`${API}/mods/updated.json`, () => json([{ mod_id: 102, latest_file_update: BASE + 600 }])]]);
+    const res = ok(await adapter.poll(makeCtx(fake, { secrets, state: makeState({ cursor: '2099-01-01T00:00:00.000000Z' }) })));
+    expect(res.packages.map((p) => p.packageId)).toEqual(['102']);
+    expect(res.cursor).toBe(iso(600));
+  });
+
+  it('holds a clamped cursor at now when nothing is newer', async () => {
+    const fake = routes([[`${API}/mods/updated.json`, () => json([])], [`${API}/mods/latest_added.json`, () => json([])]]);
+    const res = ok(await adapter.poll(makeCtx(fake, { secrets, state: makeState({ cursor: '2099-01-01T00:00:00.000000Z' }) })));
+    expect(res.packages).toEqual([]);
+    expect(res.cursor).toBe(iso(300));
+  });
+
   it('cold start emits the latest-added mods and the newest bare ids, cursor at the maximum', async () => {
     const res = ok(await adapter.poll(makeCtx(routes(), { secrets, state: null })));
     expect(res.packages.map((p) => p.packageId).sort()).toEqual(['102', '103', '104']);
@@ -209,4 +223,102 @@ describe('NexusAdapter.fetchChangelog', () => {
 it('has no reconcile', () => {
   const adapter: SourceAdapter = new NexusAdapter(enabled);
   expect(adapter.reconcile).toBeUndefined();
+});
+
+describe('NexusAdapter — hostile timestamps', () => {
+  const adapter = new NexusAdapter(enabled);
+  const cursor = makeState({ cursor: iso(-4000) });
+
+  it.each([1e20, -5, Number.MAX_SAFE_INTEGER, 8.64e15])('skips an updated.json row with latest_file_update %s and still processes the rest', async (bad) => {
+    const fake = createFakeFetch([
+      [`${API}/mods/updated.json`, () => json([{ mod_id: 400, latest_file_update: bad }, { mod_id: 102, latest_file_update: BASE - 600 }])],
+      [`${API}/mods/latest_added.json`, () => json([])],
+      [`${API}/mods/102.json`, () => text(fixture('nexus-mod-102.json'))],
+    ]);
+    const res = ok(await adapter.poll(makeCtx(fake, { secrets, state: cursor })));
+    expect(res.packages.map((p) => p.packageId)).toEqual(['102']);
+    expect(fake.callsTo('/mods/400.json')).toHaveLength(0);
+  });
+
+  it('falls back to created_timestamp when updated_timestamp of a latest-added mod is out of range', async () => {
+    const mod = { mod_id: 500, name: 'Odd', version: '1.0', author: 'a', updated_timestamp: 1e20, created_timestamp: BASE - 120, contains_adult_content: false, status: 'published', available: true };
+    const fake = createFakeFetch([
+      [`${API}/mods/updated.json`, () => json([])],
+      [`${API}/mods/latest_added.json`, () => json([mod])],
+    ]);
+    const res = ok(await adapter.poll(makeCtx(fake, { secrets, state: cursor })));
+    expect(res.packages.map((p) => [p.packageId, p.updatedAt])).toEqual([['500', iso(-120)]]);
+    expect(res.cursor).toBe(iso(-120));
+  });
+
+  it('uses the listing timestamp when the metadata timestamp is out of range', async () => {
+    const meta = { mod_id: 600, name: 'Odd', version: '1.0', author: 'a', updated_timestamp: 1e20, contains_adult_content: false, status: 'published', available: true };
+    const fake = createFakeFetch([
+      [`${API}/mods/updated.json`, () => json([{ mod_id: 600, latest_file_update: BASE - 300 }])],
+      [`${API}/mods/latest_added.json`, () => json([])],
+      [`${API}/mods/600.json`, () => json(meta)],
+    ]);
+    const res = ok(await adapter.poll(makeCtx(fake, { secrets, state: cursor })));
+    expect(res.packages[0]?.updatedAt).toBe(iso(-300));
+  });
+});
+
+describe('NexusAdapter — adult content fails closed', () => {
+  const adapter = new NexusAdapter(enabled);
+
+  async function flagged(mutate: (mod: Record<string, unknown>) => void) {
+    const mod = JSON.parse(fixture('nexus-mod-102.json')) as Record<string, unknown>;
+    mutate(mod);
+    const fake = createFakeFetch([
+      [`${API}/mods/updated.json`, () => json([{ mod_id: 102, latest_file_update: BASE - 600 }])],
+      [`${API}/mods/latest_added.json`, () => json([])],
+      [`${API}/mods/102.json`, () => json(mod)],
+    ]);
+    return ok(await adapter.poll(makeCtx(fake, { secrets, state: makeState({ cursor: iso(-4000) }) }))).packages[0];
+  }
+
+  it.each([
+    ['missing', (mod: Record<string, unknown>) => void delete mod.contains_adult_content],
+    ['null', (mod: Record<string, unknown>) => void (mod.contains_adult_content = null)],
+    ['a string', (mod: Record<string, unknown>) => void (mod.contains_adult_content = 'false')],
+    ['a number', (mod: Record<string, unknown>) => void (mod.contains_adult_content = 0)],
+  ])('marks a mod adult when its flag is %s', async (_label, mutate) => {
+    expect((await flagged(mutate))?.isNsfw).toBe(true);
+  });
+
+  it('keeps an explicit false as safe', async () => {
+    expect((await flagged(() => {}))?.isNsfw).toBe(false);
+  });
+
+  it('leaves previousVersion unknown', async () => {
+    expect((await flagged(() => {}))?.previousVersion).toBeUndefined();
+  });
+});
+
+describe('NexusAdapter.fetchChangelog — hardening', () => {
+  const adapter = new NexusAdapter(enabled);
+  const pkg = { packageId: '102', url: 'https://www.nexusmods.com/valheim/mods/102' } as Parameters<NexusAdapter['fetchChangelog']>[1];
+
+  it('refuses a changelog body above the changelog cap without parsing it', async () => {
+    const huge = JSON.stringify({ '2.3.1': Array.from({ length: 30_000 }, (_, i) => `line ${i} of a very long changelog`) });
+    expect(huge.length).toBeGreaterThan(300_000);
+    const fake = createFakeFetch([[`${API}/mods/102/changelogs.json`, () => text(huge)]]);
+    const parse = vi.spyOn(JSON, 'parse');
+    expect(await adapter.fetchChangelog(makeCtx(fake, { secrets }), pkg, '2.3.1')).toEqual({ excerpt: null, url: null });
+    expect(parse).not.toHaveBeenCalled();
+  });
+
+  it('ignores versions whose value is not a list of strings', async () => {
+    const body = { '2.3.1': 'not a list', '2.3.0': { a: 1 }, '2.2.0': ['fine', 7, null] };
+    const fake = createFakeFetch([[`${API}/mods/102/changelogs.json`, () => json(body)]]);
+    expect((await adapter.fetchChangelog(makeCtx(fake, { secrets }), pkg, '2.3.1')).excerpt).toBeNull();
+    expect((await adapter.fetchChangelog(makeCtx(fake, { secrets }), pkg, '2.2.0')).excerpt).toContain('fine');
+  });
+
+  it('returns nulls for a body that is not an object', async () => {
+    for (const body of [[], 'x', 5, null]) {
+      const fake = createFakeFetch([[`${API}/mods/102/changelogs.json`, () => json(JSON.stringify(body))]]);
+      expect(await adapter.fetchChangelog(makeCtx(fake, { secrets }), pkg, '2.3.1')).toEqual({ excerpt: null, url: null });
+    }
+  });
 });

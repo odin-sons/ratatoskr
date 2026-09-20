@@ -3,10 +3,10 @@ import type { PackageSnapshot, SourceConfig } from '../core/types.ts';
 import type { PollContext, PollResult, SourceAdapter } from '../core/ports.ts';
 import { extractNexusChangelog } from '../changelog/nexus.ts';
 import { NEXUS_RATE_LIMIT, PROJECT } from '../core/constants.ts';
-import { NEXUS_THROTTLE_RESERVE, SOURCE_BUDGET } from './budget.ts';
+import { CHANGELOG_MAX_BYTES, NEXUS_THROTTLE_RESERVE, SOURCE_BUDGET } from './budget.ts';
 import { UnexpectedShapeError, isRecord, num, parseJson, safeSlug, str, type Json } from './guards.ts';
 import { UpstreamError, conditionalGet, describeError, skipOnError, type GetOptions } from './http.ts';
-import { epochSecondsToIso, maxIso, normalizeIso } from './iso.ts';
+import { clampToNow, epochSecondsToIso, maxIso, normalizeIso } from './iso.ts';
 
 export const NEXUS_HOST = 'api.nexusmods.com';
 const NEXUS_API = `https://${NEXUS_HOST}/v1/games`;
@@ -16,6 +16,16 @@ interface Candidate {
   modId: number;
   ts: string;
   meta: Json | null;
+}
+
+/** First value that is a finite number within the representable range, as a canonical timestamp. */
+function firstIso(...values: unknown[]): string | null {
+  for (const value of values) {
+    const seconds = num(value);
+    const iso = seconds === null ? null : epochSecondsToIso(seconds);
+    if (iso !== null) return iso;
+  }
+  return null;
 }
 
 /** True when either rate-limit window has less than the reserve fraction left. */
@@ -40,9 +50,10 @@ export class NexusAdapter implements SourceAdapter {
     return key ? key : null;
   }
 
-  private request(ctx: PollContext, key: string, path: string): Promise<Awaited<ReturnType<typeof conditionalGet>>> {
+  private request(ctx: PollContext, key: string, path: string, maxBytes?: number): Promise<Awaited<ReturnType<typeof conditionalGet>>> {
     const opts: GetOptions = {
       validator: null,
+      maxBytes,
       headers: { 'Application-Name': PROJECT.name, 'Application-Version': PROJECT.version },
       credentials: { header: 'apikey', value: key, host: NEXUS_HOST },
     };
@@ -64,7 +75,8 @@ export class NexusAdapter implements SourceAdapter {
 
   private async pollInner(ctx: PollContext, key: string): Promise<PollResult> {
     if (!safeSlug(this.config.community)) throw new Error('invalid game domain');
-    const cursor = ctx.state?.cursor ? normalizeIso(ctx.state.cursor) : null;
+    const stored = ctx.state?.cursor ? normalizeIso(ctx.state.cursor) : null;
+    const cursor = stored === null ? null : clampToNow(stored, ctx.now);
     const coldStart = cursor === null;
 
     const updated = await this.request(ctx, key, 'mods/updated.json?period=1d');
@@ -83,17 +95,17 @@ export class NexusAdapter implements SourceAdapter {
     for (const row of updatedBody) {
       if (!isRecord(row)) continue;
       const modId = num(row.mod_id);
-      const seconds = num(row.latest_file_update);
-      if (modId === null || seconds === null) continue;
-      byId.set(modId, { modId, ts: epochSecondsToIso(seconds), meta: null });
+      const ts = firstIso(row.latest_file_update);
+      if (modId === null || ts === null) continue;
+      byId.set(modId, { modId, ts, meta: null });
     }
     for (const mod of addedBody) {
       if (!isRecord(mod)) continue;
       const modId = num(mod.mod_id);
-      const seconds = num(mod.updated_timestamp) ?? num(mod.created_timestamp);
-      if (modId === null || seconds === null) continue;
+      const ts = firstIso(mod.updated_timestamp, mod.created_timestamp);
+      if (modId === null || ts === null) continue;
       const existing = byId.get(modId);
-      byId.set(modId, { modId, ts: maxIso(existing?.ts ?? null, epochSecondsToIso(seconds)) ?? epochSecondsToIso(seconds), meta: mod });
+      byId.set(modId, { modId, ts: maxIso(existing?.ts ?? null, ts) ?? ts, meta: mod });
     }
 
     const overall = [...byId.values()].reduce<string | null>((acc, c) => maxIso(acc, c.ts), null);
@@ -152,7 +164,6 @@ export class NexusAdapter implements SourceAdapter {
     if (modId === null || !name || !version) return null;
     if (mod.available === false) return null;
     if (typeof mod.status === 'string' && mod.status !== 'published') return null;
-    const updatedSeconds = num(mod.updated_timestamp);
     return {
       source: this.config.id,
       store: 'nexus',
@@ -164,9 +175,9 @@ export class NexusAdapter implements SourceAdapter {
       iconUrl: str(mod.picture_url),
       description: str(mod.summary),
       categories: [],
-      isNsfw: mod.contains_adult_content === true,
+      isNsfw: mod.contains_adult_content !== false,
       isDeprecated: false,
-      updatedAt: updatedSeconds !== null ? epochSecondsToIso(updatedSeconds) : ts,
+      updatedAt: firstIso(mod.updated_timestamp) ?? ts,
       sizeBytes: null,
     };
   }
@@ -180,11 +191,11 @@ export class NexusAdapter implements SourceAdapter {
     if (key === null) return { excerpt: null, url: null };
     const fullUrl = `${pkg.url}?tab=logs`;
     try {
-      const res = await this.request(ctx, key, `mods/${encodeURIComponent(pkg.packageId)}/changelogs.json`);
+      const res = await this.request(ctx, key, `mods/${encodeURIComponent(pkg.packageId)}/changelogs.json`, CHANGELOG_MAX_BYTES);
       if (res.status !== 'ok' || quotaLow(res.headers)) return { excerpt: null, url: null };
       const body = parseJson(res.text);
       if (!isRecord(body)) return { excerpt: null, url: null };
-      return { excerpt: extractNexusChangelog(body as Record<string, string[]>, version, { fullUrl }), url: fullUrl };
+      return { excerpt: extractNexusChangelog(body, version, { fullUrl }), url: fullUrl };
     } catch (err) {
       console.warn(`[${this.config.id}] changelog fetch failed: ${describeError(err)}`);
       return { excerpt: null, url: null };

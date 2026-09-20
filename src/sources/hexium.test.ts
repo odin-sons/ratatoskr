@@ -2,7 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PollContext, PollResult } from '../core/ports.ts';
 import type { SourceConfig } from '../core/types.ts';
-import { createFakeFetch, fixture, json, makeCtx, makeState, text, type FakeFetch } from './__fixtures__/fake-fetch.ts';
+import { dump, stampFor } from './__fixtures__/dump-gen.ts';
+import { createFakeFetch, fixture, json, makeCtx as baseCtx, makeState, text, type FakeFetch } from './__fixtures__/fake-fetch.ts';
 import { HexiumAdapter, parseCursor } from './hexium.ts';
 
 const config: SourceConfig = { id: 'hexium:valheim', store: 'hexium', community: 'valheim', enabled: true };
@@ -23,6 +24,12 @@ const truth = JSON.parse(dumpFixture) as Truth[];
 const seq = (t: Truth): number => Number.parseInt(t.uuid4.slice(0, 8), 16);
 const ids = (r: { packageId: string }[]): string[] => r.map((p) => p.packageId).sort();
 const MAX_UPDATED = truth.map((t) => t.date_updated).sort().at(-1)!;
+
+const FIXTURE_NOW = new Date('2026-09-20T12:00:00Z');
+
+function makeCtx(fake: FakeFetch, over: Partial<PollContext> = {}): PollContext {
+  return baseCtx(fake, { now: FIXTURE_NOW, ...over });
+}
 
 function adapterWith(known: Record<string, string> = {}): HexiumAdapter {
   return new HexiumAdapter(config, { getAllKnownVersions: async () => new Map(Object.entries(known)) });
@@ -57,6 +64,8 @@ describe('parseCursor', () => {
     expect(parseCursor('2026-09-20T05:18:45Z')).toEqual({ kind: 'time', iso: '2026-09-20T05:18:45.000000Z' });
     expect(parseCursor('seed:2:2026-09-20T05:18:45.000000Z')).toEqual({ kind: 'seed', next: 2, mark: '2026-09-20T05:18:45.000000Z' });
     expect(parseCursor('seed:x:1')).toBeNull();
+    expect(parseCursor('seed:1:junk')).toEqual({ kind: 'seed', next: 1, mark: null });
+    expect(parseCursor('seed:1:')).toEqual({ kind: 'seed', next: 1, mark: null });
   });
 });
 
@@ -198,11 +207,11 @@ describe('HexiumAdapter.poll — steady state', () => {
     }
   });
 
-  it('holds the cursor back and reports incomplete when a matched record is unreadable', async () => {
+  it('skips an unreadable matched record and still advances the cursor', async () => {
     const broken = dumpFixture.replace(',"has_nsfw_content":', ',"nsfw":');
     const res = ok(await adapterWith().poll(makeCtx(routes(broken), { tickIndex: 0, state: makeState({ cursor: '2020-01-01T00:00:00.000000Z' }) })));
-    expect(res.complete).toBe(false);
-    expect(res.cursor).toBe('2020-01-01T00:00:00.000000Z');
+    expect(res.complete).toBe(true);
+    expect(res.cursor).toBe(MAX_UPDATED);
     expect(res.packages).toHaveLength(truth.length - 1);
   });
 
@@ -313,5 +322,233 @@ describe('HexiumAdapter.fetchChangelog', () => {
   it('returns nulls on failure', async () => {
     const fake = createFakeFetch([['/changelog/', () => new Response('', { status: 500 })]]);
     expect(await adapterWith().fetchChangelog(makeCtx(fake), pkg, '5.4.2350')).toEqual({ excerpt: null, url: null });
+  });
+});
+
+describe('HexiumAdapter — unreadable records are quarantined', () => {
+  const warnings = (): string[] => vi.mocked(console.warn).mock.calls.map((call) => String(call[0]));
+  const names = (from: number, to: number, skip: number[] = []): string[] =>
+    Array.from({ length: to - from + 1 }, (_, i) => from + i)
+      .filter((n) => !skip.includes(n))
+      .map((n) => `Owner${n}-P${n}`)
+      .sort();
+
+  it('seeds through an unreadable record, reaches a plain cursor, and logs one count-only line per affected poll', async () => {
+    const fake = routes(dump(20, (n) => (n === 5 ? { versions: 0 } : {})));
+    let res = ok(await adapterWith().poll(makeCtx(fake, { state: null })));
+    const seen = ids(res.packages);
+    for (let slice = 1; slice < 4; slice += 1) {
+      expect(res.complete).toBe(false);
+      res = ok(await adapterWith().poll(nextCtx(fake, res, { state: makeState({ cursor: res.cursor, bootstrapped: slice === 1 }) })));
+      seen.push(...ids(res.packages));
+    }
+    expect(res.complete).toBe(true);
+    expect(res.cursor).toBe(stampFor(20));
+    expect(seen.sort()).toEqual(names(1, 20, [5]));
+    const lines = warnings().filter((line) => line.includes('unreadable'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/unreadable dump records skipped: 1$/);
+    expect(lines[0]).not.toContain('Owner5');
+  });
+
+  it('advances the cursor past an unreadable record in steady state and stops re-reading the records behind it', async () => {
+    const fake = routes(dump(10, (n) => (n === 5 ? { versions: 0 } : {})));
+    const first = ok(await adapterWith().poll(makeCtx(fake, { tickIndex: 0, state: makeState({ cursor: stampFor(0) }) })));
+    expect(first.complete).toBe(true);
+    expect(first.cursor).toBe(stampFor(10));
+    expect(ids(first.packages)).toEqual(names(1, 10, [5]));
+    expect(warnings().filter((line) => line.includes('unreadable'))).toHaveLength(1);
+
+    const second = ok(await adapterWith().poll(nextCtx(fake, first, { tickIndex: 0 })));
+    expect(ids(second.packages)).toEqual(names(10, 10));
+    expect(second.cursor).toBe(stampFor(10));
+  });
+
+  it('holds the cursor and falls back to the listing when no matched record is readable', async () => {
+    const fake = routes(dump(10, () => ({ versions: 0 })));
+    const res = ok(await adapterWith().poll(makeCtx(fake, { tickIndex: 0, state: makeState({ cursor: stampFor(0) }) })));
+    expect(res.cursor).toBe(stampFor(0));
+    expect(res.packages).toHaveLength(4);
+    expect(fake.callsTo('frontend/packages')).toHaveLength(1);
+  });
+});
+
+describe('HexiumAdapter — cursor validation', () => {
+  const state = (cursor: string) => makeState({ cursor });
+
+  it('never moves the cursor backwards', async () => {
+    const cursor = '2026-06-01T00:00:00.000000Z';
+    const res = ok(await adapterWith().poll(makeCtx(routes(dump(10)), { tickIndex: 0, state: state(cursor) })));
+    expect(res.cursor).toBe(cursor);
+    expect(res.packages).toEqual([]);
+  });
+
+  it('keeps a far-future record out of the cursor but still reports it', async () => {
+    const text = dump(5, (n) => (n === 3 ? { updated: '2999-01-01T00:00:00.000000Z' } : {}));
+    const res = ok(await adapterWith().poll(makeCtx(routes(text), { tickIndex: 0, state: state(stampFor(0)) })));
+    expect(res.cursor).toBe(stampFor(5));
+    expect(ids(res.packages)).toContain('Owner3-P3');
+  });
+
+  it('accepts a stamp up to an hour ahead of now and rejects one beyond', async () => {
+    const at = (iso: string) => routes(dump(3, (n) => (n === 2 ? { updated: iso } : {})));
+    const now = new Date('2026-09-19T00:05:00Z');
+    const within = ok(await adapterWith().poll(makeCtx(at('2026-09-19T01:00:00.000000Z'), { tickIndex: 0, now, state: state(stampFor(0)) })));
+    expect(within.cursor).toBe('2026-09-19T01:00:00.000000Z');
+    const beyond = ok(await adapterWith().poll(makeCtx(at('2026-09-19T01:20:00.000000Z'), { tickIndex: 0, now, state: state(stampFor(0)) })));
+    expect(beyond.cursor).toBe(stampFor(3));
+  });
+
+  it('skips a record with a garbage stamp without poisoning the cursor', async () => {
+    const text = dump(5, (n) => (n === 3 ? { updatedField: '"zzzzzzzzzzTzzzzzzzzzzzzzzzZ"' } : {}));
+    const res = ok(await adapterWith().poll(makeCtx(routes(text), { tickIndex: 0, state: state(stampFor(0)) })));
+    expect(res.cursor).toBe(stampFor(5));
+    expect(ids(res.packages)).toEqual(['Owner1-P1', 'Owner2-P2', 'Owner4-P4', 'Owner5-P5']);
+  });
+
+  it('keeps a far-future record out of the seed mark', async () => {
+    const text = dump(20, (n) => (n === 3 ? { updated: '2999-01-01T00:00:00.000000Z' } : {}));
+    const res = ok(await adapterWith().poll(makeCtx(routes(text), { state: null })));
+    expect(res.cursor).toBe(`seed:1:${stampFor(20)}`);
+  });
+
+  it('clamps a stored cursor from the future to now, so newer records are not skipped forever', async () => {
+    const text = dump(5, (n) => (n === 3 ? { updated: '2026-09-20T12:30:00.000000Z' } : {}));
+    const res = ok(await adapterWith().poll(makeCtx(routes(text), { tickIndex: 0, state: state('2099-01-01T00:00:00.000000Z') })));
+    expect(ids(res.packages)).toEqual(['Owner3-P3']);
+    expect(res.cursor).toBe('2026-09-20T12:30:00.000000Z');
+  });
+
+  it('holds a clamped cursor at now when nothing newer exists', async () => {
+    const res = ok(await adapterWith().poll(makeCtx(routes(dump(5)), { tickIndex: 0, state: state('2099-01-01T00:00:00.000000Z') })));
+    expect(res.packages).toEqual([]);
+    expect(res.cursor).toBe('2026-09-20T12:00:00.000000Z');
+  });
+
+  it('leaves a cursor within the future slack untouched', async () => {
+    const cursor = '2026-09-20T12:30:00.000000Z';
+    const res = ok(await adapterWith().poll(makeCtx(routes(dump(5)), { tickIndex: 0, state: state(cursor) })));
+    expect(res.cursor).toBe(cursor);
+  });
+
+  it('clamps a seed mark from the future while seeding', async () => {
+    const res = ok(await adapterWith().poll(makeCtx(routes(dump(20)), { state: makeState({ cursor: 'seed:1:2099-01-01T00:00:00.000000Z', bootstrapped: false }) })));
+    expect(res.cursor).toBe('seed:2:2026-09-20T12:00:00.000000Z');
+  });
+
+  it('ends the seed on a clamped mark', async () => {
+    const res = ok(await adapterWith().poll(makeCtx(routes(dump(20)), { state: makeState({ cursor: 'seed:3:2099-01-01T00:00:00.000000Z', bootstrapped: false }) })));
+    expect(res.cursor).toBe('2026-09-20T12:00:00.000000Z');
+    expect(res.complete).toBe(true);
+  });
+
+  it('ignores a garbage seed mark and recomputes it', async () => {
+    const res = ok(await adapterWith().poll(makeCtx(routes(dump(20)), { state: makeState({ cursor: 'seed:1:zzzz', bootstrapped: false }) })));
+    expect(res.cursor).toBe(`seed:2:${stampFor(20)}`);
+  });
+});
+
+describe('HexiumAdapter — listing flags fail closed', () => {
+  const state = makeState({ cursor: '2026-09-20T02:00:00.000000Z' });
+
+  async function listing(mutate: (item: Record<string, unknown>) => void) {
+    const body = JSON.parse(listingFixture) as { packages: Record<string, unknown>[] };
+    mutate(body.packages[0]!);
+    const fake = createFakeFetch([[LISTING, () => json(body)]]);
+    return ok(await adapterWith().poll(makeCtx(fake, { tickIndex: 1, state })));
+  }
+
+  it.each([
+    ['missing', (item: Record<string, unknown>) => void delete item.has_nsfw_content],
+    ['null', (item: Record<string, unknown>) => void (item.has_nsfw_content = null)],
+    ['a string', (item: Record<string, unknown>) => void (item.has_nsfw_content = 'false')],
+    ['a number', (item: Record<string, unknown>) => void (item.has_nsfw_content = 0)],
+  ])('marks an item NSFW when its flag is %s', async (_label, mutate) => {
+    const res = await listing(mutate);
+    expect(res.packages[0]?.isNsfw).toBe(true);
+    expect(res.packages[1]?.isNsfw).toBe(false);
+  });
+
+  it('treats a non-boolean deprecated flag as not deprecated', async () => {
+    const res = await listing((item) => void (item.is_deprecated = 'yes'));
+    expect(res.packages[0]?.isDeprecated).toBe(false);
+  });
+
+  it('leaves previousVersion unknown for listing items', async () => {
+    const res = await listing(() => {});
+    expect(res.packages.every((p) => p.previousVersion === undefined)).toBe(true);
+  });
+});
+
+describe('HexiumAdapter — previousVersion', () => {
+  it('is carried from the dump history into steady-state snapshots and unknown for lean seeds', async () => {
+    const fake = routes(dump(12));
+    const steady = ok(await adapterWith().poll(makeCtx(fake, { tickIndex: 0, state: makeState({ cursor: stampFor(0) }) })));
+    const byId = new Map(steady.packages.map((p) => [p.packageId, p]));
+    expect(byId.get('Owner3-P3')).toMatchObject({ version: '1.0.3', previousVersion: '1.0.2' });
+    expect(byId.get('Owner6-P6')).toMatchObject({ version: '1.0.0', previousVersion: null });
+
+    const seed = ok(await adapterWith().poll(makeCtx(fake, { state: null })));
+    expect(seed.packages.length).toBeGreaterThan(0);
+    expect(seed.packages.every((p) => p.previousVersion === undefined)).toBe(true);
+  });
+});
+
+describe('HexiumAdapter.reconcile — slice hint', () => {
+  const now = new Date('2026-09-20T12:00:00Z');
+  const sliceOf = (index: number) => truth.filter((t) => seq(t) % 4 === index).map((t) => t.full_name).sort();
+
+  it('uses sliceHint modulo the slice count instead of the day', async () => {
+    for (const [hint, index] of [[0, 0], [1, 1], [2, 2], [3, 3], [6, 2], [7, 3]] as const) {
+      const out = await adapterWith().reconcile!(makeCtx(routes(), { now, sliceHint: hint }));
+      expect(ids(out), `hint ${hint}`).toEqual(sliceOf(index));
+    }
+  });
+
+  it('covers every slice when the same day runs with consecutive hints', async () => {
+    const seen = new Set<string>();
+    for (let hint = 10; hint < 14; hint += 1) {
+      (await adapterWith().reconcile!(makeCtx(routes(), { now, sliceHint: hint }))).forEach((p) => seen.add(p.packageId));
+    }
+    expect([...seen].sort()).toEqual(truth.map((t) => t.full_name).sort());
+  });
+
+  it('falls back to the day-based slice without a hint', async () => {
+    const out = await adapterWith().reconcile!(makeCtx(routes(), { now }));
+    expect(ids(out)).toEqual(sliceOf(Math.floor(now.getTime() / 86_400_000) % 4));
+  });
+});
+
+describe('HexiumAdapter.fetchChangelog — size cap', () => {
+  const pkg = {
+    source: 'hexium:valheim',
+    store: 'hexium' as const,
+    packageId: 'a-b',
+    owner: 'a',
+    name: 'b',
+    version: '1.0.0',
+    url: `${ORIGIN}/mods/a/b`,
+    iconUrl: null,
+    description: null,
+    categories: [],
+    isNsfw: false,
+    isDeprecated: false,
+    updatedAt: '2026-09-09T12:30:12.000000Z',
+    sizeBytes: null,
+  };
+
+  it('refuses a changelog body above the changelog cap without parsing it', async () => {
+    const huge = JSON.stringify({ markdown: `## 1.0.0\n${'- entry\n'.repeat(60_000)}` });
+    expect(huge.length).toBeGreaterThan(300_000);
+    const fake = createFakeFetch([['/changelog/', () => text(huge)]]);
+    const spy = vi.spyOn(JSON, 'parse');
+    expect(await adapterWith().fetchChangelog(makeCtx(fake), pkg, '1.0.0')).toEqual({ excerpt: null, url: null });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('still reads a changelog just below the cap', async () => {
+    const body = JSON.stringify({ markdown: `## 1.0.0\n- fixed a thing\n${'x'.repeat(100_000)}` });
+    const fake = createFakeFetch([['/changelog/', () => text(body)]]);
+    expect((await adapterWith().fetchChangelog(makeCtx(fake), pkg, '1.0.0')).excerpt).toContain('fixed a thing');
   });
 });

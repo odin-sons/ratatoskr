@@ -95,6 +95,44 @@ describe('conditionalGet', () => {
     expect(res.status === 'ok' && res.text).toBe('héllo — wörld');
   });
 
+  it('decodes the whole body in one pass however many chunks it arrives in', async () => {
+    const decode = vi.spyOn(TextDecoder.prototype, 'decode');
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let i = 0; i < 100; i += 1) controller.enqueue(new TextEncoder().encode(`{"row":${i}}\n`));
+        controller.close();
+      },
+    });
+    const fake = createFakeFetch([['example.test', () => new Response(body)]]);
+    const res = await conditionalGet(makeCtx(fake), 'https://example.test/a');
+    expect(res.status === 'ok' && res.text.split('\n')).toHaveLength(101);
+    expect(decode).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the size limit exact across chunk boundaries', async () => {
+    const chunked = (sizes: number[]): Response =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (const n of sizes) controller.enqueue(new Uint8Array(n).fill(120));
+            controller.close();
+          },
+        }),
+      );
+    const at = createFakeFetch([['example.test', () => chunked([40, 40, 20])]]);
+    const ok = await conditionalGet(makeCtx(at), 'https://example.test/a', { maxBytes: 100 });
+    expect(ok.status === 'ok' && ok.text.length).toBe(100);
+    const over = createFakeFetch([['example.test', () => chunked([40, 40, 21])]]);
+    await expect(conditionalGet(makeCtx(over), 'https://example.test/a', { maxBytes: 100 })).rejects.toBeInstanceOf(ResponseTooLargeError);
+  });
+
+  it('strips a leading byte order mark and replaces invalid UTF-8 like a plain decode', async () => {
+    const bytes = new Uint8Array([0xef, 0xbb, 0xbf, 0x61, 0xff, 0x62]);
+    const fake = createFakeFetch([['example.test', () => new Response(bytes)]]);
+    const res = await conditionalGet(makeCtx(fake), 'https://example.test/a');
+    expect(res.status === 'ok' && res.text).toBe(new TextDecoder().decode(bytes));
+  });
+
   describe('credentials', () => {
     const credentials = { header: 'apikey', value: 'SECRET', host: 'api.example.test' };
 

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SourceConfig } from '../core/types.ts';
 import type { PollResult, SourceAdapter } from '../core/ports.ts';
 import { createFakeFetch, fixture, json, makeCtx, makeState, text } from './__fixtures__/fake-fetch.ts';
+import { VERSIONS_MAX_BYTES } from './budget.ts';
 import { ThunderstoreAdapter } from './thunderstore.ts';
 
 const config: SourceConfig = { id: 'thunderstore:valheim', store: 'thunderstore', community: 'valheim', enabled: true };
@@ -341,5 +342,317 @@ describe('ThunderstoreAdapter.fetchChangelog', () => {
     const empty = createFakeFetch([['/changelog/', () => json({ markdown: null })]]);
     const out = await adapter.fetchChangelog(makeCtx(empty), pkg, '1.3.6');
     expect(out.excerpt).toBeNull();
+  });
+});
+
+describe('ThunderstoreAdapter.poll — backlog larger than the page cap', () => {
+  interface Row {
+    name: string;
+    updated: string;
+  }
+
+  function server(rows: Row[], pageSize = 20) {
+    const state = { rows: [...rows] };
+    const sorted = (): Row[] => [...state.rows].sort((a, b) => (a.updated < b.updated ? 1 : -1));
+    const responder = (call: { url: string }): Response => {
+      const page = Number(new URL(call.url).searchParams.get('page') ?? '1');
+      const all = sorted();
+      const from = (page - 1) * pageSize;
+      if (page > 1 && from >= all.length) return new Response('{"detail":"Invalid page."}', { status: 404 });
+      const items = all.slice(from, from + pageSize).map((r) => ({ ns: 'N', name: r.name, updated: r.updated }));
+      return json(listingBody(items, from + pageSize < all.length));
+    };
+    return { state, responder };
+  }
+
+  const older = (count: number): Row[] => Array.from({ length: count }, (_, i) => ({ name: `Old${i}`, updated: stamp(5000 + i) }));
+  const updates = (count: number, first = 0): Row[] => Array.from({ length: count }, (_, i) => ({ name: `U${first + i}`, updated: stamp(1000 - (first + i)) }));
+
+  async function drain(s: ReturnType<typeof server>, cursor: string, opts: { maxPolls?: number; between?: (poll: number) => void } = {}) {
+    const emitted: string[] = [];
+    const listingCalls: number[] = [];
+    let current = makeState({ cursor });
+    for (let poll = 0; poll < (opts.maxPolls ?? 60); poll += 1) {
+      opts.between?.(poll);
+      const fake = createFakeFetch([
+        ['/versions/', () => json(versionsBody('1.0.0', '2026-01-01T00:00:00.000000Z'))],
+        [LISTING, s.responder],
+      ]);
+      const res = okResult(await adapter.poll(makeCtx(fake, { state: current })));
+      emitted.push(...res.packages.map((p) => p.name));
+      listingCalls.push(fake.callsTo(LISTING).length);
+      current = makeState({ cursor: res.cursor, etag: res.etag });
+      if (res.complete && res.packages.length === 0) break;
+    }
+    return { emitted, listingCalls, cursor: current.cursor };
+  }
+
+  it('emits every update exactly once when 100 updates sit behind a cap of three 20-item pages', async () => {
+    const s = server([...updates(100), ...older(30)]);
+    const { emitted, listingCalls } = await drain(s, stamp(2000));
+    expect(emitted.slice().sort()).toEqual(updates(100).map((r) => r.name).sort());
+    expect(new Set(emitted).size).toBe(100);
+    expect(Math.max(...listingCalls)).toBeLessThanOrEqual(3);
+  });
+
+  it('drains a 400-update backlog without loss within the per-poll page cap', async () => {
+    const s = server([...updates(400), ...older(50)]);
+    const { emitted, listingCalls } = await drain(s, stamp(2000), { maxPolls: 200 });
+    expect(new Set(emitted).size).toBe(400);
+    expect(emitted).toHaveLength(400);
+    expect(Math.max(...listingCalls)).toBeLessThanOrEqual(3);
+  });
+
+  it('keeps every update while new updates keep arriving on top', async () => {
+    const s = server([...updates(100), ...older(30)]);
+    let arrived = 0;
+    const { emitted } = await drain(s, stamp(2000), {
+      between: (poll) => {
+        if (poll >= 2 && poll < 6) {
+          for (let i = 0; i < 3; i += 1) s.state.rows.push({ name: `Late${arrived}`, updated: stamp(500 - arrived) }), (arrived += 1);
+        }
+      },
+    });
+    const expected = [...updates(100).map((r) => r.name), ...Array.from({ length: arrived }, (_, i) => `Late${i}`)];
+    expect(emitted.slice().sort()).toEqual(expected.sort());
+    expect(new Set(emitted).size).toBe(expected.length);
+  });
+
+  it('does not advance the cursor past updates it has not seen', async () => {
+    const s = server([...updates(100), ...older(30)]);
+    const fake = createFakeFetch([
+      ['/versions/', () => json(versionsBody('1.0.0', '2026-01-01T00:00:00.000000Z'))],
+      [LISTING, s.responder],
+    ]);
+    const res = okResult(await adapter.poll(makeCtx(fake, { state: makeState({ cursor: stamp(2000) }) })));
+    expect(res.complete).toBe(false);
+    for (const p of res.packages) expect(p.updatedAt <= (res.cursor ?? '')).toBe(true);
+    const cursorTime = (res.cursor ?? '').split('@')[0]!;
+    const unseenOlder = updates(100).filter((r) => r.updated <= cursorTime && !res.packages.some((p) => p.name === r.name));
+    expect(unseenOlder).toEqual([]);
+  });
+
+  it('recovers from a stale or garbage resume hint', async () => {
+    const s = server([...updates(30), ...older(10)]);
+    for (const hint of ['@50', '@abc', '@0', '@-3', '@']) {
+      const fake = createFakeFetch([
+        ['/versions/', () => json(versionsBody('1.0.0', '2026-01-01T00:00:00.000000Z'))],
+        [LISTING, s.responder],
+      ]);
+      const res = okResult(await adapter.poll(makeCtx(fake, { state: makeState({ cursor: `${stamp(2000)}${hint}` }) })));
+      expect(res.packages.length, hint).toBeGreaterThan(0);
+    }
+  });
+
+  it('accepts a plain timestamp cursor written before resume hints existed', async () => {
+    const s = server([...updates(5), ...older(5)]);
+    const { emitted } = await drain(s, stamp(2000));
+    expect(emitted.slice().sort()).toEqual(updates(5).map((r) => r.name).sort());
+  });
+});
+
+describe('ThunderstoreAdapter.poll — versions size cap', () => {
+  const history = (count: number): string =>
+    JSON.stringify(
+      Array.from({ length: count }, (_, i) => ({
+        version_number: `1.0.${i}`,
+        datetime_created: new Date(Date.UTC(2020, 0, 1) + i * 3_600_000).toISOString().replace('Z', '000Z'),
+        download_url: `https://thunderstore.io/package/download/A/Big/1.0.${i}/`,
+        install_url: `ror2mm://v1/install/thunderstore.io/A/Big/1.0.${i}/`,
+      })),
+    );
+  const oversized = history(6000);
+  const items: Item[] = [
+    { ns: 'A', name: 'Big', updated: stamp(20) },
+    { ns: 'A', name: 'Ok', updated: stamp(10) },
+  ];
+  const routes = (big: () => Response): ReturnType<typeof createFakeFetch> =>
+    createFakeFetch([
+      [LISTING, () => json(listingBody(items))],
+      ['A/Big/versions/', big],
+      ['A/Ok/versions/', () => json(versionsBody('2.0.0', stamp(10)))],
+    ]);
+  const warnings = (): string[] => vi.mocked(console.warn).mock.calls.map((call) => String(call[0]));
+
+  it('has a fixture above the cap and a long history below it', () => {
+    expect(oversized.length).toBeGreaterThan(VERSIONS_MAX_BYTES);
+    expect(history(1500).length).toBeLessThan(VERSIONS_MAX_BYTES);
+  });
+
+  it.each([
+    ['streamed', () => text(oversized)],
+    ['declared', () => text(oversized, { 'content-length': String(oversized.length) })],
+  ])('skips a package whose versions body is oversized (%s), like a 404, and moves the cursor past it', async (_how, big) => {
+    const res = okResult(await adapter.poll(makeCtx(routes(big), { state: makeState({ cursor: stamp(60) }) })));
+    expect(res.packages.map((p) => p.name)).toEqual(['Ok']);
+    expect(res.cursor).toBe(stamp(10));
+    expect(res.complete).toBe(true);
+    const lines = warnings().filter((line) => line.includes('versions'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('A-Big');
+    expect(lines[0]).not.toContain('1.0.5999');
+  });
+
+  it('skips an oversized package on a cold start instead of failing the poll', async () => {
+    const res = okResult(await adapter.poll(makeCtx(routes(() => text(oversized)), { state: null })));
+    expect(res.packages.map((p) => p.name)).toEqual(['Ok']);
+  });
+
+  it('still reads a long history under the cap', async () => {
+    const res = okResult(await adapter.poll(makeCtx(routes(() => text(history(1500))), { state: makeState({ cursor: stamp(60) }) })));
+    expect(res.packages.map((p) => [p.name, p.version, p.previousVersion])).toEqual([
+      ['Big', '1.0.1499', '1.0.1498'],
+      ['Ok', '2.0.0', '0.0.1'],
+    ]);
+  });
+});
+
+describe('ThunderstoreAdapter.poll — stored cursor in the future', () => {
+  const fresh = '2026-09-19T00:20:00.000000Z';
+  const items: Item[] = [
+    { ns: 'A', name: 'Fresh', updated: fresh },
+    { ns: 'A', name: 'Old', updated: stamp(30) },
+  ];
+  const fake = (): ReturnType<typeof createFakeFetch> =>
+    createFakeFetch([
+      [LISTING, () => json(listingBody(items))],
+      ['/versions/', () => json(versionsBody('1.0.0', fresh))],
+    ]);
+
+  it('clamps the cursor to now, so an update newer than now is not skipped forever', async () => {
+    const res = okResult(await adapter.poll(makeCtx(fake(), { state: makeState({ cursor: '2099-01-01T00:00:00.000000Z' }) })));
+    expect(res.packages.map((p) => p.name)).toEqual(['Fresh']);
+    expect(res.cursor).toBe(fresh);
+  });
+
+  it('holds the cursor at now when nothing is newer', async () => {
+    const quiet = createFakeFetch([[LISTING, () => json(listingBody([items[1]!]))]]);
+    const res = okResult(await adapter.poll(makeCtx(quiet, { state: makeState({ cursor: '2099-01-01T00:00:00.000000Z' }) })));
+    expect(res.packages).toEqual([]);
+    expect(res.cursor).toBe('2026-09-19T00:05:00.000000Z');
+  });
+
+  it('keeps the resume page of a clamped cursor', async () => {
+    const res = okResult(await adapter.poll(makeCtx(fake(), { state: makeState({ cursor: '2099-01-01T00:00:00.000000Z@3' }) })));
+    expect(res.packages.map((p) => p.name)).toEqual(['Fresh']);
+  });
+
+  it('leaves a cursor within the future slack untouched', async () => {
+    const cursor = '2026-09-19T00:30:00.000000Z';
+    const quiet = createFakeFetch([[LISTING, () => json(listingBody([items[1]!]))]]);
+    const res = okResult(await adapter.poll(makeCtx(quiet, { state: makeState({ cursor }) })));
+    expect(res.cursor).toBe(cursor);
+  });
+});
+
+describe('ThunderstoreAdapter.poll — previousVersion', () => {
+  async function versions(body: unknown[]) {
+    const fake = createFakeFetch([
+      [LISTING, () => json(listingBody([{ ns: 'A', name: 'B', updated: stamp(10) }]))],
+      ['/versions/', () => json(body)],
+    ]);
+    return okResult(await adapter.poll(makeCtx(fake, { state: makeState({ cursor: stamp(60) }) }))).packages[0];
+  }
+
+  it('is null when the package has a single version', async () => {
+    expect((await versions([{ version_number: '1.0.0', datetime_created: stamp(10) }]))?.previousVersion).toBeNull();
+  });
+
+  it('is the second-newest version by creation time', async () => {
+    const pkg = await versions([
+      { version_number: '1.0.0', datetime_created: '2026-01-01T00:00:00.000000Z' },
+      { version_number: '1.2.0', datetime_created: stamp(10) },
+      { version_number: '1.1.0', datetime_created: '2026-03-01T00:00:00.000000Z' },
+    ]);
+    expect(pkg).toMatchObject({ version: '1.2.0', previousVersion: '1.1.0' });
+  });
+
+  it('ignores unusable entries when picking the previous version', async () => {
+    const pkg = await versions([
+      { version_number: '2.0.0', datetime_created: stamp(10) },
+      { version_number: '', datetime_created: '2026-05-01T00:00:00.000000Z' },
+      { version_number: '1.9.0', datetime_created: 'not a date' },
+      { version_number: '1.8.0', datetime_created: '2026-02-01T00:00:00.000000Z' },
+    ]);
+    expect(pkg).toMatchObject({ version: '2.0.0', previousVersion: '1.8.0' });
+  });
+
+  it('matches the versions fixture ground truth', async () => {
+    const fake = createFakeFetch([
+      [LISTING, () => text(listingFixture)],
+      ['Carturs_Map_Pins/versions/', () => text(versionsFixture)],
+    ]);
+    const res = okResult(await adapter.poll(makeCtx(fake, { state: makeState({ cursor: '2026-09-18T23:58:30.000000Z' }) })));
+    expect(res.packages.find((p) => p.name === 'Carturs_Map_Pins')).toMatchObject({ version: '1.3.6', previousVersion: '1.3.2' });
+  });
+});
+
+describe('ThunderstoreAdapter — NSFW fails closed', () => {
+  async function flagged(mutate: (row: Record<string, unknown>) => void) {
+    const body = listingBody([{ ns: 'A', name: 'Spicy', updated: stamp(10) }]) as { results: Record<string, unknown>[] };
+    mutate(body.results[0]!);
+    const fake = createFakeFetch([
+      [LISTING, () => json(body)],
+      ['/versions/', () => json(versionsBody('1.0.0', stamp(10)))],
+    ]);
+    return okResult(await adapter.poll(makeCtx(fake, { state: makeState({ cursor: stamp(60) }) }))).packages[0];
+  }
+
+  it.each([
+    ['missing', (row: Record<string, unknown>) => void delete row.is_nsfw],
+    ['null', (row: Record<string, unknown>) => void (row.is_nsfw = null)],
+    ['a string', (row: Record<string, unknown>) => void (row.is_nsfw = 'false')],
+    ['a number', (row: Record<string, unknown>) => void (row.is_nsfw = 0)],
+  ])('marks a package NSFW when its flag is %s', async (_label, mutate) => {
+    expect((await flagged(mutate))?.isNsfw).toBe(true);
+  });
+
+  it('keeps an explicit false as safe and treats a non-boolean deprecated flag as not deprecated', async () => {
+    const pkg = await flagged((row) => void (row.is_deprecated = 'maybe'));
+    expect(pkg).toMatchObject({ isNsfw: false, isDeprecated: false });
+  });
+
+  it('asks for non-NSFW, non-deprecated listings explicitly on every page', async () => {
+    const page = Array.from({ length: 2 }, (_, i) => ({ ns: 'N', name: `X${i}`, updated: stamp(30 - i) }));
+    const fake = createFakeFetch([
+      [LISTING, () => json(listingBody(page, true))],
+      ['/versions/', () => json(versionsBody('1.0.0', '2026-09-01T00:00:00.000000Z'))],
+    ]);
+    await adapter.poll(makeCtx(fake, { state: makeState({ cursor: stamp(100) }) }));
+    const urls = fake.callsTo(LISTING).map((c) => new URL(c.url));
+    expect(urls.length).toBeGreaterThan(1);
+    for (const url of urls) {
+      expect(url.searchParams.get('nsfw')).toBe('false');
+      expect(url.searchParams.get('deprecated')).toBe('false');
+      expect(url.searchParams.get('ordering')).toBe('last-updated');
+    }
+  });
+});
+
+describe('ThunderstoreAdapter.fetchChangelog — size cap', () => {
+  const pkg = {
+    source: 'thunderstore:valheim',
+    store: 'thunderstore' as const,
+    packageId: 'A-B',
+    owner: 'A',
+    name: 'B',
+    version: '1.0.0',
+    url: 'https://thunderstore.io/c/valheim/p/A/B/',
+    iconUrl: null,
+    description: null,
+    categories: [],
+    isNsfw: false,
+    isDeprecated: false,
+    updatedAt: '2026-09-18T23:58:52.651200Z',
+    sizeBytes: null,
+  };
+
+  it('refuses a changelog body above the changelog cap without parsing it', async () => {
+    const huge = JSON.stringify({ markdown: `## 1.0.0\n${'- entry\n'.repeat(60_000)}` });
+    expect(huge.length).toBeGreaterThan(300_000);
+    const fake = createFakeFetch([['/changelog/', () => text(huge)]]);
+    const parse = vi.spyOn(JSON, 'parse');
+    expect(await adapter.fetchChangelog(makeCtx(fake), pkg, '1.0.0')).toEqual({ excerpt: null, url: null });
+    expect(parse).not.toHaveBeenCalled();
   });
 });

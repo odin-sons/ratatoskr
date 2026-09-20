@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
-import { epochSecondsToIso, maxIso, normalizeIso } from './iso.ts';
+import { clampToNow, epochSecondsToIso, maxIso, normalizeIso } from './iso.ts';
 
 describe('normalizeIso', () => {
   it('pads and truncates the fraction to six digits in UTC', () => {
@@ -30,6 +30,22 @@ describe('normalizeIso', () => {
 describe('epochSecondsToIso / maxIso', () => {
   it('formats epoch seconds canonically', () => {
     expect(epochSecondsToIso(1_789_776_053)).toBe('2026-09-19T00:00:53.000000Z');
+  });
+
+  it('rejects epoch seconds outside the representable canonical range', () => {
+    for (const bad of [1e20, -1, Number.NaN, Number.POSITIVE_INFINITY, 253_402_300_800, Number.MAX_SAFE_INTEGER]) {
+      expect(epochSecondsToIso(bad), String(bad)).toBeNull();
+    }
+    expect(epochSecondsToIso(0)).toBe('1970-01-01T00:00:00.000000Z');
+    expect(epochSecondsToIso(253_402_300_799)).toBe('9999-12-31T23:59:59.000000Z');
+  });
+
+  it('cuts a cursor beyond now plus one hour back to now and leaves the rest alone', () => {
+    const now = new Date('2026-09-19T12:00:00Z');
+    expect(clampToNow('2099-01-01T00:00:00.000000Z', now)).toBe('2026-09-19T12:00:00.000000Z');
+    expect(clampToNow('2026-09-19T13:00:00.000001Z', now)).toBe('2026-09-19T12:00:00.000000Z');
+    expect(clampToNow('2026-09-19T13:00:00.000000Z', now)).toBe('2026-09-19T13:00:00.000000Z');
+    expect(clampToNow('2020-01-01T00:00:00.000000Z', now)).toBe('2020-01-01T00:00:00.000000Z');
   });
 
   it('picks the later value and tolerates nulls', () => {
