@@ -1,73 +1,44 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { neutralizeMentions } from '../text/sanitize.ts';
+import { neutralizeMentions, stripUnsafeChars } from '../text/sanitize.ts';
 import { CAPS } from './layout.ts';
 
-const SPECIAL = new Set(['\\', '*', '_', '~', '|', '`', '[', ']', '(', ')', '<', '>']);
+const SPECIAL = /[\\*_~|`[\]()<>]/g;
+const LINE_START = /(^|\n)(?:([-#])|(\d+)\.(?![^ \n]))/g;
 const BIDI = /\p{Bidi_Control}/gu;
 const HOST = /^https?:\/\/[^\s/?#]+/i;
 const URL_UNSAFE = /[\p{Cc}\s()<>\\|[\]"`]/gu;
 
-function isDigit(ch: string): boolean {
-  return ch >= '0' && ch <= '9';
+/** First `limit` characters of `raw`, never ending in half a surrogate pair. */
+export function head(raw: string, limit: number): string {
+  if (raw.length <= limit) return raw;
+  const last = raw.charCodeAt(limit - 1);
+  return raw.slice(0, last >= 0xd800 && last <= 0xdbff ? limit - 1 : limit);
 }
 
-function scan(raw: string): string {
-  return (raw.length > CAPS.scanChars ? raw.slice(0, CAPS.scanChars) : raw).replace(BIDI, '');
-}
-
-function cleanInline(raw: string): string {
-  return neutralizeMentions(scan(raw).replace(/[\p{Cc}\p{Zl}\p{Zp}\s]+/gu, ' ').trim());
-}
-
-function cleanBlock(raw: string): string {
-  const text = scan(raw)
-    .replace(/\r\n|[\r\p{Zl}\p{Zp}\x85]/gu, '\n')
-    .replace(/[\p{Cc}\p{Zl}\p{Zp}\s]/gu, (ch) => (ch === '\n' ? '\n' : ' '))
-    .replace(/\n{3,}/g, '\n\n')
-    .replace(/ +/g, ' ')
-    .replace(/ ?\n ?/g, '\n')
-    .trim();
-  return neutralizeMentions(text);
+function cleanInline(raw: string, max: number): string {
+  return neutralizeMentions(stripUnsafeChars(head(raw, max * CAPS.rawFactor).replace(BIDI, '').replace(/[\p{Cc}\p{Zl}\p{Zp}\s]+/gu, ' ')).trim());
 }
 
 /** Escapes Markdown control characters and line-start list markers; never splits an escape pair; appends `…` when cut. */
 export function escapeTruncate(text: string, max: number): string {
-  const chars = Array.from(text);
-  const pieces: string[] = [];
-  let len = 0;
-  let col = 0;
-  let onlyDigits = true;
-  for (let i = 0; i < chars.length; i++) {
-    const ch = chars[i]!;
-    const next = chars[i + 1];
-    const listDot = ch === '.' && col > 0 && onlyDigits && (next === undefined || next === ' ' || next === '\n');
-    const escape = SPECIAL.has(ch) || (col === 0 && (ch === '-' || ch === '#')) || listDot;
-    const piece = escape ? `\\${ch}` : ch;
-    if (len + piece.length > max) {
-      while (pieces.length > 0 && len + 1 > max) len -= pieces.pop()!.length;
-      return max >= 1 ? `${pieces.join('')}…` : '';
-    }
-    pieces.push(piece);
-    len += piece.length;
-    if (ch === '\n') {
-      col = 0;
-      onlyDigits = true;
-    } else {
-      col += 1;
-      if (!isDigit(ch)) onlyDigits = false;
-    }
-  }
-  return pieces.join('');
+  if (max < 1) return '';
+  const escaped = text.replace(SPECIAL, '\\$&').replace(LINE_START, (_match, before: string, mark?: string, digits?: string) =>
+    mark !== undefined ? `${before}\\${mark}` : `${before}${digits}\\.`,
+  );
+  if (escaped.length <= max) return escaped;
+  let end = max - 1;
+  let slashes = 0;
+  while (end - 1 - slashes >= 0 && escaped.charCodeAt(end - 1 - slashes) === 92) slashes += 1;
+  if (slashes % 2 === 1) end -= 1;
+  const last = escaped.charCodeAt(end - 1);
+  const after = escaped.charCodeAt(end);
+  if (last >= 0xd800 && last <= 0xdbff && after >= 0xdc00 && after <= 0xdfff) end -= 1;
+  return `${escaped.slice(0, end)}…`;
 }
 
 /** Untrusted single-line text, safe to embed anywhere in Markdown, at most `max` characters. */
 export function inline(raw: string, max: number): string {
-  return escapeTruncate(cleanInline(raw), max);
-}
-
-/** Untrusted multi-line text rendered literally, at most `max` characters. */
-export function block(raw: string, max: number): string {
-  return escapeTruncate(cleanBlock(raw), max);
+  return escapeTruncate(cleanInline(raw, max), max);
 }
 
 /** Returns a Markdown-destination-safe http(s) URL, or null when unusable or longer than the cap. */

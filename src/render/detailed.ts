@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { FULL_CHANGELOG_LABEL } from '../changelog/links.ts';
 import { DISCORD, CHANGELOG_EXCERPT_MAX } from '../core/constants.ts';
 import type { DiscordEmbed, ModEvent } from '../core/types.ts';
-import { stripHtml } from '../text/sanitize.ts';
+import { neutralizeMentions, stripHtml, stripUnsafeChars, truncate } from '../text/sanitize.ts';
 import { CAPS } from './layout.ts';
 import { STORES } from './stores.ts';
-import { block, formatBytes, inline, mdLink, safeUrl } from './text.ts';
+import { formatBytes, head, inline, mdLink, safeUrl } from './text.ts';
 
 const MIN_NAME_ROOM = 16;
-const FULL_CHANGELOG_LABEL = 'Full changelog';
+const FULL_LINK_PREFIX = `[${FULL_CHANGELOG_LABEL}](`;
 
 function timestamp(createdAt: string, now: Date): string | undefined {
   const parsed = Date.parse(createdAt);
@@ -47,16 +48,22 @@ function description(event: ModEvent): string | undefined {
   if (meta) lines.push(meta);
   const also = alsoOnLine(event);
   if (also) lines.push(also);
-  const excerpt = event.pkg.description ? inline(stripHtml(event.pkg.description), CAPS.excerpt) : '';
+  const excerpt = event.pkg.description ? inline(stripHtml(head(event.pkg.description, CAPS.excerpt * CAPS.rawFactor)), CAPS.excerpt) : '';
   if (excerpt) lines.push(excerpt);
   return lines.length > 0 ? lines.join('\n') : undefined;
 }
 
+function endsWithFullLink(text: string): boolean {
+  return text.startsWith(FULL_LINK_PREFIX, text.lastIndexOf('\n') + 1) && text.endsWith(')');
+}
+
+/** The excerpt is final Markdown from the changelog module; only invisible-character stripping, mention neutralising and a length cap are applied. */
 function changelogField(event: ModEvent): { name: string; value: string } | null {
+  const raw = event.changelog ?? '';
   const url = safeUrl(event.changelogUrl);
-  const link = url ? mdLink(FULL_CHANGELOG_LABEL, url) : '';
+  const link = url && !endsWithFullLink(raw) ? mdLink(FULL_CHANGELOG_LABEL, url) : '';
   const room = Math.min(CHANGELOG_EXCERPT_MAX, DISCORD.embedFieldValueMax - (link ? link.length + 1 : 0));
-  const excerpt = event.changelog ? block(event.changelog, room) : '';
+  const excerpt = truncate(neutralizeMentions(stripUnsafeChars(head(raw, room * 2))).trim(), room);
   const value = [excerpt, link].filter(Boolean).join('\n');
   return value ? { name: 'Changelog', value } : null;
 }

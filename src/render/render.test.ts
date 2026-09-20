@@ -4,13 +4,16 @@ import { describe, expect, it } from 'vitest';
 import { DISCORD, PROJECT } from '../core/constants.ts';
 import { eventId } from '../core/ids.ts';
 import type { DiscordMessage, EventKind, ModEvent, StoreKind } from '../core/types.ts';
+import { extractChangelog } from '../changelog/extract.ts';
+import { hasInvisible, INVISIBLE_CODE_POINTS } from '../text/__fixtures__/invisible.ts';
+import { bestOf } from '../testing/timing.ts';
 import { countItems } from './count.ts';
 import { prepare, renderBlocks } from './compact.ts';
 import { planDigest } from './digest.ts';
 import { renderDigest, renderImmediate } from './index.ts';
 import { assertWithinLimits, measureMessage } from './limits.ts';
 import { SOURCE_FOOTER } from './layout.ts';
-import { formatBytes, inline, safeUrl } from './text.ts';
+import { escapeTruncate, formatBytes, inline, safeUrl } from './text.ts';
 
 const NOW = new Date('2026-09-19T12:00:00Z');
 const STORE_KINDS: StoreKind[] = ['thunderstore', 'hexium', 'nexus'];
@@ -312,6 +315,33 @@ describe('injection', () => {
   });
 });
 
+describe('invisible characters in text fields', () => {
+  const RAW = INVISIBLE_CODE_POINTS.map(([label, code]): [string, string] => [label, String.fromCodePoint(code)]);
+  const ENTITIES = INVISIBLE_CODE_POINTS.map(([label, code]): [string, string] => [label, `&#x${code.toString(16)};`]);
+
+  it.each(RAW)('%s written raw is dropped from name, owner, versions and description, detailed and compact', (_label, mark) => {
+    const event = makeEvent({ kind: 'update', name: `Mo${mark}d`, owner: `Ow${mark}ner`, versionFrom: `1${mark}.0`, versionTo: `2${mark}.0`, description: `De${mark}sc` });
+    for (const text of [allText([renderImmediate(event, { now: NOW })]), allText(renderDigest([event], noDetail))]) {
+      expect(hasInvisible(text)).toBe(false);
+    }
+    const detailed = renderImmediate(event, { now: NOW }).embeds![0]!;
+    expect(detailed.title?.replace(/\s/g, '')).toBe('Mod1.0→2.0');
+    expect(detailed.description?.replace(/\s/g, '')).toContain('byOwner');
+    expect(detailed.description?.replace(/\s/g, '')).toContain('Desc');
+  });
+
+  it.each(ENTITIES)('%s written as an entity is dropped from the description', (_label, mark) => {
+    const event = makeEvent({ kind: 'new', description: `De${mark}sc` });
+    const text = allText([renderImmediate(event, { now: NOW })]);
+    expect(hasInvisible(text)).toBe(false);
+    expect(text).toContain('Desc');
+  });
+
+  it('keeps a line separator inside a name as a space', () => {
+    expect(inline(`a${String.fromCharCode(0x2028)}b${String.fromCharCode(0x2029)}c`, 50)).toBe('a b c');
+  });
+});
+
 describe('splitting', () => {
   it('numbers messages and prefers store boundaries', () => {
     const events = [...realisticUpdates(150, 'thunderstore'), ...realisticUpdates(150, 'hexium'), ...realisticUpdates(40, 'nexus')];
@@ -380,6 +410,172 @@ describe('renderImmediate', () => {
     const msg = renderImmediate(makeEvent({ kind: 'new' }), { now: NOW });
     expect(msg.embeds![0]!.footer!.text).toBe(`Thunderstore · new package · ratatoskr v${PROJECT.version} · source: github.com/odin-sons/ratatoskr`);
     expect(measureMessage(msg)).toBeLessThan(DISCORD.embedTotalTextMax);
+  });
+});
+
+describe('changelog field', () => {
+  const URL_ = 'https://x.io/changelog';
+  const field = (event: ModEvent): string | undefined => renderImmediate(event, { now: NOW }).embeds![0]!.fields?.[0]?.value;
+  const count = (text: string, part: string): number => text.split(part).length - 1;
+
+  it('inserts an extracted excerpt exactly as the changelog module produced it', () => {
+    const markdown = '## 1.0.0\n### Added\n- **bold** item with `code`\n```\nconst a = 1;\n```\n- [docs](https://example.com/d)';
+    const excerpt = extractChangelog(markdown, '1.0.0', { fullUrl: URL_ });
+    expect(excerpt).toBe('**Added**\n- **bold** item with \\`code\\`\n\\`\\`\\`\nconst a = 1;\n\\`\\`\\`\n- [docs](https://example.com/d)\n[Full changelog](https://x.io/changelog)');
+    expect(field(makeEvent({ kind: 'new', changelog: excerpt, changelogUrl: URL_ }))).toBe(excerpt);
+  });
+
+  it('shows exactly one full-changelog link when the excerpt already ends with it', () => {
+    const excerpt = extractChangelog('## 1.0.0\n- a', '1.0.0', { fullUrl: URL_ })!;
+    const value = field(makeEvent({ kind: 'new', changelog: excerpt, changelogUrl: URL_ }))!;
+    expect(count(value, '[Full changelog](')).toBe(1);
+  });
+
+  it('adds the link itself when the excerpt carries none, and shows the link alone without an excerpt', () => {
+    expect(field(makeEvent({ kind: 'new', changelog: '- a\n- b', changelogUrl: URL_ }))).toBe(`- a\n- b\n[Full changelog](${URL_})`);
+    expect(field(makeEvent({ kind: 'new', changelog: null, changelogUrl: URL_ }))).toBe(`[Full changelog](${URL_})`);
+    expect(field(makeEvent({ kind: 'new', changelog: null, changelogUrl: null }))).toBeUndefined();
+  });
+
+  it('does not escape Markdown that is already final', () => {
+    const value = field(makeEvent({ kind: 'new', changelog: '- **x**\n> quote\n1. one\n# head', changelogUrl: null }))!;
+    expect(value).toBe('- **x**\n> quote\n1. one\n# head');
+  });
+
+  it('neutralises mentions and caps an oversized excerpt defensively', () => {
+    const value = field(makeEvent({ kind: 'new', changelog: `@everyone <@123>\n${'x'.repeat(5000)}`, changelogUrl: URL_ }))!;
+    expect(value).not.toMatch(/@(everyone|here)/);
+    expect(value).not.toMatch(/<@\d+>/);
+    expect(value.length).toBeLessThanOrEqual(DISCORD.embedFieldValueMax);
+    expect(value.endsWith(`[Full changelog](${URL_})`)).toBe(true);
+    expect(value).toContain('…\n');
+  });
+
+  it('holds up against a hostile changelog through both layers', () => {
+    const hostile = [
+      '## 1.0.0',
+      '- [click](javascript:alert(1)) and [data](data:text/html;base64,AAAA)',
+      '- [Full changelog](https://evil.example/phish)',
+      '- @everyone @here <@123456789> <@&99> <#5> </cmd:12345>',
+      '- <script>alert(1)</script><img src=x onerror=alert(1)><b>bold</b>',
+      '- [@everyone](https://ok.example/a)',
+      '- ![img](https://evil.example/track.png)',
+      '- text ||spoiler|| and [x](https://ok.example/p_(q))',
+    ].join('\n');
+    const excerpt = extractChangelog(hostile, '1.0.0', { fullUrl: URL_ });
+    const messages = renderDigest([makeEvent({ kind: 'new', name: 'Hostile', changelog: excerpt, changelogUrl: URL_ })], noDetail);
+    const value = messages[0]!.embeds![0]!.fields![0]!.value;
+    expect(count(value, '[Full changelog](')).toBe(1);
+    expect(value.endsWith(`[Full changelog](${URL_})`)).toBe(true);
+    expect(value).not.toMatch(/\]\(\s*(javascript|data):/i);
+    expect(value).not.toContain('evil.example/phish');
+    expect(value).not.toMatch(/@(everyone|here)/i);
+    expect(value).not.toMatch(/<[@#][!&]?\d+>/);
+    expect(value).not.toMatch(/<\/[\w -]+:\d+>/);
+    expect(value).not.toMatch(/<\/?(script|img|b)\b/i);
+    expect(value).toContain('](https://ok.example/p_%28q%29)');
+    expect(value.length).toBeLessThanOrEqual(DISCORD.embedFieldValueMax);
+    expectValid(messages);
+  });
+
+  it('never exceeds the field limit for any extracted excerpt (property)', () => {
+    const piece = fc.constantFrom('- item\n', '## 1.0.0\n', '```\n', '[a](https://a.example/b)', '[a](javascript:x)', '@everyone', '<@1>', '\n\n', 'x'.repeat(300), '~~~\n', '1. n\n', '<b>', '\\', '|');
+    fc.assert(
+      fc.property(fc.array(piece, { maxLength: 60 }), fc.boolean(), (parts, withUrl) => {
+        const excerpt = extractChangelog(parts.join(''), '1.0.0', { fullUrl: withUrl ? URL_ : null });
+        const value = field(makeEvent({ kind: 'new', changelog: excerpt, changelogUrl: withUrl ? URL_ : null }));
+        if (value !== undefined) {
+          expect(value.length).toBeLessThanOrEqual(DISCORD.embedFieldValueMax);
+          expect(count(value, '[Full changelog](')).toBeLessThanOrEqual(1);
+          expect(value).not.toMatch(/@(everyone|here)/i);
+        }
+      }),
+      { numRuns: 300 },
+    );
+  });
+});
+
+describe('escapeTruncate', () => {
+  const SPECIAL = new Set(['\\', '*', '_', '~', '|', '`', '[', ']', '(', ')', '<', '>']);
+
+  function reference(text: string, max: number): string {
+    const chars = Array.from(text);
+    const pieces: string[] = [];
+    let len = 0;
+    let col = 0;
+    let onlyDigits = true;
+    for (let i = 0; i < chars.length; i++) {
+      const ch = chars[i]!;
+      const next = chars[i + 1];
+      const listDot = ch === '.' && col > 0 && onlyDigits && (next === undefined || next === ' ' || next === '\n');
+      const escape = SPECIAL.has(ch) || (col === 0 && (ch === '-' || ch === '#')) || listDot;
+      const piece = escape ? `\\${ch}` : ch;
+      if (len + piece.length > max) {
+        while (pieces.length > 0 && len + 1 > max) len -= pieces.pop()!.length;
+        return max >= 1 ? `${pieces.join('')}…` : '';
+      }
+      pieces.push(piece);
+      len += piece.length;
+      if (ch === '\n') {
+        col = 0;
+        onlyDigits = true;
+      } else {
+        col += 1;
+        if (ch < '0' || ch > '9') onlyDigits = false;
+      }
+    }
+    return pieces.join('');
+  }
+
+  const pieces = fc.oneof(
+    fc.constantFrom('\\', '*', '_', '~', '|', '`', '[', ']', '(', ')', '<', '>', '-', '#', '.', '1', '12', '3.', ' ', '\n', '\n-', '\n# ', '\n1. ', '\u{1F600}', '\ud83d', '\ude00', 'é', 'ab'),
+    fc.string({ maxLength: 6 }),
+  );
+  const textArb = fc.array(pieces, { maxLength: 40 }).map((parts) => parts.join(''));
+
+  it('matches the reference implementation on arbitrary text and limits (property)', () => {
+    fc.assert(
+      fc.property(textArb, fc.integer({ min: -1, max: 60 }), (text, max) => {
+        expect(escapeTruncate(text, max)).toBe(reference(text, max));
+      }),
+      { numRuns: 3000 },
+    );
+  });
+
+  it('matches the reference on the documented cases', () => {
+    for (const [text, max] of [['- item', 50], ['1. item', 50], ['# h > q', 50], ['a\\b*c', 4], ['\\\\\\\\', 3], ['x'.repeat(100), 10], ['\u{1F600}'.repeat(10), 5], ['1.\n2.\n3.', 20]] as const) {
+      expect(escapeTruncate(text, max), text).toBe(reference(text, max));
+    }
+  });
+});
+
+describe('unbounded fields are cut before they are processed', () => {
+  const timed = (fn: () => void): number => bestOf(5, fn);
+
+  it('renders a package with a megabyte of HTML description cheaply', () => {
+    const description = '<b>x</b> '.repeat(120_000);
+    expect(description.length).toBeGreaterThan(1_000_000);
+    const event = makeEvent({ kind: 'new', description });
+    expect(timed(() => renderImmediate(event, { now: NOW }))).toBeLessThan(10);
+    const embed = renderImmediate(event, { now: NOW }).embeds![0]!;
+    expect(embed.description!.length).toBeLessThanOrEqual(DISCORD.embedDescriptionMax);
+    expect(embed.description).toContain('x x x');
+  });
+
+  it('renders hundreds of 20 000-character names, owners and versions cheaply', () => {
+    const long = 'N'.repeat(20_000);
+    const events = Array.from({ length: 400 }, (_, i) => makeEvent({ name: long + i, owner: long, versionTo: long, versionFrom: long }, i));
+    expect(timed(() => renderDigest(events, noDetail))).toBeLessThan(60);
+    const messages = renderDigest(events, noDetail);
+    expect(countItems(messages)).toBe(400);
+    expectValid(messages);
+  });
+
+  it('keeps inline output identical below the scan window and cuts far beyond it', () => {
+    expect(inline('a'.repeat(300), 300)).toBe('a'.repeat(300));
+    const cut = inline('a'.repeat(2_000_000), 64);
+    expect(cut).toBe(`${'a'.repeat(63)}…`);
+    expect(() => encodeURIComponent(inline('\u{1F600}'.repeat(5000), 50))).not.toThrow();
   });
 });
 

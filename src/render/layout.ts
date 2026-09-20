@@ -20,5 +20,6 @@ export const CAPS = {
   alsoOnLine: 300,
   alsoOnEntries: 4,
   groupLine: 1000,
-  scanChars: 20_000,
+  /** Raw characters read per output character of a field. */
+  rawFactor: 8,
 } as const;
