@@ -163,9 +163,14 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
     secrets: deps.secrets,
   };
 
+  if (kind === 'reconcile' && (state === null || !state.bootstrapped)) {
+    return { report: { status: 'skipped', events: 0 }, jobs: [], fetched: false };
+  }
+
   let snapshots: PackageSnapshot[];
   let cursor: string | null;
   let etag: string | null;
+  let complete = true;
   if (kind === 'tick') {
     const result = await adapter.poll(ctx);
     if (result.status === 'skipped') return { report: { status: 'skipped', events: 0 }, jobs: [], fetched: false };
@@ -176,25 +181,24 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
     snapshots = result.packages;
     cursor = result.cursor;
     etag = result.etag;
+    complete = result.complete;
   } else {
     snapshots = await adapter.reconcile!(ctx);
     cursor = state?.cursor ?? null;
     etag = state?.etag ?? null;
   }
 
+  const coldStart = state === null || !state.bootstrapped;
   const nextState: SourceState = {
     id,
     cursor,
     etag,
-    bootstrapped: true,
+    bootstrapped: coldStart ? complete : true,
     lastOkAt: kind === 'tick' ? nowIso : (state?.lastOkAt ?? null),
   };
 
-  if (state === null || !state.bootstrapped) {
-    const seed = new Map<string, PackageSnapshot>();
-    if (kind === 'tick' && adapter.reconcile) for (const pkg of await adapter.reconcile(ctx)) seed.set(pkg.packageId, pkg);
-    for (const pkg of dedupeSnapshots(snapshots)) seed.set(pkg.packageId, pkg);
-    await store.commit({ source: id, packages: [...seed.values()], events: [], outbox: [], state: nextState });
+  if (coldStart) {
+    await store.commit({ source: id, packages: dedupeSnapshots(snapshots), events: [], outbox: [], state: nextState });
     return { report: { status: 'cold-start', events: 0 }, jobs: [], fetched: true };
   }
 

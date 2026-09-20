@@ -45,19 +45,15 @@ describe('runReconcile', () => {
     expect(h.store.sources.get(TS)).toMatchObject({ cursor: 'cur', etag: 'etag', lastOkAt: '2026-09-19T11:00:00.000Z', bootstrapped: true });
   });
 
-  it('never treats reconciliation as an emitting cold start: an unbootstrapped source is seeded silently', async () => {
+  it('does not run for a source that is not bootstrapped yet: seeding belongs to polling', async () => {
     const adapter = new FakeAdapter({ id: TS }, { reconcilable: true });
     const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription()] });
     adapter.reconcileResult = [snap('A-One', '1.0.0'), snap('B-Two', '1.0.0')];
     const report = await runReconcile(h.deps, scheduled, 0);
-    expect(report.sources[TS]).toEqual({ status: 'cold-start', events: 0 });
+    expect(report.sources[TS]).toEqual({ status: 'skipped', events: 0 });
+    expect(adapter.reconcileCalls).toHaveLength(0);
     expect(h.sender.calls).toHaveLength(0);
-    expect(h.store.packages.size).toBe(2);
-    expect(h.store.sources.get(TS)!.bootstrapped).toBe(true);
-
-    adapter.reconcileResult = [snap('A-One', '1.0.0'), snap('B-Two', '1.0.0'), snap('C-Three', '1.0.0')];
-    const next = await runReconcile(h.deps, scheduled, 0);
-    expect(next.sources[TS]!.events).toBe(1);
+    expect(h.store.packages.size).toBe(0);
   });
 
   it('rotates one reconcilable store per run and skips stores without an index', async () => {

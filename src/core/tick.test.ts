@@ -62,32 +62,41 @@ describe('runTick: cold start', () => {
   });
 });
 
-describe('runTick: cold start with an index', () => {
-  it('seeds the full index silently so the next index scan reports only real updates', async () => {
-    const adapter = new FakeAdapter({ id: HX }, { reconcilable: true });
-    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription()] });
-    const hx = { source: HX, store: 'hexium' } as const;
-    adapter.reconcileResult = [snap('A-One', '1.0.0', hx), snap('B-Two', '1.0.0', hx), snap('C-Three', '1.0.0', hx)];
+describe('runTick: staged cold start', () => {
+  const hx = { source: HX, store: 'hexium' } as const;
 
-    adapter.enqueue(okPoll([snap('A-One', '1.0.0', { ...hx, description: 'rich' })]));
+  it('stays un-bootstrapped and silent while the adapter reports an incomplete seed', async () => {
+    const adapter = new FakeAdapter({ id: HX });
+    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription()] });
+
+    adapter.enqueue(okPoll([snap('A-One', '1.0.0', hx)], { cursor: 'seed:1', complete: false }));
     const first = await runTick(h.deps, scheduled);
     expect(first.sources[HX]).toEqual({ status: 'cold-start', events: 0 });
+    expect(h.store.sources.get(HX)).toMatchObject({ bootstrapped: false, cursor: 'seed:1' });
+
+    adapter.enqueue(okPoll([snap('B-Two', '1.0.0', hx)], { cursor: 'seed:2', complete: false }));
+    await runTick(h.deps, scheduled + 300_000);
+    expect(h.store.sources.get(HX)).toMatchObject({ bootstrapped: false, cursor: 'seed:2' });
+    expect(adapter.pollCalls[1]!.state).toMatchObject({ bootstrapped: false, cursor: 'seed:1' });
+
+    adapter.enqueue(okPoll([snap('C-Three', '1.0.0', hx)], { cursor: 'c-final', complete: true }));
+    await runTick(h.deps, scheduled + 600_000);
+    expect(h.store.sources.get(HX)).toMatchObject({ bootstrapped: true, cursor: 'c-final' });
     expect(h.store.packages.size).toBe(3);
-    expect(h.store.packages.get(`${HX}|A-One`)!.description).toBe('rich');
+    expect(h.store.events.size).toBe(0);
+    expect(h.sender.calls).toHaveLength(0);
 
     adapter.enqueue(okPoll([snap('B-Two', '1.1.0', hx)]));
-    const second = await runTick(h.deps, scheduled + 300_000);
-    expect(second.sources[HX]).toEqual({ status: 'ok', events: 1 });
+    const after = await runTick(h.deps, scheduled + 900_000);
+    expect(after.sources[HX]).toEqual({ status: 'ok', events: 1 });
   });
 
-  it('fails the source, staying un-bootstrapped, when the index cannot be fetched', async () => {
-    const adapter = new FakeAdapter({ id: HX }, { reconcilable: true });
+  it('bootstraps immediately when the first poll is complete', async () => {
+    const adapter = new FakeAdapter({ id: HX });
     const h = makeHarness({ adapters: [adapter] });
-    adapter.reconcileResult = new Error('index down');
-    adapter.enqueue(okPoll([snap('A-One')]));
-    const report = await runTick(h.deps, scheduled);
-    expect(report.sources[HX]!.status).toBe('error');
-    expect(h.store.sources.get(HX)).toBeUndefined();
+    adapter.enqueue(okPoll([snap('A-One', '1.0.0', hx)], { cursor: 'c1' }));
+    await runTick(h.deps, scheduled);
+    expect(h.store.sources.get(HX)!.bootstrapped).toBe(true);
   });
 });
 
