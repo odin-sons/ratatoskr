@@ -167,7 +167,7 @@ export class MemoryStore implements Store {
   async markFailedMany(outboxIds: string[], nextAttemptAtIso: string, parked: boolean): Promise<void> {
     for (const id of new Set(outboxIds)) {
       const row = this.outbox.get(id);
-      if (!row) continue;
+      if (!row || row.delivered) continue;
       row.attempts += 1;
       row.nextAttemptAt = nextAttemptAtIso;
       if (parked) row.parked = true;

@@ -48,6 +48,10 @@ export function backoffSeconds(attempts: number): number {
   return Math.min(OUTBOX_BACKOFF.baseSeconds * 2 ** attempts, OUTBOX_BACKOFF.maxSeconds);
 }
 
+function isRateLimitWithDelay(result: FailedResult): result is FailedResult & { retryable: true; retryAfterSeconds: number } {
+  return result.retryable && result.status === 429 && result.retryAfterSeconds !== null;
+}
+
 export function scheduleFailure(
   row: OutboxRow,
   result: FailedResult,
@@ -390,6 +394,14 @@ async function markDelivered(drain: Drain, ids: string[]): Promise<void> {
 async function failRows(drain: Drain, rows: OutboxRow[], failure: FailedResult | SendFailure, webhook?: string): Promise<void> {
   const { store, now } = drain.deps;
   const result = 'result' in failure ? failure.result : failure;
+  if (isRateLimitWithDelay(result)) {
+    const nextAttemptAt = new Date(now.getTime() + Math.ceil(Math.max(0, result.retryAfterSeconds) * 1000)).toISOString();
+    const ids = rows.map((row) => row.id);
+    await store.rescheduleRows(ids, nextAttemptAt);
+    for (const id of ids) drain.settled.add(id);
+    if (webhook !== undefined) drain.retryAt.set(webhook, nextAttemptAt);
+    return;
+  }
   const groups = new Map<string, { nextAttemptAt: string; parked: boolean; ids: string[] }>();
   for (const row of rows) {
     const next = scheduleFailure(row, result, now);

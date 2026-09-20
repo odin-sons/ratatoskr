@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
+import { bestOf } from '../testing/timing.ts';
 import { MAX_LOGGED_TEXT_CHARS, formatRunLog, sanitizeLogText } from './report.ts';
 import type { TickReport } from './tick.ts';
 
@@ -91,6 +92,19 @@ describe('formatRunLog', () => {
 
   it('rounds the elapsed time to whole milliseconds', () => {
     expect(parse(formatRunLog({ cron: 'c', report: report(), elapsedMs: 12.6 }))).toMatchObject({ elapsedMs: 13 });
+  });
+});
+
+describe('sanitizeLogText cost', () => {
+  it('stays linear on very long input without whitespace', () => {
+    const text = `x${'a'.repeat(20_000)}`;
+    expect(bestOf(5, () => sanitizeLogText(text))).toBeLessThan(25);
+    expect(sanitizeLogText(text)).toHaveLength(MAX_LOGGED_TEXT_CHARS);
+  });
+
+  it('still redacts a URL that starts inside the kept prefix of a long text', () => {
+    const text = `${'y '.repeat(50)}https://discord.com/api/webhooks/123456789012345678/${'T'.repeat(300)}`;
+    expect(sanitizeLogText(text)).not.toContain('T'.repeat(10));
   });
 });
 

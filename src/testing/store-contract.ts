@@ -212,6 +212,16 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
         expect(await store.takeDue('2099-01-01T00:00:00.000Z', 10)).toEqual([]);
       });
 
+      it('never un-parks a parked row', async () => {
+        const { store } = await setup();
+        const e = event(1);
+        const r = row(SUB, e);
+        await store.commit(batch([e], [r]));
+        await store.markFailedMany([r.id], T0, true);
+        await store.markFailedMany([r.id], T0, false);
+        expect(await store.takeDue('2099-01-01T00:00:00.000Z', 10)).toEqual([]);
+      });
+
       it('ignores an unknown row id', async () => {
         const { store } = await setup();
         await expect(store.markFailedMany(['missing'], T0, false)).resolves.toBeUndefined();

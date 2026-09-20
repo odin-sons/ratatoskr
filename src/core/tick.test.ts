@@ -432,7 +432,7 @@ describe('runTick: delivery modes', () => {
     h.sender.enqueue(rateLimited(20));
     const report = await runTick(h.deps, scheduled);
     expect(report).toMatchObject({ sent: 0, failed: 1 });
-    expect(h.store.pendingRows()[0]).toMatchObject({ attempts: 1, nextAttemptAt: new Date(Date.parse(FIXED_NOW_ISO) + 20_000).toISOString() });
+    expect(h.store.pendingRows()[0]).toMatchObject({ attempts: 0, nextAttemptAt: new Date(Date.parse(FIXED_NOW_ISO) + 20_000).toISOString() });
 
     h.clock.advance(20_000);
     const next = await runTick(h.deps, scheduled + 300_000);

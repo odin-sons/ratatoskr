@@ -135,10 +135,31 @@ describe('drainOutbox', () => {
     const report = await drain(h);
     expect(report).toMatchObject({ sent: 0, failed: 1 });
     const [row] = h.store.outboxRows();
-    expect(row).toMatchObject({ attempts: 1, parked: false, delivered: false });
+    expect(row).toMatchObject({ attempts: 0, parked: false, delivered: false });
     expect(row!.nextAttemptAt).toBe(new Date(now.getTime() + 12_000).toISOString());
     expect((await drain(h)).sent).toBe(0);
     expect((await drain(h, new Date(now.getTime() + 12_000))).sent).toBe(1);
+  });
+
+  it('never parks a row that only meets 429 with retry_after, however often it repeats', async () => {
+    const h = makeHarness();
+    await enqueue(h, makeSubscription(), evs(1));
+    let at = now;
+    for (let i = 0; i < OUTBOX_MAX_ATTEMPTS + 4; i++) {
+      h.sender.enqueue(rateLimited(30));
+      await drain(h, at);
+      at = new Date(at.getTime() + 30_000);
+    }
+    expect(h.store.outboxRows()[0]).toMatchObject({ attempts: 0, parked: false, delivered: false });
+    expect((await drain(h, at)).sent).toBe(1);
+  });
+
+  it('still counts a 429 without retry_after as a failed attempt', async () => {
+    const h = makeHarness();
+    await enqueue(h, makeSubscription(), evs(1));
+    h.sender.enqueue({ ok: false, retryable: true, retryAfterSeconds: null, status: 429 });
+    await drain(h);
+    expect(h.store.outboxRows()[0]).toMatchObject({ attempts: 1, parked: false });
   });
 
   it('applies exponential backoff on 5xx', async () => {
@@ -197,7 +218,7 @@ describe('drainOutbox', () => {
     expect(h.sender.calls).toHaveLength(2);
     expect(report).toMatchObject({ sent: 1, failed: 1, deferred: 1 });
     expect(h.store.pendingRows()).toHaveLength(2);
-    expect(h.store.pendingRows().filter((r) => r.attempts === 0)).toHaveLength(1);
+    expect(h.store.pendingRows().every((r) => r.attempts === 0)).toBe(true);
   });
 
   it('caps sends per webhook per tick and leaves the rest for the next tick', async () => {

@@ -10,6 +10,7 @@ const WEBHOOK_ID_TOKEN_PATTERN = /\b\d{17,20}\/[\w-]{20,}/g;
 /** One line, without URLs or webhook paths (they carry tokens), capped in length. */
 export function sanitizeLogText(text: string): string {
   return text
+    .slice(0, MAX_LOGGED_TEXT_CHARS * 4)
     .replace(SCHEME_URL_PATTERN, '[url]')
     .replace(WEBHOOK_PATH_PATTERN, '[url]')
     .replace(WEBHOOK_ID_TOKEN_PATTERN, '[url]')
