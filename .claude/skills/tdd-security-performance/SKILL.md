@@ -1,9 +1,9 @@
 ---
-name: nodejs-architect
-description: Architect's playbook for Node.js / TypeScript services, including edge runtimes such as Cloudflare Workers. Use when writing new server-side code (test-first, secure by construction, cost-checked algorithms) and when reviewing module boundaries, async correctness, resource budgets, error handling, security and testability.
+name: tdd-security-performance
+description: Playbook for writing and reviewing TypeScript server code (Node.js and edge runtimes such as Cloudflare Workers): test-first development, security by construction, and per-algorithm cost analysis with optimisation, plus an architecture review checklist. Use when writing new logic or when reviewing a module, diff or commit range.
 ---
 
-# Node.js architect
+# TDD, security and performance
 
 Two modes share one set of principles:
 
