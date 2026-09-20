@@ -92,7 +92,7 @@ reconciliation.
 
 ## Hexium
 
-Base: `https://{game}.hexium.gg` for the listing, index, package detail and
+Base: `https://{game}.hexium.gg` for the listing, dump, index, package detail and
 changelog. `hexium.gg` also serves changelogs but cannot resolve
 `frontend/p/...` (404). Gale uses the bare host for `/api/experimental/package/...`.
 
@@ -136,41 +136,61 @@ ignored, not honoured. Do not retry this.
 
 The website does serve `?sort=updated`, so the backend supports the ordering; it
 is simply not exposed on the API. Worth asking Hexium to expose it — a one-line
-change on their side that would remove the need for index polling entirely.
-Until then, updates to existing Hexium packages come from `package-index`.
+change on their side that would remove the need for dump polling entirely.
+Until then, updates to existing Hexium packages come from the `/api/v1/package/` dump.
 
-### Package index — the fallback that makes Hexium workable
+### Full dump: `/api/v1/package/` — the update source
 
-**[source]** From their OpenAPI spec:
+**[live]** `GET /api/v1/package/` on `{game}.hexium.gg` returns one compact JSON
+array with a record per package. Valheim, 2026-09-20: 1112 records, 4,436,211
+bytes raw, ~425 KB gzip (`content-encoding: gzip`, chunked), **no `ETag` or
+`Last-Modified`**.
 
-```
-GET /api/experimental/package-index/
-```
+Record keys: `name, full_name, owner, package_url, donation_link, date_created,
+date_updated, uuid4, rating_score, is_pinned, is_deprecated, has_nsfw_content,
+categories[], versions[]`. `versions[]` items: `name, full_name, description,
+icon, version_number, dependencies, suggestions, download_url, downloads,
+date_created, website_url, is_active, uuid4, file_size`.
 
-Described as "Newline-delimited JSON stream of all packages (latest version per
-mod)". NDJSON, one line per package, no version history. Valheim has 1062
-packages.
+- `"date_updated":"` occurs exactly once per record, in the header before
+  `versions[]`. `uuid4` carries a sequential creation id.
+- The header is `{"name":…,"categories":[…],"versions":[`, so a record can be cut
+  at fixed markers without parsing.
+- `versions[]` is newest-first by `date_created` in 1111 of 1112 records; one
+  two-version package is oldest-first, and there `date_updated` predates its
+  newest version. The adapter therefore compares the first and the last listed
+  version by `date_created`. Semver order is not usable: 89 records list a
+  lower version number after a higher one. `is_active` was true everywhere.
+- `has_nsfw_content` and `is_deprecated` are present (0 NSFW, 48 deprecated in
+  Valheim), as are description, icon, categories and `file_size`.
 
-**[live]** Line shape:
+Never `JSON.parse` the body: a full parse takes ~8 ms. The adapter does one
+`indexOf` pass over the raw text and extracts fields by offset (measured cold,
+fresh Node process, real payload):
 
-```
-{"namespace","name","version_number","file_format","file_size","dependencies":[],"suggestions":[]}
-```
+| Operation | CPU |
+|---|---|
+| `TextDecoder` decode of 4.4 MB | ~2 ms |
+| Scan with `date_updated >= cursor` (few matches) | ~2.7 ms, ~4.6 ms with decode |
+| Lean extraction of all 1112 records (id, flags, first version) | ~5 ms, ~7 ms with decode |
+| Lean extraction of one quarter of the records | ~3.1 ms, ~5.1 ms with decode |
+| Full extraction of all 1112 records | ~8 ms, ~10 ms with decode |
 
-There is **no `date_updated`**, no description, icon, categories or NSFW flag.
-Valheim: 1063 lines, ~377 KB, chunked `application/x-ndjson`, no trailing
-newline, **no `ETag` or `Last-Modified`**. Serve it from `{game}.hexium.gg`
-(Valheim only); `hexium.gg` returns every game merged (1116 lines).
+Per-record extraction by offset beat parsing each record's header and newest
+version with `JSON.parse` (~11 ms cold, ~8.8 ms warm for the same work).
+A full extraction does not fit the 10 ms budget, so seeding and reconciliation
+run in slices (see `docs/spec.md`). The 8 MB `MAX_SCAN_BYTES` leaves about 1.8x
+headroom over today's payload.
 
-So updates are detected by comparing `version_number` against the stored latest
-version, not by a timestamp cursor. Read the body with a single `indexOf` pass —
-no `split('
-')`, no full `JSON.parse`. A real scan takes ~1.5 ms cold.
-Metadata for changed packages comes from `frontend/p/{namespace}/{name}/`,
-capped per tick.
+### Package index — no longer used
 
-Because the index carries no NSFW/deprecated flags, those flags are sticky on
-upsert (`old OR new`) and unknown for packages first seen via the index.
+**[live]** `GET /api/experimental/package-index/`: NDJSON, one line per package
+with `{"namespace","name","version_number","file_format","file_size","dependencies":[],"suggestions":[]}`.
+There is **no `date_updated`** and no description, icon, categories, NSFW or
+deprecated flag. 1063 lines, ~377 KB, chunked `application/x-ndjson`, no
+`ETag` or `Last-Modified`. The game subdomain serves that game only; `hexium.gg`
+merges every game (1116 lines). Because it cannot tell us whether a package is
+NSFW, it is not used for detection or seeding.
 
 ### Changelog, per version
 
@@ -183,11 +203,8 @@ GET /api/experimental/package/{namespace}/{name}/{version}/readme/
 
 ### Other
 
-**[live]** `/api/v1/package/` returns the full dump — 1062 records for Valheim.
-Works, but do not use from a Worker.
-
 **[source]** `/api/v1/package-listing-index/` and `/api/v1/package-listing-chunk/`
-exist, gzip. Superseded by `package-index` for our purposes.
+exist, gzip. Superseded by `/api/v1/package/` for our purposes.
 
 **[source]** `/api/experimental/frontend/p/{namespace}/{name}/` returns full
 package detail including `versions[]`, `last_updated`, `markdown`.

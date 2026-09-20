@@ -4,7 +4,7 @@
 export const SOURCE_BUDGET = {
   thunderstoreVersionLookups: 10,
   thunderstoreListingPages: 3,
-  hexiumDetailLookups: 10,
+  hexiumDumpSlices: 4,
   nexusMetadataLookups: 5,
 } as const;
 

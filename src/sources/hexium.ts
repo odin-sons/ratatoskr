@@ -2,48 +2,30 @@
 import type { PackageSnapshot, SourceConfig } from '../core/types.ts';
 import type { PollContext, PollResult, SourceAdapter, Store } from '../core/ports.ts';
 import { extractChangelog } from '../changelog/extract.ts';
-import { CADENCE, CLOUDFLARE } from '../core/constants.ts';
+import { CADENCE } from '../core/constants.ts';
 import { SOURCE_BUDGET } from './budget.ts';
-import { UnexpectedShapeError, isRecord, parseJson, safeSlug, str, type Json } from './guards.ts';
+import { UnexpectedShapeError, isRecord, parseJson, safeSlug, str } from './guards.ts';
 import { conditionalGet, describeError, skipOnError } from './http.ts';
-import { maxIso, normalizeIso } from './iso.ts';
-import { forEachLine, readNumberField, readStringField } from './ndjson.ts';
+import { normalizeIso } from './iso.ts';
+import { scanPackageDump, type DumpRecord, type DumpScan } from './hexium-dump.ts';
 
-const NAMESPACE_MARKER = '"namespace":"';
-const NAME_MARKER = '"name":"';
-const VERSION_MARKER = '"version_number":"';
-const SIZE_MARKER = '"file_size":';
+const SEED_PREFIX = 'seed:';
+const MS_PER_DAY = 86_400_000;
 
-export interface IndexEntry {
-  namespace: string;
-  name: string;
-  version: string;
-  fileSize: number | null;
-}
+type Progress = { kind: 'seed'; next: number; mark: string | null } | { kind: 'time'; iso: string } | null;
 
-/** Single pass over the raw NDJSON index. JSON.parse runs only for a line the fast field reader cannot handle. */
-export function scanPackageIndex(text: string, visit: (entry: IndexEntry) => void): void {
-  forEachLine(text, (start, end) => {
-    const line = text.slice(start, end);
-    let namespace = readStringField(line, NAMESPACE_MARKER);
-    let name = readStringField(line, NAME_MARKER);
-    let version = readStringField(line, VERSION_MARKER);
-    let fileSize = readNumberField(line, SIZE_MARKER);
-    if (namespace === null || name === null || version === null) {
-      try {
-        const parsed: unknown = JSON.parse(line);
-        if (!isRecord(parsed)) return;
-        namespace = str(parsed.namespace);
-        name = str(parsed.name);
-        version = str(parsed.version_number);
-        fileSize = typeof parsed.file_size === 'number' ? parsed.file_size : null;
-      } catch {
-        return;
-      }
-      if (namespace === null || name === null || version === null) return;
-    }
-    visit({ namespace, name, version, fileSize });
-  });
+/** Cursor is either an ISO timestamp or `seed:<nextSlice>:<iso>` while the initial seed is in progress. */
+export function parseCursor(cursor: string | null | undefined): Progress {
+  if (!cursor) return null;
+  if (cursor.startsWith(SEED_PREFIX)) {
+    const rest = cursor.slice(SEED_PREFIX.length);
+    const sep = rest.indexOf(':');
+    const next = Number(sep === -1 ? rest : rest.slice(0, sep));
+    if (!Number.isInteger(next) || next < 0) return null;
+    return { kind: 'seed', next, mark: sep === -1 ? null : rest.slice(sep + 1) };
+  }
+  const iso = normalizeIso(cursor);
+  return iso === null ? null : { kind: 'time', iso };
 }
 
 export class HexiumAdapter implements SourceAdapter {
@@ -73,29 +55,89 @@ export class HexiumAdapter implements SourceAdapter {
 
   private async pollInner(ctx: PollContext): Promise<PollResult> {
     if (!safeSlug(this.config.community)) throw new Error('invalid community slug');
-    const indexTick = ctx.tickIndex % CADENCE.hexiumIndexEveryNthTick === 0;
-
-    const listing = await conditionalGet(ctx, `${this.origin}/api/experimental/frontend/packages/?page=1`, {
-      validator: indexTick ? null : undefined,
-    });
-    if (listing.status === 'not-modified') return { status: 'not-modified', etag: ctx.state?.etag ?? null };
-
-    const byId = new Map<string, PackageSnapshot>();
-    let cursor = ctx.state?.cursor ? normalizeIso(ctx.state.cursor) : null;
-    for (const snapshot of this.parseListing(listing.text)) {
-      byId.set(snapshot.packageId, snapshot);
-      cursor = maxIso(cursor, snapshot.updatedAt);
+    const progress = parseCursor(ctx.state?.cursor);
+    if (ctx.state === null || !ctx.state.bootstrapped || progress === null || progress.kind === 'seed') {
+      return this.seedSlice(ctx, progress?.kind === 'seed' ? progress : null);
     }
 
-    if (indexTick && ctx.state?.bootstrapped) {
+    if (ctx.tickIndex % CADENCE.hexiumIndexEveryNthTick === 0) {
       try {
-        for (const snapshot of await this.updatedViaIndex(ctx, byId)) byId.set(snapshot.packageId, snapshot);
+        return await this.scanSince(ctx, progress.iso);
       } catch (err) {
-        console.warn(`[${this.config.id}] index scan failed: ${describeError(err)}`);
+        console.warn(`[${this.config.id}] dump scan failed, falling back to listing: ${describeError(err)}`);
       }
     }
+    return this.pollListing(ctx);
+  }
 
-    return { status: 'ok', packages: [...byId.values()], cursor, etag: listing.etag, complete: true };
+  private async fetchDump(ctx: PollContext): Promise<string> {
+    const res = await conditionalGet(ctx, `${this.origin}/api/v1/package/`, { validator: null });
+    if (res.status !== 'ok') throw new UnexpectedShapeError('package dump returned no body');
+    return res.text;
+  }
+
+  /** Lean extraction of one slice of the dump; the source flips to a normal cursor after the last slice. */
+  private async seedSlice(ctx: PollContext, progress: { next: number; mark: string | null } | null): Promise<PollResult> {
+    const index = progress?.next ?? 0;
+    const count = SOURCE_BUDGET.hexiumDumpSlices;
+    const text = await this.fetchDump(ctx);
+
+    const packages: PackageSnapshot[] = [];
+    const scan = scanPackageDump(text, null, (r) => packages.push(this.snapshot(r)), {
+      slice: { index: Math.min(index, count - 1), count },
+      wantDetail: () => false,
+    });
+    this.assertUsable(scan, packages.length, text.length);
+    if (scan.failed > 0) throw new UnexpectedShapeError(`${scan.failed} dump records could not be read`);
+
+    const mark = progress?.mark ?? scan.maxUpdated;
+    const last = index >= count - 1;
+    return {
+      status: 'ok',
+      packages,
+      cursor: last ? mark : `${SEED_PREFIX}${index + 1}:${mark ?? ''}`,
+      etag: null,
+      complete: last,
+    };
+  }
+
+  /** Records updated at or after the cursor, with full metadata and flags. */
+  private async scanSince(ctx: PollContext, cursor: string): Promise<PollResult> {
+    const text = await this.fetchDump(ctx);
+    const packages: PackageSnapshot[] = [];
+    const scan = scanPackageDump(text, cursor, (r) => packages.push(this.snapshot(r)));
+    this.assertUsable(scan, packages.length, text.length);
+
+    const clean = scan.failed === 0;
+    if (!clean) console.warn(`[${this.config.id}] ${scan.failed} dump records could not be read; cursor held back`);
+    return {
+      status: 'ok',
+      packages,
+      cursor: clean ? (scan.maxUpdated ?? cursor) : cursor,
+      etag: ctx.state?.etag ?? null,
+      complete: clean,
+    };
+  }
+
+  private assertUsable(scan: DumpScan, extracted: number, bytes: number): void {
+    if (scan.records === 0 && bytes > 2) throw new UnexpectedShapeError('package dump has no recognisable records');
+    if (scan.records > 0 && scan.maxUpdated === null) throw new UnexpectedShapeError('package dump timestamps are unreadable');
+    if (scan.records > 0 && extracted === 0 && scan.failed === scan.records) {
+      throw new UnexpectedShapeError('no package dump record could be read');
+    }
+  }
+
+  /** Creation-ordered page 1; catches new packages on ticks that skip the dump. Cursor is left to the dump scan. */
+  private async pollListing(ctx: PollContext): Promise<PollResult> {
+    const listing = await conditionalGet(ctx, `${this.origin}/api/experimental/frontend/packages/?page=1`);
+    if (listing.status === 'not-modified') return { status: 'not-modified', etag: ctx.state?.etag ?? null };
+    return {
+      status: 'ok',
+      packages: this.parseListing(listing.text),
+      cursor: ctx.state?.cursor ?? null,
+      etag: listing.etag,
+      complete: true,
+    };
   }
 
   private parseListing(text: string): PackageSnapshot[] {
@@ -135,81 +177,44 @@ export class HexiumAdapter implements SourceAdapter {
     };
   }
 
-  /** Known packages whose index version differs from the stored one, enriched with package detail up to the per-tick cap. */
-  private async updatedViaIndex(ctx: PollContext, listed: Map<string, PackageSnapshot>): Promise<PackageSnapshot[]> {
-    const res = await conditionalGet(ctx, `${this.origin}/api/experimental/package-index/`, { validator: null });
-    if (res.status !== 'ok') return [];
-    const known = await this.store.getAllKnownVersions(this.config.id);
-
-    const changed: IndexEntry[] = [];
-    scanPackageIndex(res.text, (entry) => {
-      const id = `${entry.namespace}-${entry.name}`;
-      const previous = known.get(id);
-      if (previous !== undefined && previous !== entry.version && listed.get(id)?.version !== entry.version) {
-        changed.push(entry);
-      }
-    });
-    if (changed.length === 0) return [];
-
-    const now = ctx.now.toISOString().slice(0, 19) + '.000000Z';
-    const out: PackageSnapshot[] = changed.map((entry) => this.minimalSnapshot(entry, now));
-    const lookups = out.slice(0, SOURCE_BUDGET.hexiumDetailLookups);
-    for (let i = 0; i < lookups.length; i += CLOUDFLARE.simultaneousConnections) {
-      const batch = lookups.slice(i, i + CLOUDFLARE.simultaneousConnections);
-      await Promise.all(batch.map((snapshot) => this.enrich(ctx, snapshot)));
-    }
-    return out;
-  }
-
-  private minimalSnapshot(entry: IndexEntry, updatedAt: string): PackageSnapshot {
+  private snapshot(r: DumpRecord): PackageSnapshot {
     return {
       source: this.config.id,
       store: 'hexium',
-      packageId: `${entry.namespace}-${entry.name}`,
-      owner: entry.namespace,
-      name: entry.name,
-      version: entry.version,
-      url: this.packageUrl(entry.namespace, entry.name),
-      iconUrl: null,
-      description: null,
-      categories: [],
-      isNsfw: false,
-      isDeprecated: false,
-      updatedAt,
-      sizeBytes: entry.fileSize,
+      packageId: `${r.owner}-${r.name}`,
+      owner: r.owner,
+      name: r.name,
+      version: r.version,
+      url: this.packageUrl(r.owner, r.name),
+      iconUrl: r.iconUrl,
+      description: r.description,
+      categories: r.categories,
+      isNsfw: r.isNsfw,
+      isDeprecated: r.isDeprecated,
+      updatedAt: r.updatedAt,
+      sizeBytes: r.sizeBytes,
     };
   }
 
-  /** Fills icon, description, categories and updatedAt in place; leaves the snapshot untouched on any failure. */
-  private async enrich(ctx: PollContext, snapshot: PackageSnapshot): Promise<void> {
-    try {
-      const url = `${this.origin}/api/experimental/frontend/p/${encodeURIComponent(snapshot.owner)}/${encodeURIComponent(snapshot.name)}/`;
-      const res = await conditionalGet(ctx, url, { validator: null });
-      if (res.status !== 'ok') return;
-      const body: unknown = parseJson(res.text);
-      if (!isRecord(body)) return;
-      const detail: Json = body;
-      const updated = typeof detail.last_updated === 'string' ? normalizeIso(detail.last_updated) : null;
-      snapshot.iconUrl = str(detail.image_src);
-      snapshot.description = str(detail.description);
-      snapshot.categories = Array.isArray(detail.categories)
-        ? detail.categories.filter((c): c is string => typeof c === 'string')
-        : [];
-      if (updated) snapshot.updatedAt = updated;
-    } catch (err) {
-      console.warn(`[${this.config.id}] detail lookup failed: ${describeError(err)}`);
-    }
-  }
-
-  /** Full index sweep, no cursor filter. Throws on upstream failure so a failed sweep is never mistaken for an empty one. */
+  /**
+   * One rotating slice of the dump (day number modulo the slice count), so a full sweep takes
+   * `hexiumDumpSlices` runs. Full metadata only for packages whose version differs from the store's;
+   * the rest are lean (flags and version only). Throws on upstream failure.
+   */
   async reconcile(ctx: PollContext): Promise<PackageSnapshot[]> {
     if (!safeSlug(this.config.community)) throw new Error('invalid community slug');
-    const res = await conditionalGet(ctx, `${this.origin}/api/experimental/package-index/`, { validator: null });
-    if (res.status !== 'ok') return [];
-    const now = ctx.now.toISOString().slice(0, 19) + '.000000Z';
+    const count = SOURCE_BUDGET.hexiumDumpSlices;
+    const index = Math.floor(ctx.now.getTime() / MS_PER_DAY) % count;
+    const text = await this.fetchDump(ctx);
+    const known = await this.store.getAllKnownVersions(this.config.id);
+
     const out: PackageSnapshot[] = [];
-    scanPackageIndex(res.text, (entry) => out.push(this.minimalSnapshot(entry, now)));
-    if (out.length === 0 && res.text.trim().length > 0) throw new UnexpectedShapeError('package-index has no usable line');
+    const scan = scanPackageDump(text, null, (r) => out.push(this.snapshot(r)), {
+      slice: { index, count },
+      wantDetail: (owner, name, version) => known.get(`${owner}-${name}`) !== version,
+    });
+    this.assertUsable(scan, out.length, text.length);
+    if (scan.failed > 0) console.warn(`[${this.config.id}] reconcile skipped ${scan.failed} unreadable dump records`);
     return out;
   }
 
