@@ -14,18 +14,50 @@ export function neutralizeMentions(text: string): string {
   return text.replace(BROADCAST_MENTION, `@${ZWSP}$1`).replace(TAGGED_MENTION, `<${ZWSP}`);
 }
 
+/** Percent-encodes the `@` of `@everyone` and `@here` in a URL, so the link keeps working where zero-width breaking would kill it. */
+export function encodeMentionsInUrl(url: string): string {
+  return url.replace(BROADCAST_MENTION, (match) => encodeURIComponent(match.charAt(0)) + match.slice(1));
+}
+
 /** Escapes Markdown control characters so untrusted text renders literally inside a message. */
 export function escapeMarkdown(text: string): string {
   return text.replace(/[\\*_~|`[\]()<>#]/g, '\\$&');
 }
 
+/**
+ * Escapes what Discord could read as a code span, code block, autolink or reference definition: every backtick,
+ * every `<` and the colon of every `]:`. A backtick or `<` already preceded by an
+ * odd number of backslashes is left alone. Time O(n).
+ */
+export function escapeInlineTokens(text: string): string {
+  let out = '';
+  let last = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 92) {
+      if (text.charCodeAt(i + 1) !== 93) i++;
+    } else if (c === 96 || c === 60) {
+      out += text.slice(last, i) + String.fromCharCode(92);
+      last = i;
+    } else if (c === 93 && text.charCodeAt(i + 1) === 58) {
+      out += text.slice(last, i + 1) + String.fromCharCode(92);
+      last = i + 1;
+    }
+  }
+  return out === '' ? text : out + text.slice(last);
+}
+
 const UNSAFE_CHARS = new RegExp(
-  '[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F-\\u009F\\u00AD\\u200B\\u200C\\u200E\\u200F\\u202A-\\u202E\\u2060-\\u2064\\u2066-\\u2069\\uFEFF]' +
+  '[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F-\\u009F\\u00AD\\u034F\\u061C\\u115F\\u1160\\u17B4\\u17B5\\u180B-\\u180F\\u200B\\u200C\\u200E\\u200F\\u2028-\\u202E\\u2060-\\u206F\\u2800\\u3164\\uFE00-\\uFE0F\\uFEFF\\uFFA0\\uFFF0-\\uFFFB\\uFFFE\\uFFFF]' +
+    '|[\\uDB40-\\uDB43][\\uDC00-\\uDFFF]|\\uD82F[\\uDCA0-\\uDCA3]|\\uD834[\\uDD73-\\uDD7A]' +
     '|[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF])|(?<![\\uD800-\\uDBFF])[\\uDC00-\\uDFFF]',
   'g',
 );
 
-/** Removes control characters, bidi overrides, zero-width characters (except ZWJ) and lone surrogates. */
+/**
+ * Removes control characters, bidi and format characters, zero-width characters (except ZWJ), fillers, variation
+ * selectors, tag characters, line and paragraph separators, non-characters and lone surrogates.
+ */
 export function stripUnsafeChars(text: string): string {
   return text.replace(UNSAFE_CHARS, '');
 }
@@ -62,7 +94,7 @@ function decodeEntity(match: string, dec: string | undefined, hex: string | unde
   if (code === 0x09 || code === 0x0a || code === 0x0d) return String.fromCharCode(code);
   if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return '';
   if (code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return REPLACEMENT_CHAR;
-  return String.fromCodePoint(code);
+  return stripUnsafeChars(String.fromCodePoint(code));
 }
 
 const BLOCK_OPEN = /<(script|style)\b/gi;

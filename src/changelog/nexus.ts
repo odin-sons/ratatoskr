@@ -12,7 +12,7 @@ function normalizeVersion(version: string): string {
   return trimmed.startsWith('v') ? trimmed.slice(1) : trimmed;
 }
 
-function findLines(changelogs: Record<string, string[]>, version: string): unknown {
+function findLines(changelogs: Record<string, unknown>, version: string): unknown {
   const wanted = normalizeVersion(version);
   if (wanted === '') return undefined;
   for (const [key, lines] of Object.entries(changelogs)) {
@@ -22,7 +22,7 @@ function findLines(changelogs: Record<string, string[]>, version: string): unkno
 }
 
 /** Excerpt of a Nexus `changelogs.json` entry, rendered as a bullet list. */
-export function extractNexusChangelog(changelogs: Record<string, string[]>, version: string, opts: ExtractOptions = {}): string | null {
+export function extractNexusChangelog(changelogs: Record<string, unknown>, version: string, opts: ExtractOptions = {}): string | null {
   if (typeof changelogs !== 'object' || changelogs === null || typeof version !== 'string') return null;
   const maxChars = opts.maxChars ?? CHANGELOG_EXCERPT_MAX;
   if (!Number.isFinite(maxChars) || maxChars < 1) return null;

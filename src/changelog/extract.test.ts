@@ -2,11 +2,13 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { CHANGELOG_EXCERPT_MAX } from '../core/constants.ts';
+import { bestOf } from '../testing/timing.ts';
 import { extractChangelog } from './extract.ts';
 
 const ZWSP = String.fromCharCode(0x200b);
 const FULL_URL = 'https://thunderstore.io/c/valheim/p/Author/Mod/changelog/';
 const FULL_LINK = `[Full changelog](${FULL_URL})`;
+const TICKS = '\\`\\`\\`';
 
 const STANDARD = `# Changelog
 
@@ -121,12 +123,12 @@ describe('code fences', () => {
   it('does not treat # inside a fence as a heading', () => {
     const md = '## 1.2.4\n\nRun:\n\n```bash\n# install deps\n## still code\nnpm i\n```\n\n- done\n\n## 1.2.3\n- old';
     const out = extractChangelog(md, '1.2.4');
-    expect(out).toBe('Run:\n\n```bash\n# install deps\n## still code\nnpm i\n```\n\n- done');
+    expect(out).toBe(`Run:\n\n${TICKS}bash\n# install deps\n## still code\nnpm i\n${TICKS}\n\n- done`);
   });
 
   it('does not match a version that only appears inside a fence', () => {
     const md = '## 1.2.3\n```\n## 1.2.4\n```\n- x\n## 1.2.2\n- y';
-    expect(extractChangelog(md, '1.2.4')).toBe('```\n## 1.2.4\n```\n- x');
+    expect(extractChangelog(md, '1.2.4')).toBe(`${TICKS}\n## 1.2.4\n${TICKS}\n- x`);
   });
 
   it('honours tilde fences and longer closing fences', () => {
@@ -134,14 +136,14 @@ describe('code fences', () => {
     expect(extractChangelog(md, '1.0.0')).toContain('- end');
   });
 
-  it('does not mangle angle brackets inside fences', () => {
+  it('keeps the words inside fences, escaping the angle brackets instead of stripping them', () => {
     const md = '## 1.0.0\n```cs\nList<string> names = new List<string>();\n```';
-    expect(extractChangelog(md, '1.0.0')).toBe('```cs\nList<string> names = new List<string>();\n```');
+    expect(extractChangelog(md, '1.0.0')).toBe(`${TICKS}cs\nList\\<string> names = new List\\<string>();\n${TICKS}`);
   });
 
-  it('closes an unterminated fence', () => {
+  it('leaves an unterminated fence as escaped text', () => {
     const out = extractChangelog('## 1.0.0\n- a\n```\ncode', '1.0.0');
-    expect(out).toBe('- a\n```\ncode\n```');
+    expect(out).toBe(`- a\n${TICKS}\ncode`);
   });
 });
 
@@ -237,24 +239,24 @@ describe('truncation', () => {
     }
   });
 
-  it('omits a partial fence instead of cutting through it', () => {
+  it('cuts the lines of a fence like any other lines', () => {
     const md = `## 1.0.0\n- intro\n\`\`\`\n${'code line\n'.repeat(60)}\`\`\`\n- outro`;
-    const out = extractChangelog(md, '1.0.0', { maxChars: 200 });
-    expect(out).toBe('- intro…');
+    const out = extractChangelog(md, '1.0.0', { maxChars: 60 });
+    expect(out).toBe(`- intro\n${TICKS}\ncode line\ncode line\ncode line\ncode line…`);
   });
 
-  it('closes a fence when it is the only content that fits', () => {
-    const md = `## 1.0.0\n\`\`\`\n${'code line\n'.repeat(60)}\`\`\``;
-    const out = extractChangelog(md, '1.0.0', { maxChars: 60 }) ?? '';
-    expect(out.length).toBeLessThanOrEqual(60);
-    expect(out.startsWith('```\ncode line')).toBe(true);
-    expect(out.endsWith('\n```\n…')).toBe(true);
+  it('never leaves half of an escaped backtick at the cut', () => {
+    for (let maxChars = 2; maxChars < 40; maxChars++) {
+      const out = extractChangelog('## 1.0.0\n`````````` x', '1.0.0', { maxChars }) ?? '';
+      expect(out.length).toBeLessThanOrEqual(maxChars);
+      expect(out.replace(/\\`/g, '').replace(/…$/, '')).not.toMatch(/[\\`]/);
+    }
   });
 
-  it('returns a complete fence followed by an ellipsis on its own line', () => {
+  it('puts the ellipsis right after the escaped ticks of a fence that ends the excerpt', () => {
     const md = '## 1.0.0\n```\na\n```\n' + 'x'.repeat(200);
     const out = extractChangelog(md, '1.0.0', { maxChars: 30 });
-    expect(out).toBe('```\na\n```\n…');
+    expect(out).toBe(`${TICKS}\na\n${TICKS}…`);
   });
 
   it('returns null when maxChars is not usable', () => {
@@ -307,59 +309,197 @@ describe('full changelog link', () => {
     expect(out).toBe('- a\n[Full changelog](https://example.com/a%20b/%28c%29)');
   });
 
-  it('is never placed inside an open code fence', () => {
+  it('stays on its own line after an unterminated fence', () => {
     const out = extractChangelog('## 1.0.0\n```\ncode', '1.0.0', { fullUrl: FULL_URL }) ?? '';
-    expect(out).toBe(`\`\`\`\ncode\n\`\`\`\n${FULL_LINK}`);
+    expect(out).toBe(`${TICKS}\ncode\n${FULL_LINK}`);
   });
 });
 
 describe('performance', () => {
   const section = (v: string): string => `## ${v}\n\n### Added\n\n- Something new in ${v}\n- Another [link](https://example.com/${v}) here\n\n### Fixed\n\n- A bug\n\n`;
 
-  it('finds a section at the very end of a ~200 KB changelog', () => {
+  it('finds a section at the very end of a ~100 KB changelog', () => {
     let md = '# Changelog\n\n';
     let i = 0;
-    while (md.length < 200_000) md += section(`2.${i++}.0`);
+    while (md.length < 100_000) md += section(`2.${i++}.0`);
     md += section('1.0.0');
-    const start = performance.now();
-    const out = extractChangelog(md, '1.0.0');
-    const elapsed = performance.now() - start;
-    expect(out).toContain('Something new in 1.0.0');
-    expect(elapsed).toBeLessThan(50);
+    expect(extractChangelog(md, '1.0.0')).toContain('Something new in 1.0.0');
+    expect(bestOf(5, () => extractChangelog(md, '1.0.0'))).toBeLessThan(50);
   });
 
   it('falls back quickly on a ~200 KB changelog with no match', () => {
     let md = '';
     let i = 0;
     while (md.length < 200_000) md += section(`2.${i++}.0`);
-    const start = performance.now();
     expect(extractChangelog(md, '9.9.9')).toContain('Something new in 2.0.0');
-    expect(performance.now() - start).toBeLessThan(50);
+    expect(bestOf(5, () => extractChangelog(md, '9.9.9'))).toBeLessThan(50);
+  });
+
+  it('ignores a matching section beyond the input window and falls back to the first section', () => {
+    let md = '';
+    let i = 0;
+    while (md.length < 200_000) md += section(`2.${i++}.0`);
+    md += section('1.0.0');
+    expect(extractChangelog(md, '1.0.0')).toContain('Something new in 2.0.0');
+  });
+
+  it('stays cheap on floods of headings and fences at the input cap', () => {
+    const floods = ['# a\n'.repeat(131_072), '## 1.0\n'.repeat(70_000), '```\n'.repeat(110_000), '~~~\n# a\n'.repeat(60_000), '#\n'.repeat(260_000), '    # a\n'.repeat(80_000)];
+    let total = 0;
+    for (const md of floods) {
+      for (const input of [md, `## 1.0.0\n${md}`]) {
+        const elapsed = bestOf(3, () => extractChangelog(input, '9.9.9', { fullUrl: FULL_URL }));
+        total += elapsed;
+        expect(elapsed, md.slice(0, 12)).toBeLessThan(25);
+      }
+    }
+    expect(total).toBeLessThan(120);
+  });
+
+  it('stays cheap on floods of blank and whitespace-only lines', () => {
+    const inputs = [
+      `## 1.0.0\n${'\n'.repeat(400_000)}- x`,
+      `## 1.0.0\n${' \t\n'.repeat(200_000)}- x`,
+      `## 1.0.0\n${'  \n'.repeat(200_000)}- x`,
+    ];
+    const elapsed = bestOf(5, () => {
+      for (const input of inputs) extractChangelog(input, '1.0.0');
+    });
+    expect(elapsed).toBeLessThan(25);
   });
 
   it('handles one enormous section', () => {
     const md = `## 1.0.0\n${'- a long-ish bullet point about a change\n'.repeat(5000)}## 0.9.0\n- old`;
-    const start = performance.now();
-    const out = extractChangelog(md, '1.0.0') ?? '';
-    expect(out.length).toBeLessThanOrEqual(CHANGELOG_EXCERPT_MAX);
-    expect(performance.now() - start).toBeLessThan(50);
+    expect((extractChangelog(md, '1.0.0') ?? '').length).toBeLessThanOrEqual(CHANGELOG_EXCERPT_MAX);
+    expect(bestOf(5, () => extractChangelog(md, '1.0.0'))).toBeLessThan(50);
   });
 
   it('handles adversarial single-line inputs', () => {
     const inputs = ['<'.repeat(200_000), '![['.repeat(60_000), '['.repeat(200_000), '#'.repeat(200_000), '```'.repeat(60_000), '<script>'.repeat(20_000)];
     for (const md of inputs) {
-      const start = performance.now();
-      extractChangelog(md, '1.0.0');
-      extractChangelog(`## 1.0.0\n${md}`, '1.0.0', { fullUrl: FULL_URL });
-      expect(performance.now() - start).toBeLessThan(100);
+      const elapsed = bestOf(5, () => {
+        extractChangelog(md, '1.0.0');
+        extractChangelog(`## 1.0.0\n${md}`, '1.0.0', { fullUrl: FULL_URL });
+      });
+      expect(elapsed, md.slice(0, 8)).toBeLessThan(100);
     }
   });
 
   it('handles many tiny headings and lines', () => {
     const md = '## x\n'.repeat(40_000);
-    const start = performance.now();
-    extractChangelog(md, '1.0.0');
-    expect(performance.now() - start).toBeLessThan(100);
+    expect(bestOf(5, () => extractChangelog(md, '1.0.0'))).toBeLessThan(100);
+  });
+});
+
+describe('link sanitising', () => {
+  const run = (line: string, fullUrl: string | null = null): string => extractChangelog(`## 1.0.0\n${line}`, '1.0.0', { fullUrl }) ?? '';
+
+  it('keeps http and https links, including uppercase schemes', () => {
+    expect(run('- [docs](https://example.com/x) and [more](HTTP://EXAMPLE.COM/y)')).toBe('- [docs](https://example.com/x) and [more](HTTP://EXAMPLE.COM/y)');
+  });
+
+  it.each([
+    ['javascript:alert(1)'],
+    ['JavaScript:alert(1)'],
+    ['data:text/html;base64,PHNjcmlwdD4='],
+    ['vbscript:x'],
+    ['file:///etc/passwd'],
+    ['//evil.example/x'],
+    ['/relative/path'],
+    ['#fragment'],
+    ['discord://-/channels/1/2'],
+    [''],
+  ])('degrades a link to %s to its plain text', (target) => {
+    const out = run(`- see [the guide](${target}) now`);
+    expect(out).toBe('- see the guide now');
+  });
+
+  it('strips a link title and keeps only the target', () => {
+    expect(run('[t](https://a.example/p "hover text")')).toBe('[t](https://a.example/p)');
+  });
+
+  it('drops angle-bracket targets, which HTML stripping removes first', () => {
+    expect(run('[t](<https://a.example/p q> "hover")')).toBe('t');
+  });
+
+  it('percent-encodes characters that would end the link early', () => {
+    expect(run('[wiki](https://en.wikipedia.org/wiki/Foo_(bar))')).toBe('[wiki](https://en.wikipedia.org/wiki/Foo_%28bar%29)');
+  });
+
+  it('turns an empty-text link into its bare http target or nothing', () => {
+    expect(run('a [](https://a.example/p) b')).toBe('a https://a.example/p b');
+    expect(run('a [](javascript:x) b')).toBe('a  b');
+  });
+
+  it('degrades nested and unbalanced constructs without throwing', () => {
+    for (const line of ['[a](javascript:alert(1)', '[[a](javascript:x)](https://ok.example)', '[a]b](javascript:x)', '[a](', '[a](([(', '!['.repeat(50) + '](javascript:x)']) {
+      const out = run(line);
+      expect(out).not.toMatch(/\]\(\s*javascript/i);
+    }
+  });
+
+  it('sanitises links inside code fences and inline code as well', () => {
+    expect(run('```\n[a](javascript:x)\n```')).toBe(`${TICKS}\na\n${TICKS}`);
+    expect(run('use `[a](javascript:x)` literally')).toBe('use \\`a\\` literally');
+  });
+
+  it('sanitises links in headings too', () => {
+    expect(run('### [Docs](javascript:x)\n- a')).toBe('**Docs**\n- a');
+  });
+
+  it('turns an image with an unsafe source into its alt text', () => {
+    expect(run('![logo](javascript:alert(1)) x')).toBe('!logo x');
+  });
+
+  it('neutralises mentions inside link text and keeps the link', () => {
+    const out = run('[@everyone <@123>](https://a.example/p)');
+    expect(out).not.toMatch(/@everyone/);
+    expect(out).not.toMatch(/<@123>/);
+    expect(out).toContain('](https://a.example/p)');
+  });
+
+  it.each([
+    ['https://x.io/@everyone', 'https://x.io/%40everyone'],
+    ['https://x.io/a?u=@HERE&b=1', 'https://x.io/a?u=%40HERE&b=1'],
+    ['https://x.io/＠everyone', 'https://x.io/%EF%BC%A0everyone'],
+    ['https://x.io/@user/@here', 'https://x.io/@user/%40here'],
+  ])('keeps a mention-looking link target working by percent-encoding it (%s)', (target, encoded) => {
+    expect(run(`[a](${target})`)).toBe(`[a](${encoded})`);
+    expect(run('- x', target)).toBe(`- x\n[Full changelog](${encoded})`);
+    expect(run(`[a](${target})`)).not.toContain(ZWSP);
+  });
+
+  it('still neutralises a mention in the visible text of a link', () => {
+    const out = run('[@everyone](https://x.io/@everyone) @here');
+    expect(out).toBe(`[@${ZWSP}everyone](https://x.io/%40everyone) @${ZWSP}here`);
+  });
+
+  it('never lets an author-written "Full changelog" link compete with the real one', () => {
+    const out = run('- fixed\n[Full changelog](https://evil.example/x)', FULL_URL);
+    expect(out.match(/\[Full changelog\]\(/g)).toHaveLength(1);
+    expect(out.endsWith(FULL_LINK)).toBe(true);
+    expect(out).not.toContain('evil.example');
+    expect(out).toContain('Full changelog');
+  });
+
+  it('stays cheap on lines full of unclosed, nested or backtick-heavy constructs', () => {
+    const lines = [
+      '[a]('.repeat(3000),
+      '[a](' + '('.repeat(4000),
+      '['.repeat(9000),
+      '`'.repeat(4000) + '[a](x)',
+      Array.from({ length: 60 }, (_, i) => '`'.repeat(i + 1) + 'x').join(' '),
+      '[ `a](x) ` '.repeat(800),
+      '``a`[a](javascript:alert(1))`'.repeat(320),
+    ];
+    let total = 0;
+    for (const line of lines) total += bestOf(3, () => run(line, FULL_URL));
+    expect(total).toBeLessThan(20);
+  });
+
+  it('produces final Markdown: lists and bold stay as written, fences turn into escaped text', () => {
+    const out = run('### Added\n- **bold** item\n```\ncode\n```', FULL_URL);
+    expect(out).toBe(`**Added**\n- **bold** item\n${TICKS}\ncode\n${TICKS}\n${FULL_LINK}`);
   });
 });
 

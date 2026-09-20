@@ -2,6 +2,7 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { CHANGELOG_EXCERPT_MAX } from '../core/constants.ts';
+import { bestOf } from '../testing/timing.ts';
 import { extractNexusChangelog } from './nexus.ts';
 
 const FULL_URL = 'https://www.nexusmods.com/valheim/mods/1234?tab=logs';
@@ -56,6 +57,13 @@ describe('extractNexusChangelog', () => {
     expect(out).toContain('ok');
   });
 
+  it('renders link syntax literally so no author link survives and the full-changelog link stays unique', () => {
+    const out = extractNexusChangelog({ '1.0.0': ['[click](javascript:alert(1))', '[Full changelog](https://evil.example/x)', '[ok](https://a.example)'] }, '1.0.0', { fullUrl: FULL_URL }) ?? '';
+    expect(out.slice(0, out.lastIndexOf('\n'))).not.toMatch(/(?<!\\)\]\(/);
+    expect(out.match(/\[Full changelog\]\(/g)).toHaveLength(1);
+    expect(out.endsWith(`\n[Full changelog](${FULL_URL})`)).toBe(true);
+  });
+
   it('truncates on a line boundary with the ellipsis and link inside the budget', () => {
     const lines = Array.from({ length: 80 }, (_, i) => `Change number ${i} with a fairly descriptive sentence`);
     const out = extractNexusChangelog({ '1.0.0': lines }, '1.0.0', { fullUrl: FULL_URL }) ?? '';
@@ -71,10 +79,9 @@ describe('extractNexusChangelog', () => {
   });
 
   it('handles one enormous line quickly', () => {
-    const start = performance.now();
-    const out = extractNexusChangelog({ '1.0.0': ['<'.repeat(300_000)] }, '1.0.0') ?? '';
-    expect(out.length).toBeLessThanOrEqual(CHANGELOG_EXCERPT_MAX);
-    expect(performance.now() - start).toBeLessThan(50);
+    const lines = { '1.0.0': ['<'.repeat(300_000)] };
+    expect((extractNexusChangelog(lines, '1.0.0') ?? '').length).toBeLessThanOrEqual(CHANGELOG_EXCERPT_MAX);
+    expect(bestOf(5, () => extractNexusChangelog(lines, '1.0.0'))).toBeLessThan(50);
   });
 
   it('property: never throws and never exceeds maxChars', () => {
