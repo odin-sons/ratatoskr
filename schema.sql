@@ -1,6 +1,8 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- ratatoskr D1 schema. Idempotent: safe to apply on every deploy.
 --   wrangler d1 execute ratatoskr --remote --file=./schema.sql
+-- A database created before `outbox.delivered_at` existed needs once:
+--   ALTER TABLE outbox ADD COLUMN delivered_at TEXT;
 
 CREATE TABLE IF NOT EXISTS sources (
   id TEXT PRIMARY KEY,
@@ -40,7 +42,7 @@ CREATE TABLE IF NOT EXISTS events (
   release_key TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_events_created ON events (created_at);
+DROP INDEX IF EXISTS idx_events_created;
 CREATE INDEX IF NOT EXISTS idx_events_release ON events (release_key, created_at);
 
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -61,9 +63,12 @@ CREATE TABLE IF NOT EXISTS outbox (
   attempts INTEGER NOT NULL DEFAULT 0,
   next_attempt_at TEXT NOT NULL,
   parked INTEGER NOT NULL DEFAULT 0,
+  delivered_at TEXT,
   UNIQUE (subscription_id, event_id)
 );
-CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox (next_attempt_at) WHERE parked = 0;
+DROP INDEX IF EXISTS idx_outbox_due;
+CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox (next_attempt_at) WHERE parked = 0 AND delivered_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_outbox_delivered ON outbox (delivered_at) WHERE delivered_at IS NOT NULL;
 
 -- Example subscription (one per Discord channel webhook). Keep the webhook URL secret.
 -- INSERT INTO subscriptions (id, guild_id, webhook_url, filter, mode, digest_interval_min)

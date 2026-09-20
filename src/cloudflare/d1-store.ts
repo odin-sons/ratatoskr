@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { CLOUDFLARE, DEFAULT_DIGEST_INTERVAL_MIN } from '../core/constants.ts';
+import { CLOUDFLARE, DEFAULT_DIGEST_INTERVAL_MIN, OUTBOX_MAX_ATTEMPTS } from '../core/constants.ts';
+import { parseFilter } from '../core/filter.ts';
 import { releaseKey } from '../core/ids.ts';
 import type { CommitBatch, Store } from '../core/ports.ts';
 import type {
@@ -13,7 +14,6 @@ import type {
   SourceState,
   StoreKind,
   Subscription,
-  SubscriptionFilter,
 } from '../core/types.ts';
 import { D1_MAX_BATCH_STATEMENTS } from './limits.ts';
 
@@ -152,13 +152,17 @@ const SQL_SOURCE_UPSERT = `INSERT INTO sources (${SOURCE_COLUMNS.join(', ')}) VA
 const SQL_SOURCE_TOUCH = `INSERT INTO sources (${SOURCE_COLUMNS.join(', ')}) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET etag = excluded.etag, last_ok_at = excluded.last_ok_at`;
 const SQL_ALL_KNOWN = 'SELECT package_id, latest_version FROM packages WHERE source = ?';
 const SQL_SUBSCRIPTIONS = `SELECT ${SUBSCRIPTION_READ_COLUMNS.join(', ')} FROM subscriptions WHERE enabled = 1`;
-const SQL_RECENT_BY_RELEASE = `SELECT ${EVENT_JOIN_SELECT} FROM events e ${EVENT_JOIN_PACKAGES} WHERE e.release_key = ? AND e.created_at >= ? ORDER BY e.created_at`;
-// Unary plus keeps the planner driving from idx_outbox_due instead of subscriptions.
-const SQL_TAKE_DUE = `SELECT ${selectColumns('o', 'o', OUTBOX_READ_COLUMNS)}, ${selectColumns('s', 's', SUBSCRIPTION_READ_COLUMNS)}, ${EVENT_JOIN_SELECT} FROM outbox o JOIN events e ON e.id = o.event_id ${EVENT_JOIN_PACKAGES} JOIN subscriptions s ON s.id = o.subscription_id WHERE o.parked = 0 AND o.next_attempt_at <= ? AND +s.enabled = 1 ORDER BY o.next_attempt_at, o.rowid LIMIT ?`;
+const SUBSCRIPTION_FILTER_IS_OBJECT = "CASE WHEN json_valid(s.filter) THEN json_type(s.filter) = 'object' ELSE 0 END";
+// Unary plus keeps the planner driving from idx_outbox_pending instead of subscriptions.
+const SQL_TAKE_DUE = `SELECT ${selectColumns('o', 'o', OUTBOX_READ_COLUMNS)}, ${selectColumns('s', 's', SUBSCRIPTION_READ_COLUMNS)}, ${EVENT_JOIN_SELECT} FROM outbox o JOIN events e ON e.id = o.event_id ${EVENT_JOIN_PACKAGES} JOIN subscriptions s ON s.id = o.subscription_id WHERE o.parked = 0 AND o.delivered_at IS NULL AND o.next_attempt_at <= ? AND o.attempts < ? AND +s.enabled = 1 AND ${SUBSCRIPTION_FILTER_IS_OBJECT} ORDER BY o.next_attempt_at, o.rowid LIMIT ?`;
+const SQL_MARK_DELIVERED_PREFIX = 'UPDATE outbox SET delivered_at = ? WHERE delivered_at IS NULL AND id IN';
+const SQL_PURGE_DELIVERED = 'DELETE FROM outbox WHERE id IN (SELECT id FROM outbox WHERE delivered_at < ? LIMIT ?)';
 const SQL_MARK_FAILED = 'UPDATE outbox SET attempts = attempts + 1, next_attempt_at = ?, parked = ? WHERE id = ?';
 const SQL_SET_CHANGELOG = 'UPDATE events SET changelog = ?, changelog_url = ? WHERE id = ?';
 
 const KNOWN_VERSIONS_IDS_PER_QUERY = CLOUDFLARE.d1MaxBoundParams - 1;
+const RELEASE_KEYS_PER_QUERY = CLOUDFLARE.d1MaxBoundParams - 1;
+const DELIVERED_IDS_PER_QUERY = CLOUDFLARE.d1MaxBoundParams - 1;
 
 function placeholders(count: number): string {
   return Array.from({ length: count }, () => '?').join(', ');
@@ -216,8 +220,12 @@ function sqlKnownVersions(ids: number): string {
   return `SELECT package_id, latest_version FROM packages WHERE source = ? AND package_id IN (${placeholders(ids)})`;
 }
 
-function sqlDeleteOutbox(ids: number): string {
-  return `DELETE FROM outbox WHERE id IN (${placeholders(ids)})`;
+function sqlMarkDelivered(ids: number): string {
+  return `${SQL_MARK_DELIVERED_PREFIX} (${placeholders(ids)})`;
+}
+
+function sqlRecentByReleaseKeys(keys: number): string {
+  return `SELECT ${EVENT_JOIN_SELECT}, e.release_key AS e_release_key FROM events e ${EVENT_JOIN_PACKAGES} WHERE e.release_key IN (${placeholders(keys)}) AND e.created_at >= ? ORDER BY e.created_at`;
 }
 
 export class D1Store implements Store {
@@ -285,29 +293,54 @@ export class D1Store implements Store {
 
   async listSubscriptions(): Promise<Subscription[]> {
     const { results } = await this.db.prepare(SQL_SUBSCRIPTIONS).all<SubscriptionCols>();
-    return results.map(mapSubscription);
+    return mapValidSubscriptions(results);
   }
 
-  async recentEventsByReleaseKey(key: string, sinceIso: string): Promise<ModEvent[]> {
-    const { results } = await this.db.prepare(SQL_RECENT_BY_RELEASE).bind(key, sinceIso).all<EventJoinRow>();
-    return results.map(mapEvent);
+  async recentEventsByReleaseKeys(releaseKeys: string[], sinceIso: string): Promise<Map<string, ModEvent[]>> {
+    const byKey = new Map<string, ModEvent[]>();
+    if (releaseKeys.length === 0) return byKey;
+    const statements = chunk([...new Set(releaseKeys)], RELEASE_KEYS_PER_QUERY).map((keys) =>
+      this.db.prepare(sqlRecentByReleaseKeys(keys.length)).bind(...keys, sinceIso),
+    );
+    const results = await this.db.batch<EventJoinRow & { e_release_key: string }>(statements);
+    for (const result of results) {
+      for (const row of result.results) {
+        const list = byKey.get(row.e_release_key);
+        if (list === undefined) byKey.set(row.e_release_key, [mapEvent(row)]);
+        else list.push(mapEvent(row));
+      }
+    }
+    return byKey;
   }
 
   async takeDue(nowIso: string, limit: number): Promise<DueDelivery[]> {
-    const { results } = await this.db.prepare(SQL_TAKE_DUE).bind(nowIso, limit).all<DueJoinRow>();
-    return results.map((row) => ({
-      row: mapOutbox(row),
-      subscription: mapSubscription(unprefix<SubscriptionCols>(row, 's_', SUBSCRIPTION_READ_COLUMNS)),
-      event: mapEvent(row),
-    }));
+    const { results } = await this.db.prepare(SQL_TAKE_DUE).bind(nowIso, OUTBOX_MAX_ATTEMPTS, limit).all<DueJoinRow>();
+    const subscriptions = new Map<string, Subscription | null>();
+    const due: DueDelivery[] = [];
+    for (const row of results) {
+      const cols = unprefix<SubscriptionCols>(row, 's_', SUBSCRIPTION_READ_COLUMNS);
+      let subscription = subscriptions.get(cols.id);
+      if (subscription === undefined) {
+        subscription = mapSubscription(cols);
+        subscriptions.set(cols.id, subscription);
+        if (subscription === null) warnInvalidSubscription(cols.id);
+      }
+      if (subscription !== null) due.push({ row: mapOutbox(row), subscription, event: mapEvent(row) });
+    }
+    return due;
   }
 
-  async markDelivered(outboxIds: string[]): Promise<void> {
+  async markDelivered(outboxIds: string[], deliveredAtIso: string): Promise<void> {
     if (outboxIds.length === 0) return;
-    const statements = chunk(outboxIds, CLOUDFLARE.d1MaxBoundParams).map((ids) =>
-      this.db.prepare(sqlDeleteOutbox(ids.length)).bind(...ids),
+    const statements = chunk(outboxIds, DELIVERED_IDS_PER_QUERY).map((ids) =>
+      this.db.prepare(sqlMarkDelivered(ids.length)).bind(deliveredAtIso, ...ids),
     );
     await this.db.batch(statements);
+  }
+
+  async purgeDelivered(olderThanIso: string, limit: number): Promise<number> {
+    const result = await this.db.prepare(SQL_PURGE_DELIVERED).bind(olderThanIso, limit).run();
+    return result.meta.changes;
   }
 
   async markFailed(outboxId: string, nextAttemptAtIso: string, parked: boolean): Promise<void> {
@@ -393,16 +426,38 @@ function mapSourceState(row: SourceCols): SourceState {
   };
 }
 
-function mapSubscription(row: SubscriptionCols): Subscription {
+function mapSubscription(row: SubscriptionCols): Subscription | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.filter);
+  } catch {
+    return null;
+  }
+  const filter = parseFilter(parsed);
+  if (filter === null || (row.mode !== 'immediate' && row.mode !== 'digest')) return null;
   return {
     id: row.id,
     guildId: row.guild_id,
     webhookUrl: row.webhook_url,
-    filter: JSON.parse(row.filter) as SubscriptionFilter,
+    filter,
     mode: row.mode as DeliveryMode,
     digestIntervalMin: row.digest_interval_min ?? DEFAULT_DIGEST_INTERVAL_MIN,
     enabled: row.enabled === 1,
   };
+}
+
+function warnInvalidSubscription(id: string): void {
+  console.warn(`subscription ${id} skipped: invalid filter or mode`);
+}
+
+function mapValidSubscriptions(rows: readonly SubscriptionCols[]): Subscription[] {
+  const out: Subscription[] = [];
+  for (const row of rows) {
+    const subscription = mapSubscription(row);
+    if (subscription === null) warnInvalidSubscription(row.id);
+    else out.push(subscription);
+  }
+  return out;
 }
 
 function mapOutbox(row: Prefixed<'o_', OutboxCols>): OutboxRow {

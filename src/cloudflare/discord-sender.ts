@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { PROJECT } from '../core/constants.ts';
+import { DISCORD_SEND_TIMEOUT_MS, PROJECT } from '../core/constants.ts';
 import type { Sender, SendResult } from '../core/ports.ts';
 import type { DiscordMessage } from '../core/types.ts';
 import { parseDiscordWebhookUrl } from './guards.ts';
@@ -11,9 +11,11 @@ const defaultFetch: typeof fetch = (input, init) => fetch(input, init);
 
 export class DiscordSender implements Sender {
   private readonly fetchImpl: typeof fetch;
+  private readonly timeoutMs: number;
 
-  constructor(fetchImpl: typeof fetch = defaultFetch) {
+  constructor(fetchImpl: typeof fetch = defaultFetch, timeoutMs: number = DISCORD_SEND_TIMEOUT_MS) {
     this.fetchImpl = fetchImpl;
+    this.timeoutMs = timeoutMs;
   }
 
   async send(webhookUrl: string, payload: DiscordMessage): Promise<SendResult> {
@@ -32,6 +34,7 @@ export class DiscordSender implements Sender {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'user-agent': USER_AGENT },
         body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch {
       console.warn(`discord send network error webhook=${hook.id}`);

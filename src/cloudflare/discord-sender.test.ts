@@ -40,6 +40,32 @@ function expectNoSecretLeak(): void {
   expect(all).not.toContain('discord.com/api/webhooks');
 }
 
+function hangingFetch(): { fetch: typeof fetch; signals: (AbortSignal | null | undefined)[] } {
+  const signals: (AbortSignal | null | undefined)[] = [];
+  const fake = ((_url: unknown, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      signals.push(init?.signal);
+      init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+    })) as typeof fetch;
+  return { fetch: fake, signals };
+}
+
+describe('DiscordSender timeout', () => {
+  it('passes an abort signal to every request', async () => {
+    const { sender, calls } = senderWith(() => new Response(null, { status: 204 }));
+    await sender.send(HOOK, MESSAGE);
+    expect(calls[0]![1]?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('gives up on a request that never resolves and reports a retryable failure', async () => {
+    const { fetch: hanging, signals } = hangingFetch();
+    const sender = new DiscordSender(hanging, 20);
+    expect(await sender.send(HOOK, MESSAGE)).toEqual({ ok: false, retryable: true, retryAfterSeconds: null, status: 0 });
+    expect(signals[0]?.aborted).toBe(true);
+    expectNoSecretLeak();
+  });
+});
+
 describe('DiscordSender', () => {
   it('posts JSON with wait=false and reports ok on 204', async () => {
     const { sender, calls } = senderWith(() => new Response(null, { status: 204 }));

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { eventId, outboxId } from '../core/ids.ts';
 import type { CommitBatch } from '../core/ports.ts';
+import { runStoreContract } from '../testing/store-contract.ts';
 import type { ModEvent, OutboxRow, PackageSnapshot, SourceState } from '../core/types.ts';
 import { D1Store } from './d1-store.ts';
 import { D1Shim } from './testing/d1-shim.ts';
@@ -75,6 +76,22 @@ function addSub(shim: D1Shim, id: string, over: { enabled?: number; filter?: str
     .run(id, '123456789012345678', `https://discord.com/api/webhooks/123456789012345678/tok-${id}`, over.filter ?? '{}', over.mode ?? 'digest', over.interval === undefined ? 30 : over.interval, over.enabled ?? 1);
 }
 
+runStoreContract('D1Store over the D1 shim', () => {
+  const contractShim = new D1Shim();
+  contractShim.db.exec(SCHEMA);
+  return {
+    store: new D1Store(contractShim.asD1()),
+    addSubscription: async (sub) => {
+      contractShim.db
+        .prepare('INSERT INTO subscriptions (id, guild_id, webhook_url, filter, mode, digest_interval_min, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(sub.id, sub.guildId, sub.webhookUrl, JSON.stringify(sub.filter), sub.mode, sub.digestIntervalMin, sub.enabled ? 1 : 0);
+    },
+    setSubscriptionEnabled: async (id, enabled) => {
+      contractShim.db.prepare('UPDATE subscriptions SET enabled = ? WHERE id = ?').run(enabled ? 1 : 0, id);
+    },
+  };
+});
+
 let shim: D1Shim;
 let store: D1Store;
 
@@ -89,6 +106,14 @@ describe('schema.sql', () => {
   it('applies twice without error', () => {
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
+  });
+
+  it('drops the unused events(created_at) index, also from a database created before it was removed', () => {
+    shim.db.exec('CREATE INDEX idx_events_created ON events (created_at)');
+    shim.db.exec(SCHEMA);
+    const names = (shim.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as { name: string }[]).map((r) => r.name);
+    expect(names).not.toContain('idx_events_created');
+    expect(names).toContain('idx_events_release');
   });
 });
 
@@ -294,6 +319,88 @@ describe('listSubscriptions', () => {
   });
 });
 
+describe('malformed subscription rows', () => {
+  const MALFORMED: [string, string][] = [
+    ['invalid JSON', '{not json'],
+    ['JSON null', 'null'],
+    ['a JSON array', '[]'],
+    ['a wrong-typed field', '{"allowNsfw":"yes"}'],
+    ['an unknown kind', '{"kinds":["delete"]}'],
+  ];
+
+  it.each(MALFORMED)('listSubscriptions skips a row with %s and returns the others', async (_label, filter) => {
+    addSub(shim, 'bad', { filter });
+    addSub(shim, 'good');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect((await store.listSubscriptions()).map((s) => s.id)).toEqual(['good']);
+      expect(warn).toHaveBeenCalledTimes(1);
+      const line = String(warn.mock.calls[0]![0]);
+      expect(line).toContain('bad');
+      expect(line).not.toContain('discord.com');
+      expect(line).not.toContain('tok-bad');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('listSubscriptions skips a row with an unknown mode', async () => {
+    addSub(shim, 'good');
+    shim.db.exec('PRAGMA ignore_check_constraints = ON');
+    addSub(shim, 'odd', { mode: 'weekly' });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect((await store.listSubscriptions()).map((s) => s.id)).toEqual(['good']);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.each(MALFORMED)('takeDue skips due rows of a subscription with %s and still returns the others', async (_label, filter) => {
+    addSub(shim, 'bad', { filter });
+    addSub(shim, 'good');
+    const events = ['A-One', 'B-Two', 'C-Three'].map((id) => ev(pkg(id)));
+    await store.commit(
+      batch({
+        packages: events.map((e) => e.pkg),
+        events,
+        outbox: [
+          ob('bad', events[0]!, { nextAttemptAt: '2026-09-18T10:00:00.000Z' }),
+          ob('bad', events[1]!, { nextAttemptAt: '2026-09-18T10:00:01.000Z' }),
+          ob('good', events[2]!, { nextAttemptAt: '2026-09-18T10:00:02.000Z' }),
+        ],
+      }),
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const due = await store.takeDue('2026-09-18T12:00:00.000Z', 10);
+      expect(due.map((d) => d.subscription.id)).toEqual(['good']);
+      const lines = warn.mock.calls.map((c) => String(c[0]));
+      expect(lines.length).toBeLessThanOrEqual(1);
+      for (const line of lines) expect(line).not.toContain('tok-bad');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('takeDue does not let JSON-invalid subscriptions crowd valid ones out of the row limit', async () => {
+    addSub(shim, 'bad', { filter: '{oops' });
+    addSub(shim, 'good');
+    const events = Array.from({ length: 5 }, (_, i) => ev(pkg(`Own${i}-Mod`)));
+    await store.commit(
+      batch({
+        packages: events.map((e) => e.pkg),
+        events,
+        outbox: [
+          ...events.slice(0, 3).map((e, i) => ob('bad', e, { nextAttemptAt: `2026-09-18T10:00:0${i}.000Z` })),
+          ...events.slice(3).map((e, i) => ob('good', e, { nextAttemptAt: `2026-09-18T10:01:0${i}.000Z` })),
+        ],
+      }),
+    );
+    expect((await store.takeDue('2026-09-18T12:00:00.000Z', 2)).map((d) => d.subscription.id)).toEqual(['good', 'good']);
+  });
+});
+
 describe('takeDue', () => {
   async function seed(): Promise<{ events: ModEvent[] }> {
     addSub(shim, 'sub1');
@@ -364,16 +471,18 @@ describe('takeDue', () => {
 });
 
 describe('markDelivered / markFailed / setEventChangelog', () => {
-  it('markDelivered removes rows and chunks large id lists', async () => {
+  it('markDelivered keeps the rows, stamps delivered_at and chunks large id lists', async () => {
     const pkgs = Array.from({ length: 250 }, (_, i) => pkg(`Owner-Mod${i}`));
     const events = pkgs.map((p) => ev(p));
     const outbox = events.map((e) => ob('sub1', e));
     await store.commit(batch({ packages: pkgs, events, outbox }));
     shim.preparedSql.length = 0;
-    await store.markDelivered(outbox.map((o) => o.id));
-    expect(count(shim, 'outbox')).toBe(0);
-    expect(shim.preparedSql.length).toBe(3);
-    await expect(store.markDelivered([])).resolves.toBeUndefined();
+    await store.markDelivered(outbox.map((o) => o.id), '2026-09-19T00:00:00.000Z');
+    expect(count(shim, 'outbox')).toBe(250);
+    const stamped = shim.db.prepare('SELECT COUNT(*) AS n FROM outbox WHERE delivered_at = ?').get('2026-09-19T00:00:00.000Z') as { n: number };
+    expect(stamped.n).toBe(250);
+    for (const sql of shim.preparedSql) expect((sql.match(/\?/g) ?? []).length).toBeLessThanOrEqual(100);
+    await expect(store.markDelivered([], '2026-09-19T00:00:00.000Z')).resolves.toBeUndefined();
   });
 
   it('markFailed bumps attempts and reschedules', async () => {
@@ -407,27 +516,6 @@ describe('markDelivered / markFailed / setEventChangelog', () => {
   });
 });
 
-describe('recentEventsByReleaseKey', () => {
-  it('finds the same release across stores within the window', async () => {
-    const a = pkg('Some-Mod', { source: 'thunderstore:valheim', store: 'thunderstore' });
-    const b = pkg('some-mod', { source: 'hexium:valheim', store: 'hexium', url: 'https://hexium/some-mod' });
-    const c = pkg('Some-Mod', { version: '2.0.0' });
-    const ea = ev(a, { createdAt: '2026-09-18T10:00:00.000Z' });
-    const eb = ev(b, { createdAt: '2026-09-18T10:05:00.000Z' });
-    const ec = ev(c, { createdAt: '2026-09-18T10:06:00.000Z' });
-    await store.commit(batch({ packages: [a, c], events: [ea, ec] }));
-    await store.commit(batch({ source: 'hexium:valheim', packages: [b], events: [eb], state: state({ id: 'hexium:valheim' }) }));
-
-    const key = 'some|mod|1.0.0';
-    const all = await store.recentEventsByReleaseKey(key, '2026-09-18T00:00:00.000Z');
-    expect(all.map((e) => e.pkg.store)).toEqual(['thunderstore', 'hexium']);
-    expect(all[1]!.pkg.url).toBe('https://hexium/some-mod');
-    const later = await store.recentEventsByReleaseKey(key, '2026-09-18T10:01:00.000Z');
-    expect(later.map((e) => e.pkg.store)).toEqual(['hexium']);
-    expect(await store.recentEventsByReleaseKey('nope|nope|1', '2026-09-18T00:00:00.000Z')).toEqual([]);
-  });
-});
-
 describe('EXPLAIN QUERY PLAN', () => {
   it('every query the store issues is index-backed (no SCAN)', async () => {
     addSub(shim, 'sub1');
@@ -440,14 +528,15 @@ describe('EXPLAIN QUERY PLAN', () => {
     await store.getKnownVersions(SOURCE, ['Owner-Name']);
     await store.getAllKnownVersions(SOURCE);
     await store.listSubscriptions();
-    await store.recentEventsByReleaseKey('k', '2026-01-01T00:00:00.000Z');
+    await store.recentEventsByReleaseKeys(['k'], '2026-01-01T00:00:00.000Z');
     await store.takeDue('2026-09-19T00:00:00.000Z', 10);
     await store.markFailed(o.id, '2026-09-19T00:00:00.000Z', false);
     await store.setEventChangelog(e.id, 'x', null);
-    await store.markDelivered([o.id]);
+    await store.markDelivered([o.id], '2026-09-19T00:00:00.000Z');
+    await store.purgeDelivered('2026-09-20T00:00:00.000Z', 10);
 
     const distinct = [...new Set(shim.preparedSql)];
-    expect(distinct.length).toBeGreaterThanOrEqual(11);
+    expect(distinct.length).toBeGreaterThanOrEqual(12);
 
     const failures: string[] = [];
     for (const sql of distinct) {
@@ -464,14 +553,29 @@ describe('EXPLAIN QUERY PLAN', () => {
     await store.takeDue('2026-09-19T00:00:00.000Z', 10);
     const sql = shim.preparedSql.find((s) => s.includes('FROM outbox o'))!;
     const plan = (shim.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as { detail: string }[]).map((r) => r.detail);
-    expect(plan.some((d) => d.includes('SEARCH o USING INDEX idx_outbox_due'))).toBe(true);
+    expect(plan.some((d) => d.includes('SEARCH o USING INDEX idx_outbox_pending'))).toBe(true);
     expect(plan.some((d) => d.includes('TEMP B-TREE'))).toBe(false);
   });
 
-  it('recentEventsByReleaseKey uses the release index', async () => {
-    await store.recentEventsByReleaseKey('k', 'z');
+  it('recentEventsByReleaseKeys uses the release index for every key', async () => {
+    await store.recentEventsByReleaseKeys(['k1', 'k2'], 'z');
     const sql = shim.preparedSql.find((s) => s.includes('e.release_key'))!;
     const plan = (shim.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as { detail: string }[]).map((r) => r.detail);
     expect(plan.some((d) => d.includes('idx_events_release (release_key=? AND created_at>?)'))).toBe(true);
+  });
+
+  it('recentEventsByReleaseKeys sends one batch call for many keys, each statement under the bound-parameter limit', async () => {
+    shim.preparedSql.length = 0;
+    shim.batchSizes.length = 0;
+    await store.recentEventsByReleaseKeys(Array.from({ length: 250 }, (_, i) => `k${i}`), 'z');
+    expect(shim.batchSizes).toEqual([3]);
+    for (const sql of shim.preparedSql) expect((sql.match(/\?/g) ?? []).length).toBeLessThanOrEqual(100);
+  });
+
+  it('purgeDelivered deletes through the delivered index', async () => {
+    await store.purgeDelivered('2026-09-20T00:00:00.000Z', 10);
+    const sql = shim.preparedSql.find((s) => s.startsWith('DELETE FROM outbox'))!;
+    const plan = (shim.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all('2026-09-20T00:00:00.000Z', 10) as { detail: string }[]).map((r) => r.detail);
+    expect(plan.some((d) => d.includes('idx_outbox_delivered'))).toBe(true);
   });
 });

@@ -9,6 +9,8 @@ const runReconcile = vi.hoisted(() => vi.fn());
 vi.mock('../core/tick.ts', () => ({ runTick, runReconcile }));
 vi.mock('../sources/index.ts', () => ({ createAdapters: () => [] }));
 
+import { CADENCE } from '../core/constants.ts';
+import type { TickReport } from '../core/tick.ts';
 import { RECONCILE_CRONS, TICK_CRON } from './crons.ts';
 import worker, { type Env } from './worker.ts';
 
@@ -30,14 +32,32 @@ async function run(cron: string): Promise<void> {
   await Promise.all(pending);
 }
 
+const REPORT: TickReport = {
+  sources: { 'thunderstore:valheim': { status: 'ok', events: 2 } },
+  sent: 2,
+  failed: 0,
+  changelogFetches: 1,
+  changelogSkipped: 0,
+  deferred: 0,
+  parked: 0,
+  filtered: 0,
+  purged: 0,
+  subrequests: 4,
+};
+
 let errors: string[];
+let logs: string[];
 
 beforeEach(() => {
-  runTick.mockReset();
-  runReconcile.mockReset();
+  runTick.mockReset().mockResolvedValue(REPORT);
+  runReconcile.mockReset().mockResolvedValue(REPORT);
   errors = [];
+  logs = [];
   vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
     errors.push(args.map(String).join(' '));
+  });
+  vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+    logs.push(args.map(String).join(' '));
   });
 });
 
@@ -73,6 +93,40 @@ describe('worker', () => {
     expect(runReconcile.mock.calls[0]![2]).toBe(index);
   });
 
+  it('passes the number of reconcile crons so slice hints advance once per run', async () => {
+    await run(RECONCILE_CRONS[0]);
+    expect(runReconcile.mock.calls[0]![0].reconcileRunsPerDay).toBe(RECONCILE_CRONS.length);
+    expect(RECONCILE_CRONS.length).toBe(CADENCE.reconcileRunsPerDay);
+  });
+
+  it('logs one structured line per tick run with the report and no secrets', async () => {
+    await run(TICK_CRON);
+    expect(logs).toHaveLength(1);
+    const entry = JSON.parse(logs[0]!) as Record<string, unknown>;
+    expect(entry).toMatchObject({
+      event: 'run',
+      cron: TICK_CRON,
+      sent: 2,
+      subrequests: 4,
+      sources: { 'thunderstore:valheim': { status: 'ok', events: 2 } },
+    });
+    expect(typeof entry.elapsedMs).toBe('number');
+    expect(logs[0]).not.toContain('nexus-secret-key');
+  });
+
+  it('logs one structured line per reconcile run', async () => {
+    await run(RECONCILE_CRONS[2]);
+    expect(logs).toHaveLength(1);
+    expect(JSON.parse(logs[0]!)).toMatchObject({ event: 'run', cron: RECONCILE_CRONS[2] });
+  });
+
+  it('logs no run line for an unknown cron or a failed run', async () => {
+    await run('1 2 3 4 5');
+    runTick.mockRejectedValue(new Error('boom'));
+    await run(TICK_CRON);
+    expect(logs).toEqual([]);
+  });
+
   it('logs and ignores an unknown cron', async () => {
     await run('1 2 3 4 5');
     expect(runTick).not.toHaveBeenCalled();
@@ -88,10 +142,26 @@ describe('worker', () => {
     expect(errors[0]).not.toContain('nexus-secret-key');
   });
 
+  it('keeps urls out of the failure log', async () => {
+    runTick.mockRejectedValue(new Error('POST https://discord.com/api/webhooks/1/SecretToken failed'));
+    await run(TICK_CRON);
+    expect(errors[0]).not.toContain('SecretToken');
+  });
+
   it('swallows a non-Error rejection from reconcile', async () => {
     runReconcile.mockRejectedValue('string failure');
     await expect(run(RECONCILE_CRONS[1])).resolves.toBeUndefined();
     expect(errors[0]).toContain('string failure');
+  });
+
+  it('keeps every reconcile cron off the tick grid so the two never run concurrently', () => {
+    const tickMinutes = Number(/^\*\/(\d+) /.exec(TICK_CRON)![1]);
+    expect(tickMinutes).toBe(CADENCE.tickMinutes);
+    for (const cron of RECONCILE_CRONS) {
+      const minute = cron.split(' ')[0]!;
+      expect(minute).toMatch(/^\d+$/);
+      expect(Number(minute) % tickMinutes).not.toBe(0);
+    }
   });
 
   it('keeps wrangler.jsonc crons in sync with the code', () => {
