@@ -108,8 +108,12 @@ shows as escaped text; fences still count when the extractor looks for the
 section of a version. Numeric entities that decode to bidi, zero-width, filler,
 variation-selector, tag or control characters are dropped during entity decoding,
 as are the raw characters. Link targets carry `%40` instead of `@` where they
-spell `@everyone` or `@here`. The renderer inserts the excerpt with only invisible
-character stripping, mention neutralising and a length cap.
+spell `@everyone` or `@here`. A link whose label looks like a URL (`https://…` or
+`www.…`) is kept only when the label's host equals the target's host, otherwise it
+degrades to plain text. HTML stripping removes only known tag names, so `<T>`,
+`Dictionary<string, int>` and `<https://…>` stay readable (as escaped text). The
+renderer inserts the excerpt with only invisible character stripping, mention
+neutralising and a length cap.
 
 ### Full catalogue
 

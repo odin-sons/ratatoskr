@@ -128,13 +128,17 @@ function dropComments(html: string): string {
   return out + html.slice(pos);
 }
 
-/** Strips HTML tags and decodes entities. Linear-time on adversarial input. */
+const HTML_TAG_NAMES =
+  'a|abbr|address|area|article|aside|audio|b|base|bdi|bdo|blockquote|body|button|canvas|caption|center|cite|code|col|colgroup|data|dd|del|details|dfn|dialog|div|dl|dt|em|embed|fieldset|figcaption|figure|font|footer|form|h[1-6]|head|header|hr|html|i|iframe|img|input|ins|kbd|label|legend|li|link|main|map|mark|math|menu|meta|nav|noscript|object|ol|optgroup|option|output|p|param|picture|pre|progress|q|rp|rt|ruby|s|samp|section|select|small|source|span|strike|strong|sub|summary|sup|svg|table|tbody|td|template|textarea|tfoot|th|thead|time|title|tr|track|u|ul|var|video|wbr';
+const HTML_TAG = new RegExp(`</?(?:${HTML_TAG_NAMES})(?![a-zA-Z0-9])[^<>]*>`, 'gi');
+
+/** Strips HTML tags (only known tag names, so `<T>` and `<https://…>` survive) and decodes entities. Linear-time on adversarial input. */
 export function stripHtml(html: string): string {
   return dropComments(dropBlocks(html))
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<li\b[^<>]*>/gi, '\n- ')
     .replace(/<\/(?:p|div|li|ul|ol|tr|h[1-6])\s*>/gi, '\n')
-    .replace(/<\/?[a-zA-Z][^<>]*>/g, '')
+    .replace(HTML_TAG, '')
     .replace(ENTITY, decodeEntity);
 }
 

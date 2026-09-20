@@ -391,6 +391,16 @@ describe('performance', () => {
   });
 });
 
+describe('angle-bracket text in changelogs', () => {
+  it('keeps generics, placeholders and angle-bracketed URLs readable, escaped', () => {
+    const md = ['## 1.0.0', '- Added Dictionary<string, int> support and a <player> argument', '- Docs: <https://example.com/docs>'].join('\n');
+    const out = extractChangelog(md, '1.0.0') ?? '';
+    expect(out).toContain('Dictionary\\<string, int>');
+    expect(out).toContain('\\<player>');
+    expect(out).toContain('\\<https://example.com/docs>');
+  });
+});
+
 describe('link sanitising', () => {
   const run = (line: string, fullUrl: string | null = null): string => extractChangelog(`## 1.0.0\n${line}`, '1.0.0', { fullUrl }) ?? '';
 
@@ -418,8 +428,21 @@ describe('link sanitising', () => {
     expect(run('[t](https://a.example/p "hover text")')).toBe('[t](https://a.example/p)');
   });
 
-  it('drops angle-bracket targets, which HTML stripping removes first', () => {
-    expect(run('[t](<https://a.example/p q> "hover")')).toBe('t');
+  it('keeps a validated angle-bracket http target, percent-encoded, and degrades other schemes', () => {
+    expect(run('[t](<https://a.example/p q> "hover")')).toBe('[t](https://a.example/p%20q)');
+    expect(run('[t](<javascript:alert(1)>)')).not.toContain('javascript:alert(1)](');
+  });
+
+  it('does not link a URL-looking label to a different host', () => {
+    const spoof = run('[https://thunderstore.io/c/valheim/](https://evil.example/login)');
+    expect(spoof).not.toContain('evil.example');
+    expect(spoof).toContain('https://thunderstore.io/c/valheim/');
+    expect(run('[www.thunderstore.io](https://evil.example/x)')).not.toContain('evil.example');
+  });
+
+  it('keeps a URL-looking label that points at the same host', () => {
+    expect(run('[https://example.com/a](https://example.com/b)')).toBe('[https://example.com/a](https://example.com/b)');
+    expect(run('[www.example.com](https://example.com/b)')).toBe('[www.example.com](https://example.com/b)');
   });
 
   it('percent-encodes characters that would end the link early', () => {

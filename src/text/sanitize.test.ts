@@ -113,6 +113,21 @@ describe('escapeInlineTokens', () => {
   });
 });
 
+describe('stripHtml keeps angle-bracket text that is not an HTML tag', () => {
+  it('keeps generic type arguments and placeholders', () => {
+    expect(stripHtml('Dictionary<string, int> and <T> and List<Foo>')).toBe('Dictionary<string, int> and <T> and List<Foo>');
+    expect(stripHtml('use <player> or <ID>')).toBe('use <player> or <ID>');
+  });
+
+  it('keeps an angle-bracketed URL', () => {
+    expect(stripHtml('see <https://example.com/docs>')).toBe('see <https://example.com/docs>');
+  });
+
+  it('still strips real tags with attributes, in any case', () => {
+    expect(stripHtml('<A HREF="x">a</A><SPAN class=y>b</SPAN><img src=x onerror=1><svg onload=1><iframe src=x></iframe>')).toBe('ab');
+  });
+});
+
 describe('stripHtml', () => {
   it('removes tags and keeps text', () => {
     expect(stripHtml('<p>Hello <b>world</b></p>')).toBe('Hello world\n');

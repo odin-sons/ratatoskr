@@ -45,10 +45,28 @@ function urlOf(target: string): string {
   return space === -1 ? trimmed : trimmed.slice(0, space);
 }
 
+const URL_LOOKING_LABEL = /^(?:https?:\/\/|www\.)\S/i;
+
+function hostOf(url: string): string | null {
+  try {
+    return new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+  } catch {
+    return null;
+  }
+}
+
+function labelSpoofsHost(text: string, url: string): boolean {
+  const label = text.trim();
+  if (!URL_LOOKING_LABEL.test(label)) return false;
+  const token = label.split(/\s/, 1)[0]!;
+  const labelHost = hostOf(/^www\./i.test(token) ? `https://${token}` : token);
+  return labelHost === null || labelHost !== hostOf(url);
+}
+
 function safeLink(text: string, target: string): string {
   const url = urlOf(target);
   const safe = HTTP_URL.test(url) ? linkTarget(url) : null;
-  if (safe === null) return text;
+  if (safe === null || labelSpoofsHost(text, url)) return text;
   if (text.trim() === '') return safe;
   if (text.includes(']') || text.trim().toLowerCase() === FULL_CHANGELOG_LABEL.toLowerCase()) return text;
   return `[${text}](${safe})`;
