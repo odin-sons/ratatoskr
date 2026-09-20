@@ -37,6 +37,18 @@ commit anything, and never run destructive commands.
 - Every source file has the SPDX header; comments are minimal and only name what
   a genuine anti-pattern is for.
 
+## Process checks
+
+- Tests exist for each new behaviour and assert outcomes, not internals; bug
+  fixes have a reproduction test; invariants have property tests; no test was
+  skipped, weakened or deleted (check `git diff` for removed assertions).
+- Every per-invocation algorithm has an identifiable worst-case cost against the
+  10 ms CPU / 50 subrequest / D1 budgets. Flag anything quadratic over growing
+  inputs, avoidable allocation in hot paths, and cheaper strictly-equivalent
+  alternatives; back claims with a measurement when the cost is not obvious.
+- Security by construction: trust boundaries guarded, abuse cases tested,
+  fail-closed defaults, no secrets or webhook URLs in logs or errors.
+
 ## How to verify
 
 Prefer evidence over reading. Run `pnpm typecheck` and `pnpm test` (or a focused

@@ -1,9 +1,17 @@
 ---
 name: nodejs-architect
-description: Architectural review lens for Node.js / TypeScript services, including edge runtimes such as Cloudflare Workers. Use when reviewing module boundaries, async correctness, resource budgets, error handling, security and testability of server-side JavaScript.
+description: Architect's playbook for Node.js / TypeScript services, including edge runtimes such as Cloudflare Workers. Use when writing new server-side code (test-first, secure by construction, cost-checked algorithms) and when reviewing module boundaries, async correctness, resource budgets, error handling, security and testability.
 ---
 
 # Node.js architect
+
+Two modes share one set of principles:
+
+- **Writing code** — follow "Writing code: test-first", "Security by construction"
+  and "Algorithm cost" below, in that order, for every unit of logic.
+- **Reviewing code** — use sections 1-8, then verify that the writing rules were
+  actually followed (tests exist and assert behaviour, every algorithm has a
+  stated cost, trust boundaries are guarded).
 
 Review as an architect, not a linter. Judge whether the design will survive
 production, then look at individual lines. Every finding needs a concrete failure
@@ -98,6 +106,127 @@ scenario; drop anything you cannot ground in the code.
   skipped, what was deferred, what failed.
 - Config is validated at build time, not discovered at runtime in production.
 - Migrations are idempotent and safe to run twice.
+
+## Writing code: test-first
+
+Discover the repository's own commands first (`package.json` scripts, CI). Here:
+`pnpm vitest run <path>` for a focused run, `pnpm test` and `pnpm typecheck`
+before declaring done.
+
+1. **RED** — write a failing test for one behaviour. Watch it fail for the right
+   reason; a test that passes immediately proves nothing.
+2. **GREEN** — the minimum code that passes. No speculative options.
+3. **REFACTOR** — clean up with tests green; re-run after every step.
+4. **Bug fix = Prove-It** — first a test that reproduces the bug and fails, then
+   the fix, then the full suite.
+
+Test rules:
+
+- Small tests dominate: pure logic, no I/O, milliseconds. Cross a boundary (D1,
+  `fetch`) only in a few integration tests, against a real local implementation
+  (here `node:sqlite` behind the D1 shim) rather than mocks.
+- Prefer real implementation, then fake, then stub, then mock. Mock only slow,
+  non-deterministic or side-effecting boundaries. Inject time, randomness,
+  network and storage.
+- Assert state and outcomes, not which internal methods were called.
+- One behaviour per test, names that read as a specification, Arrange-Act-Assert,
+  DAMP over DRY — each test tells its whole story.
+- Every invariant gets a property test (`fast-check`): nothing dropped, limits
+  respected, idempotent on replay, never throws on arbitrary input.
+- Every abuse case from "Security by construction" gets a test written before the
+  guard it exercises.
+- Never skip, weaken or delete a test to get green. Do not re-run an unchanged
+  suite for reassurance.
+
+Done means: every new behaviour has a test, bug fixes have a reproduction test
+that failed first, the full suite and typecheck pass, no test was disabled.
+
+## Security by construction
+
+Threat-model before coding a feature that touches input, secrets or outbound
+calls: list trust boundaries (upstream APIs, D1 rows, secrets, Discord), name the
+assets (webhook URLs, API keys, channel reputation), and run STRIDE over each
+boundary. Write abuse cases next to use cases and make them the first tests.
+
+Always:
+
+- Validate untrusted data at the boundary and narrow it to a typed value; reject
+  or skip malformed input, never coerce silently. Size-cap everything whose size
+  upstream controls.
+- Parameterised SQL only; identifiers and chunk sizes come from constants.
+- Encode output for its sink: escape Markdown and link text, neutralise mentions,
+  strip HTML, set `allowed_mentions: { parse: [] }`.
+- Outbound: fixed allowlisted hosts or a validated URL shape; credentials go only
+  to their own host; no blind redirects on authenticated requests; every call has
+  a timeout.
+- Secrets live in environment bindings only; never in code, logs, errors, URLs or
+  test fixtures. If one leaks, rotate it — deleting the line is not enough.
+- Fail closed: unknown safety flags (NSFW, deprecated) resolve to the safe side
+  and are sticky, never silently reset.
+- Errors and logs are one line, without payloads or credentials.
+- New runtime dependencies require asking first; audit the lockfile, block
+  install scripts by default, review lockfile diffs.
+
+Ask the user before: new auth flows, new categories of stored sensitive data,
+new external integrations, changes to rate limiting.
+
+## Algorithm cost
+
+Every algorithm that runs per invocation, per event or per input item carries an
+explicit cost line before it is written and again in review. The binding
+constraint here is 10 ms CPU per Worker invocation, so cost is a correctness
+property, not a nicety.
+
+For each algorithm state, in the test file or a one-line note beside the code
+only when the choice is non-obvious:
+
+- **Time** in terms of the variables that actually grow (N packages, E events,
+  S subscriptions, B bytes of payload) — worst case, not average.
+- **Space and allocation**: intermediate arrays, strings, parsed objects, copies.
+  Large upstream strings are scanned or sliced, not split or parsed whole.
+- **I/O cost**: subrequests, D1 statements, rows read and written, bound
+  parameters, bytes transferred. Compare against the free-tier budget in
+  `CLAUDE.md`.
+- **Budget share**: the fraction of 10 ms CPU / 50 subrequests it may consume at
+  maximum realistic input.
+
+Choose the cheapest algorithm by default, and go for the maximum optimisation the
+budget calls for:
+
+- Replace nested loops with a single pass plus a `Map`/`Set` index (O(n·m) becomes
+  O(n+m)); precompute per-subscription or per-run structures once, outside loops.
+- Do work lazily and stop early: scan until the target is found, parse only
+  matching slices, short-circuit on the cheapest predicate first.
+- Avoid allocation in hot paths: no `split`/`map`/`filter` chains over large
+  inputs, no repeated `slice`, `JSON.parse`, `RegExp` construction or `Array.from`
+  inside loops; hoist regexes; prefer `indexOf` and char codes over regex on
+  megabyte inputs; beware catastrophic backtracking.
+- Batch I/O: one `IN (...)` chunked under the parameter limit instead of N
+  queries; one transaction instead of N commits; write only rows that changed.
+- Push work to where it is free: native decompression and `fetch` decoding do not
+  spend JS CPU; conditional requests avoid parsing entirely.
+- Bound everything: caps on items, bytes, retries, concurrency, with a deferral
+  path for the remainder.
+
+Prove it — do not trust intuition:
+
+1. **Measure** the baseline on realistic maximum input (the real payload sizes
+   documented in `docs/api-notes.md`), same command and same conditions each time.
+   Add a loose-threshold timing test where the budget is tight, with a generous
+   multiple of the measured value and a warm-up before timing.
+2. **Change one thing at a time**, re-measure the same way.
+3. **Keep** a change only if it beats run-to-run noise and tests stay green; a
+   neutral or worse result is **reverted**, even if already written. Correctness
+   gates the number: an optimisation that drops needed work is a regression.
+4. **Log** attempts, kept and reverted, in the PR description or `PERF.md` so a
+   dead idea is not tried twice.
+5. Review question for every loop, and every `await` inside one: what is the worst
+   case, what does it cost against the budget, and is there a strictly cheaper
+   way that keeps behaviour identical?
+
+Red flags: cost stated as "should be fast"; quadratic behaviour over
+events × subscriptions or packages × versions; parsing then discarding; an
+optimisation kept without a measurement; a timing test with no headroom.
 
 ## Severity
 
