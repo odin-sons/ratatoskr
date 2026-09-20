@@ -2,9 +2,14 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { eventId, outboxId } from '../core/ids.ts';
+import { CLOUDFLARE } from '../core/constants.ts';
+import { drainOutbox } from '../core/drain.ts';
+import { eventId, outboxId, releaseKey } from '../core/ids.ts';
+import { renderDigest, renderImmediate } from '../render/index.ts';
+import { FakeSender, serverError } from '../testing/fakes.ts';
 import type { CommitBatch } from '../core/ports.ts';
-import { runStoreContract } from '../testing/store-contract.ts';
+import { runRedeliveryScenario } from '../testing/redelivery-scenario.ts';
+import { runStoreContract, type StoreContractEnv } from '../testing/store-contract.ts';
 import type { ModEvent, OutboxRow, PackageSnapshot, SourceState } from '../core/types.ts';
 import { D1Store } from './d1-store.ts';
 import { D1Shim } from './testing/d1-shim.ts';
@@ -76,7 +81,7 @@ function addSub(shim: D1Shim, id: string, over: { enabled?: number; filter?: str
     .run(id, '123456789012345678', `https://discord.com/api/webhooks/123456789012345678/tok-${id}`, over.filter ?? '{}', over.mode ?? 'digest', over.interval === undefined ? 30 : over.interval, over.enabled ?? 1);
 }
 
-runStoreContract('D1Store over the D1 shim', () => {
+function createD1Env(): StoreContractEnv {
   const contractShim = new D1Shim();
   contractShim.db.exec(SCHEMA);
   return {
@@ -90,7 +95,10 @@ runStoreContract('D1Store over the D1 shim', () => {
       contractShim.db.prepare('UPDATE subscriptions SET enabled = ? WHERE id = ?').run(enabled ? 1 : 0, id);
     },
   };
-});
+}
+
+runStoreContract('D1Store over the D1 shim', createD1Env);
+runRedeliveryScenario('D1Store over the D1 shim', createD1Env);
 
 let shim: D1Shim;
 let store: D1Store;
@@ -185,7 +193,7 @@ describe('commit', () => {
     const e = ev(p, { changelog: 'first' });
     const b = batch({ packages: [p], events: [e], outbox: [ob('sub1', e)] });
     await store.commit(b);
-    await store.markFailed(ob('sub1', e).id, '2026-09-18T11:00:00.000Z', false);
+    await store.markFailedMany([ob('sub1', e).id], '2026-09-18T11:00:00.000Z', false);
     await store.commit({ ...b, events: [{ ...e, changelog: 'second' }] });
     expect(count(shim, 'events')).toBe(1);
     expect(count(shim, 'outbox')).toBe(1);
@@ -454,7 +462,7 @@ describe('takeDue', () => {
 
   it('excludes parked rows and disabled subscriptions', async () => {
     const { events } = await seed();
-    await store.markFailed(outboxId('sub1', events[1]!.id), '2026-09-18T10:01:00.000Z', true);
+    await store.markFailedMany([outboxId('sub1', events[1]!.id)], '2026-09-18T10:01:00.000Z', true);
     expect((await store.takeDue('2026-09-18T12:00:00.000Z', 10)).length).toBe(2);
     shim.db.exec("UPDATE subscriptions SET enabled = 0 WHERE id = 'sub1'");
     expect(await store.takeDue('2026-09-18T12:00:00.000Z', 10)).toEqual([]);
@@ -470,7 +478,7 @@ describe('takeDue', () => {
   });
 });
 
-describe('markDelivered / markFailed / setEventChangelog', () => {
+describe('markDelivered / markFailedMany / setEventChangelog', () => {
   it('markDelivered keeps the rows, stamps delivered_at and chunks large id lists', async () => {
     const pkgs = Array.from({ length: 250 }, (_, i) => pkg(`Owner-Mod${i}`));
     const events = pkgs.map((p) => ev(p));
@@ -485,12 +493,12 @@ describe('markDelivered / markFailed / setEventChangelog', () => {
     await expect(store.markDelivered([], '2026-09-19T00:00:00.000Z')).resolves.toBeUndefined();
   });
 
-  it('markFailed bumps attempts and reschedules', async () => {
+  it('markFailedMany bumps attempts and reschedules', async () => {
     const e = ev(pkg('A-One'));
     const o = ob('sub1', e);
     await store.commit(batch({ packages: [e.pkg], events: [e], outbox: [o] }));
-    await store.markFailed(o.id, '2026-09-18T10:05:00.000Z', false);
-    await store.markFailed(o.id, '2026-09-18T10:10:00.000Z', false);
+    await store.markFailedMany([o.id], '2026-09-18T10:05:00.000Z', false);
+    await store.markFailedMany([o.id], '2026-09-18T10:10:00.000Z', false);
     expect(shim.db.prepare('SELECT attempts, next_attempt_at, parked FROM outbox').get()).toEqual({
       attempts: 2,
       next_attempt_at: '2026-09-18T10:10:00.000Z',
@@ -498,11 +506,11 @@ describe('markDelivered / markFailed / setEventChangelog', () => {
     });
   });
 
-  it('markFailed parks the row', async () => {
+  it('markFailedMany parks the row', async () => {
     const e = ev(pkg('A-One'));
     const o = ob('sub1', e);
     await store.commit(batch({ packages: [e.pkg], events: [e], outbox: [o] }));
-    await store.markFailed(o.id, '2026-09-18T10:05:00.000Z', true);
+    await store.markFailedMany([o.id], '2026-09-18T10:05:00.000Z', true);
     expect((shim.db.prepare('SELECT parked FROM outbox').get() as { parked: number }).parked).toBe(1);
   });
 
@@ -530,7 +538,9 @@ describe('EXPLAIN QUERY PLAN', () => {
     await store.listSubscriptions();
     await store.recentEventsByReleaseKeys(['k'], '2026-01-01T00:00:00.000Z');
     await store.takeDue('2026-09-19T00:00:00.000Z', 10);
-    await store.markFailed(o.id, '2026-09-19T00:00:00.000Z', false);
+    await store.markFailedMany([o.id], '2026-09-19T00:00:00.000Z', false);
+    await store.rescheduleRows([o.id], '2026-09-19T00:00:00.000Z');
+    await store.existingEventIds([e.id]);
     await store.setEventChangelog(e.id, 'x', null);
     await store.markDelivered([o.id], '2026-09-19T00:00:00.000Z');
     await store.purgeDelivered('2026-09-20T00:00:00.000Z', 10);
@@ -572,10 +582,95 @@ describe('EXPLAIN QUERY PLAN', () => {
     for (const sql of shim.preparedSql) expect((sql.match(/\?/g) ?? []).length).toBeLessThanOrEqual(100);
   });
 
+  it('existingEventIds looks ids up through the primary key', async () => {
+    await store.existingEventIds(['a', 'b']);
+    const sql = shim.preparedSql.find((s) => s.startsWith('SELECT id FROM events WHERE id IN'))!;
+    const plan = (shim.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all('a', 'b') as { detail: string }[]).map((r) => r.detail);
+    expect(plan.some((d) => d.includes('SEARCH') && d.includes('autoindex'))).toBe(true);
+  });
+
+  it.each([
+    ['existingEventIds', (ids: string[]) => store.existingEventIds(ids)],
+    ['markFailedMany', (ids: string[]) => store.markFailedMany(ids, 'z', false)],
+    ['rescheduleRows', (ids: string[]) => store.rescheduleRows(ids, 'z')],
+  ])('%s sends one batch of statements under the bound-parameter limit for 400 ids', async (_name, call) => {
+    shim.preparedSql.length = 0;
+    shim.batchSizes.length = 0;
+    await call(Array.from({ length: 400 }, (_, i) => `id${i}`));
+    expect(shim.batchSizes).toHaveLength(1);
+    expect(shim.batchSizes[0]).toBeLessThanOrEqual(5);
+    for (const sql of shim.preparedSql) expect((sql.match(/\?/g) ?? []).length).toBeLessThanOrEqual(100);
+  });
+
   it('purgeDelivered deletes through the delivered index', async () => {
     await store.purgeDelivered('2026-09-20T00:00:00.000Z', 10);
     const sql = shim.preparedSql.find((s) => s.startsWith('DELETE FROM outbox'))!;
     const plan = (shim.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all('2026-09-20T00:00:00.000Z', 10) as { detail: string }[]).map((r) => r.detail);
     expect(plan.some((d) => d.includes('idx_outbox_delivered'))).toBe(true);
+  });
+});
+
+describe('corrupt package rows', () => {
+  async function seedOne(): Promise<{ e: ModEvent }> {
+    addSub(shim, 'sub1');
+    const e = ev(pkg('Owner-Name'));
+    await store.commit(batch({ packages: [e.pkg], events: [e], outbox: [ob('sub1', e)] }));
+    return { e };
+  }
+
+  it.each([['not json'], ['{"a":1}'], ['[1,2]'], ['']])('takeDue reads categories %j as an empty list instead of throwing', async (raw) => {
+    await seedOne();
+    shim.db.prepare('UPDATE packages SET categories = ?').run(raw);
+    const due = await store.takeDue('2026-09-19T00:00:00.000Z', 10);
+    expect(due).toHaveLength(1);
+    expect(due[0]!.event.pkg.categories).toEqual([]);
+  });
+
+  it('recentEventsByReleaseKeys tolerates corrupt categories too', async () => {
+    const { e } = await seedOne();
+    shim.db.prepare('UPDATE packages SET categories = ?').run('not json');
+    const found = await store.recentEventsByReleaseKeys([releaseKey(e.pkg, e.versionTo)], '2026-01-01T00:00:00.000Z');
+    expect([...found.values()].flat()[0]!.pkg.categories).toEqual([]);
+  });
+
+  it('drain parks a package with an unknown store and still delivers the healthy events', async () => {
+    addSub(shim, 'sub1', { mode: 'digest' });
+    const good = [ev(pkg('Good-One')), ev(pkg('Good-Two'))];
+    const bad = ev(pkg('Bad-Mod'));
+    shim.db.prepare('INSERT INTO sources (id, bootstrapped) VALUES (?, 1)').run(SOURCE);
+    const events = [good[0]!, bad, good[1]!];
+    await store.commit(batch({ packages: events.map((e) => e.pkg), events, outbox: events.map((e) => ob('sub1', e)) }));
+    shim.db.prepare('UPDATE packages SET store = ? WHERE package_id = ?').run('bogus', 'Bad-Mod');
+
+    const sender = new FakeSender();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const report = await drainOutbox({ store, sender, renderer: { renderDigest, renderImmediate }, now: new Date('2026-09-19T00:00:00.000Z') });
+      expect(report).toMatchObject({ failed: 1, parked: 1, deferred: 0 });
+      expect(sender.calls).toHaveLength(1);
+      expect(warn.mock.calls.map((c) => c.map(String).join(' ')).join('\n')).toContain(bad.id);
+    } finally {
+      warn.mockRestore();
+    }
+    const rows = shim.db.prepare('SELECT event_id, parked, delivered_at IS NOT NULL AS delivered FROM outbox ORDER BY rowid').all() as { event_id: string; parked: number; delivered: number }[];
+    expect(rows.map((r) => [r.parked, r.delivered])).toEqual([[0, 1], [1, 0], [0, 1]]);
+  });
+});
+
+describe('drain over D1: bounded statement counts', () => {
+  it('fails a 400-row digest with a handful of statements', async () => {
+    addSub(shim, 'sub1', { mode: 'digest' });
+    const events = Array.from({ length: 400 }, (_, i) => ev(pkg(`Owner-Mod${i}`), { kind: 'update', versionFrom: '0.9.0' }));
+    await store.commit(batch({ packages: events.map((e) => e.pkg), events, outbox: events.map((e) => ob('sub1', e)) }));
+    const sender = new FakeSender();
+    sender.fallback = () => serverError(500);
+    shim.preparedSql.length = 0;
+    shim.batchSizes.length = 0;
+    const report = await drainOutbox({ store, sender, renderer: { renderDigest, renderImmediate }, now: new Date('2026-09-19T00:00:00.000Z') });
+    expect(report).toMatchObject({ failed: 1, sent: 0 });
+    const updates = shim.preparedSql.filter((sql) => sql.startsWith('UPDATE outbox'));
+    expect(updates.length).toBeLessThanOrEqual(Math.ceil(400 / (CLOUDFLARE.d1MaxBoundParams - 2)));
+    expect(shim.preparedSql.length).toBeLessThanOrEqual(1 + updates.length);
+    expect((shim.db.prepare('SELECT COUNT(*) AS n FROM outbox WHERE attempts = 1').get() as { n: number }).n).toBe(400);
   });
 });

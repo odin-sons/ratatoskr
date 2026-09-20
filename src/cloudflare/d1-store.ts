@@ -3,6 +3,7 @@ import { CLOUDFLARE, DEFAULT_DIGEST_INTERVAL_MIN, OUTBOX_MAX_ATTEMPTS } from '..
 import { parseFilter } from '../core/filter.ts';
 import { releaseKey } from '../core/ids.ts';
 import type { CommitBatch, Store } from '../core/ports.ts';
+import { sanitizeLogText } from '../core/report.ts';
 import type {
   DeliveryMode,
   DueDelivery,
@@ -157,12 +158,16 @@ const SUBSCRIPTION_FILTER_IS_OBJECT = "CASE WHEN json_valid(s.filter) THEN json_
 const SQL_TAKE_DUE = `SELECT ${selectColumns('o', 'o', OUTBOX_READ_COLUMNS)}, ${selectColumns('s', 's', SUBSCRIPTION_READ_COLUMNS)}, ${EVENT_JOIN_SELECT} FROM outbox o JOIN events e ON e.id = o.event_id ${EVENT_JOIN_PACKAGES} JOIN subscriptions s ON s.id = o.subscription_id WHERE o.parked = 0 AND o.delivered_at IS NULL AND o.next_attempt_at <= ? AND o.attempts < ? AND +s.enabled = 1 AND ${SUBSCRIPTION_FILTER_IS_OBJECT} ORDER BY o.next_attempt_at, o.rowid LIMIT ?`;
 const SQL_MARK_DELIVERED_PREFIX = 'UPDATE outbox SET delivered_at = ? WHERE delivered_at IS NULL AND id IN';
 const SQL_PURGE_DELIVERED = 'DELETE FROM outbox WHERE id IN (SELECT id FROM outbox WHERE delivered_at < ? LIMIT ?)';
-const SQL_MARK_FAILED = 'UPDATE outbox SET attempts = attempts + 1, next_attempt_at = ?, parked = ? WHERE id = ?';
+const SQL_MARK_FAILED_PREFIX = 'UPDATE outbox SET attempts = attempts + 1, next_attempt_at = ?, parked = ? WHERE id IN';
+const SQL_RESCHEDULE_PREFIX = 'UPDATE outbox SET next_attempt_at = ? WHERE delivered_at IS NULL AND parked = 0 AND id IN';
 const SQL_SET_CHANGELOG = 'UPDATE events SET changelog = ?, changelog_url = ? WHERE id = ?';
 
 const KNOWN_VERSIONS_IDS_PER_QUERY = CLOUDFLARE.d1MaxBoundParams - 1;
 const RELEASE_KEYS_PER_QUERY = CLOUDFLARE.d1MaxBoundParams - 1;
 const DELIVERED_IDS_PER_QUERY = CLOUDFLARE.d1MaxBoundParams - 1;
+const FAILED_IDS_PER_QUERY = CLOUDFLARE.d1MaxBoundParams - 2;
+const RESCHEDULE_IDS_PER_QUERY = CLOUDFLARE.d1MaxBoundParams - 1;
+const EVENT_IDS_PER_QUERY = CLOUDFLARE.d1MaxBoundParams;
 
 function placeholders(count: number): string {
   return Array.from({ length: count }, () => '?').join(', ');
@@ -224,6 +229,18 @@ function sqlMarkDelivered(ids: number): string {
   return `${SQL_MARK_DELIVERED_PREFIX} (${placeholders(ids)})`;
 }
 
+function sqlMarkFailed(ids: number): string {
+  return `${SQL_MARK_FAILED_PREFIX} (${placeholders(ids)})`;
+}
+
+function sqlReschedule(ids: number): string {
+  return `${SQL_RESCHEDULE_PREFIX} (${placeholders(ids)})`;
+}
+
+function sqlExistingEventIds(ids: number): string {
+  return `SELECT id FROM events WHERE id IN (${placeholders(ids)})`;
+}
+
 function sqlRecentByReleaseKeys(keys: number): string {
   return `SELECT ${EVENT_JOIN_SELECT}, e.release_key AS e_release_key FROM events e ${EVENT_JOIN_PACKAGES} WHERE e.release_key IN (${placeholders(keys)}) AND e.created_at >= ? ORDER BY e.created_at`;
 }
@@ -264,14 +281,14 @@ export class D1Store implements Store {
   async commit(batch: CommitBatch): Promise<void> {
     assertSingleSource(batch);
 
-    // Order is crash-safe when split across batches: packages (which suppress
-    // re-detection) and the cursor come after the idempotent event/outbox inserts.
+    // Split-commit order: outbox rows, then events, then packages, then state. An event that exists therefore
+    // implies its outbox rows exist, which the existingEventIds filter in tick.ts relies on.
     const statements: D1PreparedStatement[] = [];
-    for (const rows of chunk(batch.events, rowsPerStatement(EVENT_WRITE_COLUMNS.length))) {
-      statements.push(this.db.prepare(sqlInsertEvents(rows.length)).bind(...rows.flatMap(eventValues)));
-    }
     for (const rows of chunk(batch.outbox, rowsPerStatement(OUTBOX_WRITE_COLUMNS.length))) {
       statements.push(this.db.prepare(sqlInsertOutbox(rows.length)).bind(...rows.flatMap(outboxValues)));
+    }
+    for (const rows of chunk(batch.events, rowsPerStatement(EVENT_WRITE_COLUMNS.length))) {
+      statements.push(this.db.prepare(sqlInsertEvents(rows.length)).bind(...rows.flatMap(eventValues)));
     }
     for (const rows of chunk(dedupePackages(batch.packages), rowsPerStatement(PACKAGE_WRITE_COLUMNS.length))) {
       statements.push(this.db.prepare(sqlUpsertPackages(rows.length)).bind(...rows.flatMap(packageValues)));
@@ -318,9 +335,9 @@ export class D1Store implements Store {
     const subscriptions = new Map<string, Subscription | null>();
     const due: DueDelivery[] = [];
     for (const row of results) {
-      const cols = unprefix<SubscriptionCols>(row, 's_', SUBSCRIPTION_READ_COLUMNS);
-      let subscription = subscriptions.get(cols.id);
+      let subscription = subscriptions.get(row.s_id);
       if (subscription === undefined) {
+        const cols = unprefix<SubscriptionCols>(row, 's_', SUBSCRIPTION_READ_COLUMNS);
         subscription = mapSubscription(cols);
         subscriptions.set(cols.id, subscription);
         if (subscription === null) warnInvalidSubscription(cols.id);
@@ -343,8 +360,31 @@ export class D1Store implements Store {
     return result.meta.changes;
   }
 
-  async markFailed(outboxId: string, nextAttemptAtIso: string, parked: boolean): Promise<void> {
-    await this.db.prepare(SQL_MARK_FAILED).bind(nextAttemptAtIso, parked ? 1 : 0, outboxId).run();
+  async markFailedMany(outboxIds: string[], nextAttemptAtIso: string, parked: boolean): Promise<void> {
+    if (outboxIds.length === 0) return;
+    const statements = chunk([...new Set(outboxIds)], FAILED_IDS_PER_QUERY).map((ids) =>
+      this.db.prepare(sqlMarkFailed(ids.length)).bind(nextAttemptAtIso, parked ? 1 : 0, ...ids),
+    );
+    await this.db.batch(statements);
+  }
+
+  async rescheduleRows(outboxIds: string[], nextAttemptAtIso: string): Promise<void> {
+    if (outboxIds.length === 0) return;
+    const statements = chunk(outboxIds, RESCHEDULE_IDS_PER_QUERY).map((ids) =>
+      this.db.prepare(sqlReschedule(ids.length)).bind(nextAttemptAtIso, ...ids),
+    );
+    await this.db.batch(statements);
+  }
+
+  async existingEventIds(eventIds: string[]): Promise<Set<string>> {
+    const found = new Set<string>();
+    if (eventIds.length === 0) return found;
+    const statements = chunk([...new Set(eventIds)], EVENT_IDS_PER_QUERY).map((ids) =>
+      this.db.prepare(sqlExistingEventIds(ids.length)).bind(...ids),
+    );
+    const results = await this.db.batch<{ id: string }>(statements);
+    for (const result of results) for (const row of result.results) found.add(row.id);
+    return found;
   }
 
   async setEventChangelog(eventId: string, changelog: string | null, changelogUrl: string | null): Promise<void> {
@@ -447,7 +487,7 @@ function mapSubscription(row: SubscriptionCols): Subscription | null {
 }
 
 function warnInvalidSubscription(id: string): void {
-  console.warn(`subscription ${id} skipped: invalid filter or mode`);
+  console.warn(`subscription ${sanitizeLogText(id)} skipped: invalid filter or mode`);
 }
 
 function mapValidSubscriptions(rows: readonly SubscriptionCols[]): Subscription[] {
@@ -470,6 +510,15 @@ function mapOutbox(row: Prefixed<'o_', OutboxCols>): OutboxRow {
   };
 }
 
+function parseCategories(raw: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.every((c) => typeof c === 'string') ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 function mapEvent(row: EventJoinRow): ModEvent {
   const pkg: PackageSnapshot = {
     source: row.p_source,
@@ -481,7 +530,7 @@ function mapEvent(row: EventJoinRow): ModEvent {
     url: row.p_url,
     iconUrl: row.p_icon_url,
     description: row.p_description,
-    categories: JSON.parse(row.p_categories) as string[],
+    categories: parseCategories(row.p_categories),
     isNsfw: row.p_is_nsfw === 1,
     isDeprecated: row.p_is_deprecated === 1,
     updatedAt: row.p_updated_at,

@@ -1,8 +1,8 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
--- ratatoskr D1 schema. Idempotent: safe to apply on every deploy.
+-- ratatoskr D1 schema for a fresh install; re-applying it to a database it created is harmless.
 --   wrangler d1 execute ratatoskr --remote --file=./schema.sql
--- A database created before `outbox.delivered_at` existed needs once:
---   ALTER TABLE outbox ADD COLUMN delivered_at TEXT;
+-- It does not alter existing tables. A database created before `outbox.delivered_at` existed
+-- needs migrations/0001_outbox_delivered_at.sql once, before this file.
 
 CREATE TABLE IF NOT EXISTS sources (
   id TEXT PRIMARY KEY,

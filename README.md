@@ -101,6 +101,11 @@ Until then, use the manual steps below.
    wrangler d1 execute ratatoskr --remote --file=./schema.sql
    ```
 
+   Upgrading an existing database: apply the files in `migrations/` you have not
+   applied yet, in order, before `schema.sql`
+   (`wrangler d1 execute ratatoskr --remote --file=./migrations/0001_outbox_delivered_at.sql`).
+   A database created from the current `schema.sql` needs none of them.
+
 4. Review `ratatoskr.config.json` (sources, game, User-Agent) and validate it.
 
    ```sh

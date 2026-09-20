@@ -30,8 +30,11 @@ interface Store {
   getSourceState(source: SourceId): Promise<SourceState | null>;
   commit(batch: CommitBatch): Promise<void>;                       // packages, events, outbox, cursor: one transaction
   recentEventsByReleaseKeys(keys: string[], sinceIso: string): Promise<Map<string, ModEvent[]>>;  // one call per batch
+  existingEventIds(ids: string[]): Promise<Set<string>>;          // events are never deleted; one call per batch
   takeDue(nowIso: string, limit: number): Promise<DueDelivery[]>;  // oldest first
   markDelivered(ids: string[], deliveredAtIso: string): Promise<void>;
+  markFailedMany(ids: string[], nextAttemptAtIso: string, parked: boolean): Promise<void>;  // bumps attempts
+  rescheduleRows(ids: string[], nextAttemptAtIso: string): Promise<void>;                   // leaves attempts alone
   purgeDelivered(olderThanIso: string, limit: number): Promise<number>;
   // ...plus source-state, subscription and changelog accessors; see src/core/ports.ts
 }
@@ -200,12 +203,28 @@ CREATE INDEX idx_outbox_delivered ON outbox (delivered_at) WHERE delivered_at IS
 
 The `UNIQUE (subscription_id, event_id)` constraint is what makes a re-run
 after a crash safe. Delivery does not delete the row: it stamps `delivered_at`,
-so a stale read or a version roll-back can never re-create and re-send a
-delivered release. Delivered rows are purged after a 7-day retention by the
-reconcile run (bounded `DELETE ... WHERE id IN (SELECT ... LIMIT n)` through
-`idx_outbox_delivered`). A subscription whose stored `filter` is not valid JSON
-or has the wrong shape is skipped with a one-line warning naming only its id;
-it never stops the other subscriptions.
+so a stale read or a version roll-back within the retention window cannot re-create
+and re-send a delivered release. Delivered rows are purged after a 7-day retention
+by the reconcile run (bounded `DELETE ... WHERE id IN (SELECT ... LIMIT n)` through
+`idx_outbox_delivered`).
+
+Purging the outbox does not make an old release deliverable again. Events are never
+deleted and their id is deterministic (`source|package|version`), so the tick asks
+`existingEventIds` once per source batch (chunked `id IN (...)` over the primary key)
+and drops every event that already exists before fan-out: no `events` insert and no
+outbox rows. The package upsert and the cursor still commit, so a roll-back to an
+already-announced version is recorded silently and the next release is detected
+against it. This also keeps a subscription created after a delivery from receiving
+an old release on a roll-back.
+
+A subscription whose stored `filter` is not valid JSON or has the wrong shape is
+skipped with a one-line warning naming only its id; it never stops the other
+subscriptions.
+
+`schema.sql` creates a fresh database and does not alter existing tables. A change
+to an existing table ships as a numbered file in `migrations/`, applied once
+(`0001_outbox_delivered_at.sql` adds `outbox.delivered_at` and its indexes); a test
+applies each migration over the previous schema shape and runs the current queries.
 
 ## Volume
 
@@ -272,7 +291,28 @@ progressively, oldest rows first:
    out on the next ticks. A failure fails only the prefix's rows; a partly sent
    prefix may repeat its earlier messages on the retry.
 
-A mod is never dropped or parked because of digest size. Cost per digest:
+A mod is never dropped or parked because of digest size.
+
+Failure handling in the drain:
+
+- **Batched bookkeeping.** Failed rows are grouped by outcome (retry time, parked) and
+  written with one `markFailedMany` per group, a single `db.batch` of `ceil(n / 98)`
+  statements; a failed 400-row digest costs at most five statements, not 400.
+- **No head-of-line blocking.** When a request to a webhook fails retryably (5xx, 429,
+  network), the rest of its rows in the drain window are moved to the same retry time
+  with one `rescheduleRows` call and their attempts untouched. Otherwise they stay
+  the oldest due rows and fill the `takeDue` window, starving healthy subscriptions.
+  Rows deferred only by a cap or the subrequest budget are left where they are.
+- **Unrenderable events.** If rendering a digest throws, the failing entries of the
+  attempted prefix are found by bisection (about 2n events rendered for one failing
+  entry among n, at most n log n for many; at most 400 events per digest in total, after
+  which the remaining rows wait for the next tick), parked without retry with the log
+  line `outbox parked unrenderable event=<id>`, and the rest is delivered. A render
+  error that no single entry reproduces fails the attempted prefix as a transient error.
+  An immediate row whose render throws is parked directly. A package row with corrupt
+  `categories` JSON is read with no categories rather than failing the whole `takeDue`.
+
+Cost per digest:
 O(rows) plus at most `1 + 3 + log2(n)` renders, each smaller than the last;
 measured (Node, 400 events, real renderer) about 1.5 ms for 50 detailed events,
 4.4 ms for 400 compact updates in one message and 4.6 ms for a mixed 20 % new
@@ -382,8 +422,9 @@ Each scheduled run logs exactly one JSON line (`event: "run"`): cron, per-source
 sources not polled, outbox rows not attempted), `parked`, `filtered` (rows
 dropped at delivery because the filter changed), `purged`, `changelogFetches`,
 `changelogSkipped` (dropped, never retried), `subrequests` and `elapsedMs`.
-Error texts are one line, URLs replaced by `[url]`, capped at 200 characters;
-webhook URLs and secrets are never logged.
+Error texts are one line, capped at 200 characters, with any `scheme://` URL (any case)
+and any `.../webhooks/...` path (with or without a scheme) replaced by `[url]`; every
+logged error text goes through this filter. Webhook URLs and secrets are never logged.
 
 ## Configuration
 
