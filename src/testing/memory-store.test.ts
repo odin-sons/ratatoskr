@@ -5,6 +5,7 @@ import { outboxId } from '../core/ids.ts';
 import type { CommitBatch } from '../core/ports.ts';
 import { FIXED_NOW_ISO, makeEvent, makeSnapshot, makeSubscription } from './fakes.ts';
 import { MemoryStore } from './memory-store.ts';
+import { runStoreContract } from './store-contract.ts';
 
 const state = { id: 'thunderstore:valheim', cursor: 'c', etag: null, bootstrapped: true, lastOkAt: null };
 
@@ -20,6 +21,18 @@ function batch(store: MemoryStore, over: Partial<CommitBatch> = {}): CommitBatch
     ...over,
   };
 }
+
+runStoreContract('MemoryStore', () => {
+  const store = new MemoryStore();
+  return {
+    store,
+    addSubscription: async (sub) => store.addSubscription(sub),
+    setSubscriptionEnabled: async (id, enabled) => {
+      const sub = store.subscriptions.get(id);
+      if (sub) store.subscriptions.set(id, { ...sub, enabled });
+    },
+  };
+});
 
 describe('MemoryStore', () => {
   it('commits packages, events, outbox and state together', async () => {
@@ -47,7 +60,7 @@ describe('MemoryStore', () => {
     const store = new MemoryStore();
     const b = batch(store);
     await store.commit(b);
-    await store.markDelivered(b.outbox.map((r) => r.id));
+    await store.markDelivered(b.outbox.map((r) => r.id), FIXED_NOW_ISO);
     await store.commit({ ...b, outbox: [{ ...b.outbox[0]!, id: 'other-id' }] });
     expect(store.outboxRows()).toHaveLength(1);
     expect(await store.takeDue(FIXED_NOW_ISO, 10)).toEqual([]);
@@ -80,15 +93,6 @@ describe('MemoryStore', () => {
     const id = outboxId('sub-1', events[1]!.id);
     for (let i = 0; i < OUTBOX_MAX_ATTEMPTS; i++) await store.markFailed(id, FIXED_NOW_ISO, false);
     expect(await store.takeDue(FIXED_NOW_ISO, 10)).toEqual([]);
-  });
-
-  it('finds recent events by release key within the window', async () => {
-    const store = new MemoryStore();
-    const fresh = makeEvent({ pkg: { owner: 'Au', name: 'Mod', version: '1.0.0' } });
-    const stale = makeEvent({ createdAt: '2026-01-01T00:00:00.000Z', pkg: { owner: 'Au', name: 'Mod', version: '1.0.0', store: 'hexium' } });
-    await store.commit({ source: state.id, packages: [], events: [fresh, stale], outbox: [], state });
-    const found = await store.recentEventsByReleaseKey('au|mod|1.0.0', '2026-09-18T12:00:00.000Z');
-    expect(found.map((e) => e.id)).toEqual([fresh.id]);
   });
 
   it('stores changelog on a committed event and exposes it through takeDue', async () => {

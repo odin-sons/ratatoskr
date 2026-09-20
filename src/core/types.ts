@@ -17,6 +17,11 @@ export interface PackageSnapshot {
   name: string;
   /** Latest published version at observation time. */
   version: string;
+  /**
+   * Version published immediately before `version`, when the adapter could see the history.
+   * `undefined` or `null` means unknown/none: an unseen package is then treated as `new`.
+   */
+  previousVersion?: string | null;
   url: string;
   iconUrl: string | null;
   description: string | null;

@@ -14,6 +14,7 @@ import type {
 
 export interface StoredOutboxRow extends OutboxRow {
   delivered: boolean;
+  deliveredAt: string | null;
   parked: boolean;
   seq: number;
 }
@@ -95,7 +96,7 @@ export class MemoryStore implements Store {
       const pair = pairKey(row.subscriptionId, row.eventId);
       if (this.pairs.has(pair) || this.outbox.has(row.id)) continue;
       this.pairs.add(pair);
-      this.outbox.set(row.id, { ...row, delivered: false, parked: false, seq: this.seq++ });
+      this.outbox.set(row.id, { ...row, delivered: false, deliveredAt: null, parked: false, seq: this.seq++ });
     }
     this.sources.set(batch.source, { ...batch.state });
   }
@@ -107,13 +108,20 @@ export class MemoryStore implements Store {
   }
 
   async listSubscriptions(): Promise<Subscription[]> {
-    return [...this.subscriptions.values()].map((s) => ({ ...s }));
+    return [...this.subscriptions.values()].filter((s) => s.enabled).map((s) => ({ ...s }));
   }
 
-  async recentEventsByReleaseKey(key: string, sinceIso: string): Promise<ModEvent[]> {
-    const out: ModEvent[] = [];
-    for (const event of this.events.values()) {
-      if (event.createdAt >= sinceIso && releaseKey(event.pkg, event.versionTo) === key) out.push({ ...event });
+  async recentEventsByReleaseKeys(releaseKeys: string[], sinceIso: string): Promise<Map<string, ModEvent[]>> {
+    const wanted = new Set(releaseKeys);
+    const out = new Map<string, ModEvent[]>();
+    if (wanted.size === 0) return out;
+    for (const event of [...this.events.values()].sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0))) {
+      if (event.createdAt < sinceIso) continue;
+      const key = releaseKey(event.pkg, event.versionTo);
+      if (!wanted.has(key)) continue;
+      const list = out.get(key);
+      if (list === undefined) out.set(key, [{ ...event }]);
+      else list.push({ ...event });
     }
     return out;
   }
@@ -126,19 +134,34 @@ export class MemoryStore implements Store {
     for (const stored of due) {
       const subscription = this.subscriptions.get(stored.subscriptionId);
       const event = this.events.get(stored.eventId);
-      if (!subscription || !event) continue;
-      const { delivered: _d, parked: _p, seq: _s, ...row } = stored;
+      if (!subscription || !subscription.enabled || !event) continue;
+      const { delivered: _d, deliveredAt: _da, parked: _p, seq: _s, ...row } = stored;
       out.push({ row, subscription: { ...subscription }, event: { ...event } });
       if (out.length >= limit) break;
     }
     return out;
   }
 
-  async markDelivered(outboxIds: string[]): Promise<void> {
+  async markDelivered(outboxIds: string[], deliveredAtIso: string): Promise<void> {
     for (const id of outboxIds) {
       const row = this.outbox.get(id);
-      if (row) row.delivered = true;
+      if (row && !row.delivered) {
+        row.delivered = true;
+        row.deliveredAt = deliveredAtIso;
+      }
     }
+  }
+
+  async purgeDelivered(olderThanIso: string, limit: number): Promise<number> {
+    let purged = 0;
+    for (const row of this.outboxRows()) {
+      if (purged >= limit) break;
+      if (row.deliveredAt === null || row.deliveredAt >= olderThanIso) continue;
+      this.outbox.delete(row.id);
+      this.pairs.delete(pairKey(row.subscriptionId, row.eventId));
+      purged += 1;
+    }
+    return purged;
   }
 
   async markFailed(outboxId: string, nextAttemptAtIso: string, parked: boolean): Promise<void> {

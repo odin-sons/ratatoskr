@@ -45,13 +45,23 @@ export interface Store {
 
   listSubscriptions(): Promise<Subscription[]>;
 
-  /** Events with this `releaseKey` (see ids.ts) created at or after `sinceIso`, joined with their package. Backed by an index. */
-  recentEventsByReleaseKey(releaseKey: string, sinceIso: string): Promise<ModEvent[]>;
+  /**
+   * Events whose `releaseKey` (see ids.ts) is in `releaseKeys`, created at or after `sinceIso`, joined with their
+   * package, grouped by key (keys without events are absent). Chunked and index-backed.
+   */
+  recentEventsByReleaseKeys(releaseKeys: string[], sinceIso: string): Promise<Map<string, ModEvent[]>>;
 
-  /** Rows with `nextAttemptAt <= nowIso` and attempts < ceiling, oldest first, joined for rendering. */
+  /**
+   * Undelivered, unparked rows with `nextAttemptAt <= nowIso` and attempts below the ceiling whose subscription is
+   * enabled and valid, oldest first, joined for rendering.
+   */
   takeDue(nowIso: string, limit: number): Promise<DueDelivery[]>;
 
-  markDelivered(outboxIds: string[]): Promise<void>;
+  /** Marks rows delivered. They stay as the UNIQUE (subscription, event) guard until `purgeDelivered` removes them. */
+  markDelivered(outboxIds: string[], deliveredAtIso: string): Promise<void>;
+
+  /** Deletes at most `limit` rows delivered before `olderThanIso`; returns how many were deleted. */
+  purgeDelivered(olderThanIso: string, limit: number): Promise<number>;
 
   /** Reschedule (or park when `parked`) a failed row and bump `attempts`. */
   markFailed(outboxId: string, nextAttemptAtIso: string, parked: boolean): Promise<void>;
@@ -88,6 +98,8 @@ export interface PollContext {
   now: Date;
   /** Secrets, e.g. `NEXUS_API_KEY`. */
   secrets: Record<string, string | undefined>;
+  /** Reconciliation only: increases by one per reconcile run, so an adapter can rotate through slices of its index. */
+  sliceHint?: number;
 }
 
 export type PollResult =

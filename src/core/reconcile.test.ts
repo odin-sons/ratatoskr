@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
-import { FakeAdapter, FIXED_NOW_ISO, makeSnapshot, makeSubscription } from '../testing/fakes.ts';
+import { FakeAdapter, FIXED_NOW_ISO, makeEvent, makeSnapshot, makeSubscription, okPoll } from '../testing/fakes.ts';
 import { makeHarness, type Harness } from '../testing/harness.ts';
-import { eventId } from './ids.ts';
-import { runReconcile } from './tick.ts';
+import { CADENCE, DELIVERED_RETENTION_DAYS, OUTBOX_PURGE_BATCH } from './constants.ts';
+import { eventId, outboxId } from './ids.ts';
+import { runReconcile, runTick } from './tick.ts';
 import type { PackageSnapshot } from './types.ts';
 
 const TS = 'thunderstore:valheim';
@@ -99,5 +100,122 @@ describe('runReconcile', () => {
     expect((await runReconcile(h.deps, scheduled, 0)).sources[TS]!.status).toBe('error');
     expect(h.store.events.size).toBe(0);
     expect((await runReconcile(h.deps, scheduled, 0)).sources[TS]!.events).toBe(1);
+  });
+});
+
+describe('runReconcile: slice hint', () => {
+  const DAY_MS = 86_400_000;
+
+  async function hints(h: Harness, adapter: FakeAdapter, runs: { at: number; index: number }[], perDay?: number): Promise<(number | undefined)[]> {
+    if (perDay !== undefined) h.deps.reconcileRunsPerDay = perDay;
+    for (const run of runs) await runReconcile(h.deps, run.at, run.index);
+    return adapter.reconcileCalls.map((c) => c.sliceHint);
+  }
+
+  const setup = () => {
+    const adapter = new FakeAdapter({ id: HX }, { reconcilable: true });
+    const h = makeHarness({ adapters: [adapter] });
+    bootstrap(h, HX, {});
+    return { adapter, h };
+  };
+
+  it('is consecutive across the reconcile runs of a day and continues on the next day', async () => {
+    const { adapter, h } = setup();
+    const day = Math.floor(scheduled / DAY_MS);
+    const runs = [
+      { at: day * DAY_MS + 3 * 3_600_000 + 60_000, index: 0 },
+      { at: day * DAY_MS + 4 * 3_600_000 + 60_000, index: 1 },
+      { at: day * DAY_MS + 5 * 3_600_000 + 60_000, index: 2 },
+      { at: (day + 1) * DAY_MS + 3 * 3_600_000 + 60_000, index: 0 },
+    ];
+    const seen = await hints(h, adapter, runs);
+    expect(seen).toEqual([0, 1, 2, 3].map((n) => day * CADENCE.reconcileRunsPerDay + n));
+    for (let i = 1; i < seen.length; i++) expect(seen[i]! - seen[i - 1]!).toBe(1);
+  });
+
+  it('uses the configured number of runs per day', async () => {
+    const { adapter, h } = setup();
+    const day = Math.floor(scheduled / DAY_MS);
+    const seen = await hints(h, adapter, [{ at: day * DAY_MS, index: 1 }], 5);
+    expect(seen).toEqual([day * 5 + 1]);
+  });
+
+  it('is not set for tick polls', async () => {
+    const adapter = new FakeAdapter({ id: TS });
+    const h = makeHarness({ adapters: [adapter] });
+    adapter.enqueue(okPoll([]));
+    await runTick(h.deps, scheduled);
+    expect(adapter.pollCalls[0]!.sliceHint).toBeUndefined();
+  });
+});
+
+describe('runReconcile: purge of delivered rows', () => {
+  const DAY_MS = 86_400_000;
+
+  async function withDeliveredRow(h: Harness, name: string, deliveredAtMs: number): Promise<void> {
+    const sub = makeSubscription();
+    h.store.addSubscription(sub);
+    const event = makeEvent({ pkg: { packageId: `Own-${name}`, owner: 'Own', name } });
+    const row = { id: outboxId(sub.id, event.id), subscriptionId: sub.id, eventId: event.id, attempts: 0, nextAttemptAt: FIXED_NOW_ISO };
+    await h.store.commit({
+      source: TS,
+      packages: [event.pkg],
+      events: [event],
+      outbox: [row],
+      state: { id: TS, cursor: 'cur', etag: 'etag', bootstrapped: true, lastOkAt: null },
+    });
+    await h.store.markDelivered([row.id], new Date(deliveredAtMs).toISOString());
+  }
+
+  it('deletes rows delivered longer ago than the retention and reports them', async () => {
+    const adapter = new FakeAdapter({ id: TS }, { reconcilable: true });
+    const h = makeHarness({ adapters: [adapter] });
+    await withDeliveredRow(h, 'Old', scheduled - (DELIVERED_RETENTION_DAYS + 1) * DAY_MS);
+    await withDeliveredRow(h, 'Recent', scheduled - DAY_MS);
+    const report = await runReconcile(h.deps, scheduled, 0);
+    expect(report.purged).toBe(1);
+    expect(h.store.outboxRows()).toHaveLength(1);
+    expect(h.store.outboxRows()[0]!.eventId).toContain('Recent');
+  });
+
+  it('purges even when no source supports reconciliation', async () => {
+    const h = makeHarness({ adapters: [new FakeAdapter({ id: NX })] });
+    await withDeliveredRow(h, 'Old', scheduled - (DELIVERED_RETENTION_DAYS + 1) * DAY_MS);
+    expect((await runReconcile(h.deps, scheduled, 0)).purged).toBe(1);
+  });
+
+  it('asks the store to delete at most one bounded batch', async () => {
+    const h = makeHarness();
+    const calls: [string, number][] = [];
+    h.store.purgeDelivered = async (olderThan, limit) => {
+      calls.push([olderThan, limit]);
+      return 0;
+    };
+    await runReconcile(h.deps, scheduled, 0);
+    expect(calls).toEqual([[new Date(scheduled - DELIVERED_RETENTION_DAYS * DAY_MS).toISOString(), OUTBOX_PURGE_BATCH]]);
+  });
+
+  it('does not fail the run when the purge throws', async () => {
+    const adapter = new FakeAdapter({ id: TS }, { reconcilable: true });
+    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription()] });
+    bootstrap(h, TS, {});
+    adapter.reconcileResult = [snap('A-One', '1.0.0')];
+    h.store.purgeDelivered = async () => {
+      throw new Error('d1 down');
+    };
+    const report = await runReconcile(h.deps, scheduled, 0);
+    expect(report.sources[TS]).toEqual({ status: 'ok', events: 1 });
+    expect(report.purged).toBe(0);
+  });
+
+  it('never purges on a tick run', async () => {
+    const h = makeHarness();
+    let called = false;
+    h.store.purgeDelivered = async () => {
+      called = true;
+      return 0;
+    };
+    await runTick(h.deps, scheduled);
+    expect(called).toBe(false);
   });
 });

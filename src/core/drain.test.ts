@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   FIXED_NOW_ISO,
   clientError,
@@ -9,9 +9,11 @@ import {
   serverError,
 } from '../testing/fakes.ts';
 import { makeHarness, type Harness } from '../testing/harness.ts';
-import { DISCORD, OUTBOX_BACKOFF, OUTBOX_MAX_ATTEMPTS, TICK_BUDGET } from './constants.ts';
+import { SubrequestBudget } from './budget.ts';
+import { DIGEST_FIT_ATTEMPTS, DISCORD, OUTBOX_BACKOFF, OUTBOX_MAX_ATTEMPTS, TICK_BUDGET } from './constants.ts';
 import { backoffSeconds, collapseEquivalent, drainOutbox, scheduleFailure } from './drain.ts';
 import { outboxId } from './ids.ts';
+import { renderDigest, renderImmediate } from '../render/index.ts';
 import type { DueDelivery, ModEvent, Subscription } from './types.ts';
 
 const now = new Date(FIXED_NOW_ISO);
@@ -33,8 +35,8 @@ async function enqueue(h: Harness, sub: Subscription, events: ModEvent[], nextAt
   });
 }
 
-const drain = (h: Harness, at = now) =>
-  drainOutbox({ store: h.store, sender: h.sender, renderer: h.renderer, now: at });
+const drain = (h: Harness, at = now, budget?: SubrequestBudget) =>
+  drainOutbox({ store: h.store, sender: h.sender, renderer: h.renderer, now: at, ...(budget ? { budget } : {}) });
 
 const evs = (n: number, prefix = 'P'): ModEvent[] =>
   Array.from({ length: n }, (_, i) => makeEvent({ pkg: { packageId: `${prefix}${i}-Mod`, owner: `${prefix}${i}`, name: 'Mod' } }));
@@ -222,7 +224,7 @@ describe('drainOutbox', () => {
     expect(h.store.pendingRows()).toHaveLength(50 - TICK_BUDGET.maxDiscordSends);
   });
 
-  it('defers a digest that does not fit the remaining webhook budget instead of splitting it', async () => {
+  it('sends the part of a digest that fits the remaining webhook allowance and leaves the rest due', async () => {
     const h = makeHarness();
     const a = makeSubscription({ id: 'a', mode: 'immediate' });
     const b = makeSubscription({ id: 'b', mode: 'digest' });
@@ -230,18 +232,23 @@ describe('drainOutbox', () => {
     h.renderer.perMessage = 1;
     await enqueue(h, b, evs(3, 'B'));
     const report = await drain(h);
-    expect(report.sent).toBe(4);
-    expect(report.deferred).toBe(3);
+    expect(report).toMatchObject({ sent: 5, failed: 0, deferred: 2 });
     expect(h.store.pendingRows().every((r) => r.subscriptionId === 'b')).toBe(true);
+    expect(h.store.pendingRows()).toHaveLength(2);
   });
 
-  it('still sends an oversized digest when it is the first thing for its webhook', async () => {
+  it('splits an oversized digest across ticks instead of exceeding the per-webhook cap', async () => {
     const h = makeHarness();
     h.renderer.perMessage = 1;
-    await enqueue(h, makeSubscription({ mode: 'digest' }), evs(DISCORD.webhookRequestsPer2s + 2));
-    const report = await drain(h);
-    expect(report.sent).toBe(DISCORD.webhookRequestsPer2s + 2);
+    const events = evs(DISCORD.webhookRequestsPer2s + 2);
+    await enqueue(h, makeSubscription({ mode: 'digest' }), events);
+    const first = await drain(h);
+    expect(first).toMatchObject({ sent: DISCORD.webhookRequestsPer2s, deferred: 2, parked: 0 });
+    expect(h.store.pendingRows()).toHaveLength(2);
+    const second = await drain(h);
+    expect(second).toMatchObject({ sent: 2, deferred: 0 });
     expect(h.store.pendingRows()).toEqual([]);
+    expect(deliveredEventIds(h)).toEqual(events.map((e) => e.id));
   });
 
   it('collapses the same release from two stores into one item with alsoOn', async () => {
@@ -285,5 +292,260 @@ describe('drainOutbox', () => {
     const report = await drain(h);
     expect(report.failed).toBe(1);
     expect(h.store.outboxRows()[0]).toMatchObject({ attempts: 1, parked: false });
+  });
+});
+
+function deliveredEventIds(h: Harness): string[] {
+  return h.sender.calls.flatMap((c) => (c.payload.content ?? '').replace(/^digest:/, '').split(',').filter(Boolean));
+}
+
+/** Accepts `perWindow` messages per window, then answers 429 until `newWindow()`. */
+function windowedSender(h: Harness, perWindow = DISCORD.webhookRequestsPer2s): { newWindow(): void } {
+  let inWindow = 0;
+  h.sender.fallback = () => {
+    if (inWindow >= perWindow) return rateLimited(1);
+    inWindow += 1;
+    return { ok: true };
+  };
+  return {
+    newWindow: () => {
+      inWindow = 0;
+    },
+  };
+}
+
+describe('progressive digest delivery', () => {
+  it('delivers a 400-row backlog over successive ticks, each event exactly once, nothing parked', async () => {
+    const h = makeHarness();
+    h.renderer.perMessage = 10;
+    const events = evs(400);
+    await enqueue(h, makeSubscription({ mode: 'digest' }), events);
+    const window = windowedSender(h);
+
+    let ticks = 0;
+    while (h.store.pendingRows().length > 0 && ticks < 30) {
+      window.newWindow();
+      const report = await drain(h, new Date(now.getTime() + ticks * 300_000));
+      expect(report.failed).toBe(0);
+      expect(report.parked).toBe(0);
+      ticks += 1;
+    }
+    expect(ticks).toBe(Math.ceil(400 / 10 / DISCORD.webhookRequestsPer2s));
+    const delivered = deliveredEventIds(h);
+    expect(delivered).toHaveLength(400);
+    expect(new Set(delivered).size).toBe(400);
+    expect(h.store.outboxRows().every((r) => r.delivered && !r.parked && r.attempts === 0)).toBe(true);
+  });
+
+  it('delivers the oldest rows first', async () => {
+    const h = makeHarness();
+    h.renderer.perMessage = 1;
+    const events = evs(8);
+    await enqueue(h, makeSubscription({ mode: 'digest' }), events);
+    await drain(h);
+    expect(deliveredEventIds(h)).toEqual(events.slice(0, DISCORD.webhookRequestsPer2s).map((e) => e.id));
+    expect(h.store.pendingRows().map((r) => r.eventId)).toEqual(events.slice(DISCORD.webhookRequestsPer2s).map((e) => e.id));
+  });
+
+  it('with the real renderer, delivers 400 detailed events exactly once each with nothing parked', async () => {
+    const h = makeHarness();
+    const real = { renderDigest, renderImmediate };
+    const events = Array.from({ length: 400 }, (_, i) =>
+      makeEvent({ pkg: { packageId: `Owner${i}-Mod${i}`, owner: `Owner${i}`, name: `Mod${i}`, description: 'x'.repeat(200) } }),
+    );
+    await enqueue(h, makeSubscription({ mode: 'digest' }), events);
+    const window = windowedSender(h);
+    let ticks = 0;
+    while (h.store.pendingRows().length > 0 && ticks < 200) {
+      window.newWindow();
+      await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now: new Date(now.getTime() + ticks * 300_000) });
+      ticks += 1;
+    }
+    expect(h.store.pendingRows()).toEqual([]);
+    expect(h.store.outboxRows().some((r) => r.parked)).toBe(false);
+    const wire = h.sender.calls.map((c) => JSON.stringify(c.payload)).join('\n');
+    for (let i = 0; i < 400; i++) {
+      expect(wire.split(`https://thunderstore.invalid/Owner${i}-Mod${i}/`).length - 1).toBe(1);
+    }
+    expect(h.sender.calls.length).toBeGreaterThan(DISCORD.webhookRequestsPer2s);
+  });
+
+  it('sends a compact digest in one go when it fits, with a single render', async () => {
+    const h = makeHarness();
+    const events = Array.from({ length: 300 }, (_, i) =>
+      makeEvent({ kind: 'update', versionFrom: '0.9.0', pkg: { packageId: `Owner${i}-Mod${i}`, owner: `Owner${i}`, name: `Mod${i}` } }),
+    );
+    await enqueue(h, makeSubscription({ mode: 'digest' }), events);
+    const renders: number[] = [];
+    const counting = {
+      renderDigest: (evs: ModEvent[], opts: Parameters<typeof renderDigest>[1]) => {
+        renders.push(evs.length);
+        return renderDigest(evs, opts);
+      },
+      renderImmediate,
+    };
+    const report = await drainOutbox({ store: h.store, sender: h.sender, renderer: counting, now });
+    expect(report.deferred).toBe(0);
+    expect(h.store.pendingRows()).toEqual([]);
+    expect(renders).toEqual([300]);
+  });
+
+  it('keeps the CPU cost of an oversized 400-row mixed backlog within a loose bound', async () => {
+    const real = { renderDigest, renderImmediate };
+    const events = Array.from({ length: 400 }, (_, i) =>
+      makeEvent({
+        kind: i % 5 === 0 ? 'new' : 'update',
+        versionFrom: i % 5 === 0 ? null : '0.9.0',
+        pkg: { packageId: `Owner${i}-Mod${i}`, owner: `Owner${i}`, name: `Mod${i}`, description: 'x'.repeat(300) },
+      }),
+    );
+    const timed = async (): Promise<number> => {
+      const h = makeHarness();
+      await enqueue(h, makeSubscription({ mode: 'digest' }), events);
+      const start = performance.now();
+      await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now });
+      return performance.now() - start;
+    };
+    await timed();
+    const samples = [await timed(), await timed(), await timed()];
+    expect(Math.min(...samples)).toBeLessThan(150);
+  });
+
+  it('bounds the number of renders for an oversized digest', async () => {
+    const h = makeHarness();
+    h.renderer.perMessage = 7;
+    await enqueue(h, makeSubscription({ mode: 'digest' }), evs(400));
+    await drain(h);
+    expect(h.renderer.digestCalls.length).toBeLessThanOrEqual(1 + DIGEST_FIT_ATTEMPTS + Math.ceil(Math.log2(400)));
+  });
+
+  it('a failure marks only the sent prefix as failed; later rows are untouched', async () => {
+    const h = makeHarness();
+    h.renderer.perMessage = 1;
+    await enqueue(h, makeSubscription({ mode: 'digest' }), evs(8));
+    h.sender.enqueue({ ok: true }, serverError(500));
+    const report = await drain(h);
+    expect(report).toMatchObject({ sent: 1, failed: 1, deferred: 3 });
+    expect(h.store.outboxRows().map((r) => r.attempts)).toEqual([1, 1, 1, 1, 1, 0, 0, 0]);
+    expect(h.store.outboxRows().some((r) => r.parked)).toBe(false);
+  });
+
+  it('shares the webhook allowance between subscriptions on the same webhook without starving either', async () => {
+    const h = makeHarness();
+    h.renderer.perMessage = 1;
+    await enqueue(h, makeSubscription({ id: 'a', mode: 'digest' }), evs(3, 'A'));
+    await enqueue(h, makeSubscription({ id: 'b', mode: 'digest' }), evs(3, 'B'));
+    await drain(h);
+    const deliveredFor = (id: string) => h.store.outboxRows().filter((r) => r.subscriptionId === id && r.delivered).length;
+    expect(deliveredFor('a')).toBe(3);
+    expect(deliveredFor('b')).toBe(2);
+    await drain(h);
+    expect(h.store.pendingRows()).toEqual([]);
+  });
+});
+
+describe('drain: current filter is re-checked at delivery time', () => {
+  it('does not send an NSFW event once the subscription no longer allows NSFW, and marks it delivered', async () => {
+    const h = makeHarness();
+    const nsfw = makeEvent({ pkg: { packageId: 'A-Lewd', owner: 'A', name: 'Lewd', isNsfw: true } });
+    const safe = makeEvent({ pkg: { packageId: 'B-Safe', owner: 'B', name: 'Safe' } });
+    await enqueue(h, makeSubscription({ mode: 'immediate', filter: { allowNsfw: true } }), [nsfw, safe]);
+    h.store.addSubscription(makeSubscription({ mode: 'immediate', filter: { allowNsfw: false } }));
+    const report = await drain(h);
+    expect(report).toMatchObject({ sent: 1, filtered: 1, failed: 0 });
+    expect(h.sender.calls.map((c) => c.payload.content)).toEqual([`immediate:${safe.id}`]);
+    expect(h.store.pendingRows()).toEqual([]);
+    expect(h.store.outboxRows().every((r) => r.delivered)).toBe(true);
+  });
+
+  it('filters digest rows too and renders only what still matches', async () => {
+    const h = makeHarness();
+    const nsfw = makeEvent({ pkg: { packageId: 'A-Lewd', owner: 'A', name: 'Lewd', isNsfw: true } });
+    const safe = makeEvent({ pkg: { packageId: 'B-Safe', owner: 'B', name: 'Safe' } });
+    await enqueue(h, makeSubscription({ mode: 'digest', filter: { allowNsfw: true } }), [nsfw, safe]);
+    h.store.addSubscription(makeSubscription({ mode: 'digest', filter: {} }));
+    const report = await drain(h);
+    expect(report).toMatchObject({ sent: 1, filtered: 1 });
+    expect(h.sender.calls[0]!.payload.content).toBe(`digest:${safe.id}`);
+    expect(h.store.pendingRows()).toEqual([]);
+  });
+
+  it('sends nothing and marks everything delivered when no row matches any more', async () => {
+    const h = makeHarness();
+    await enqueue(h, makeSubscription({ mode: 'digest', filter: {} }), evs(2));
+    h.store.addSubscription(makeSubscription({ mode: 'digest', filter: { kinds: ['update'] } }));
+    const report = await drain(h);
+    expect(report).toMatchObject({ sent: 0, filtered: 2 });
+    expect(h.sender.calls).toHaveLength(0);
+    expect(h.store.pendingRows()).toEqual([]);
+  });
+});
+
+describe('drain: parked count', () => {
+  it('reports rows parked in this drain and logs the count without the webhook url', async () => {
+    const h = makeHarness();
+    await enqueue(h, makeSubscription({ mode: 'immediate' }), evs(1));
+    h.sender.enqueue(clientError(404));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const report = await drain(h);
+      expect(report.parked).toBe(1);
+      const lines = warn.mock.calls.map((c) => c.map(String).join(' '));
+      expect(lines.filter((l) => l.includes('parked'))).toHaveLength(1);
+      expect(lines.join('\n')).toContain('rows=1');
+      expect(lines.join('\n')).not.toContain('discord.invalid');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('counts every row of a parked digest', async () => {
+    const h = makeHarness();
+    await enqueue(h, makeSubscription({ mode: 'digest' }), evs(3));
+    h.sender.enqueue(clientError(404));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect((await drain(h)).parked).toBe(3);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('reports zero when nothing was parked', async () => {
+    const h = makeHarness();
+    await enqueue(h, makeSubscription(), evs(1));
+    expect((await drain(h)).parked).toBe(0);
+  });
+});
+
+describe('drain: subrequest budget', () => {
+  it('stops sending when the shared budget is spent and leaves the rest due', async () => {
+    const h = makeHarness();
+    await enqueue(h, makeSubscription({ mode: 'immediate' }), evs(4));
+    const budget = new SubrequestBudget(3);
+    const report = await drain(h, now, budget);
+    expect(report).toMatchObject({ sent: 3, deferred: 1 });
+    expect(budget.used).toBe(3);
+    expect(h.store.pendingRows()).toHaveLength(1);
+  });
+
+  it('limits a digest prefix to what the budget can still send', async () => {
+    const h = makeHarness();
+    h.renderer.perMessage = 1;
+    await enqueue(h, makeSubscription({ mode: 'digest' }), evs(5));
+    const budget = new SubrequestBudget(2);
+    const report = await drain(h, now, budget);
+    expect(report).toMatchObject({ sent: 2, deferred: 3 });
+    expect(h.store.pendingRows()).toHaveLength(3);
+  });
+
+  it('counts sends of every webhook against the same pool', async () => {
+    const h = makeHarness();
+    await enqueue(h, makeSubscription({ id: 'a', webhookUrl: 'https://discord.invalid/api/webhooks/1/a', mode: 'immediate' }), evs(2, 'A'));
+    await enqueue(h, makeSubscription({ id: 'b', webhookUrl: 'https://discord.invalid/api/webhooks/2/b', mode: 'immediate' }), evs(2, 'B'));
+    const budget = new SubrequestBudget(3);
+    const report = await drain(h, now, budget);
+    expect(report.sent).toBe(3);
+    expect(h.sender.calls).toHaveLength(3);
   });
 });

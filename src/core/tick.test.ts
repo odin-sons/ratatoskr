@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
-import { FakeAdapter, FIXED_NOW_ISO, makeSnapshot, makeSubscription, okPoll, rateLimited } from '../testing/fakes.ts';
+import { FakeAdapter, FIXED_NOW_ISO, clientError, makeSnapshot, makeSubscription, okPoll, rateLimited } from '../testing/fakes.ts';
 import { makeHarness, type Harness } from '../testing/harness.ts';
 import { DISCORD, TICK_BUDGET } from './constants.ts';
 import { eventId, outboxId } from './ids.ts';
@@ -246,7 +246,7 @@ describe('runTick: budgets', () => {
     expect(report.deferred).toBe(0);
   });
 
-  it('caps changelog fetches at maxChangelogFetches and reports the remainder as deferred', async () => {
+  it('caps changelog fetches at maxChangelogFetches and reports the remainder as skipped, not deferred', async () => {
     const adapter = new FakeAdapter({ id: TS });
     const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription({ mode: 'digest' })] });
     bootstrap(h, TS, {});
@@ -255,7 +255,8 @@ describe('runTick: budgets', () => {
     const report = await runTick(h.deps, scheduled);
     expect(report.changelogFetches).toBe(TICK_BUDGET.maxChangelogFetches);
     expect(adapter.changelogCalls).toHaveLength(TICK_BUDGET.maxChangelogFetches);
-    expect(report.deferred).toBe(3);
+    expect(report.changelogSkipped).toBe(3);
+    expect(report.deferred).toBe(0);
     const withChangelog = [...h.store.events.values()].filter((e) => e.changelog !== null);
     expect(withChangelog).toHaveLength(TICK_BUDGET.maxChangelogFetches);
     expect(withChangelog[0]!.changelogUrl).not.toBeNull();
@@ -301,6 +302,42 @@ describe('runTick: budgets', () => {
     expect(report.sent).toBe(DISCORD.webhookRequestsPer2s);
     expect(report.deferred).toBe(4);
     expect(h.store.pendingRows()).toHaveLength(4);
+  });
+});
+
+describe('runTick: first-seen update of a pre-existing mod', () => {
+  it('is delivered as an update: no new-package treatment and no forced changelog fetch', async () => {
+    const adapter = new FakeAdapter({ id: TS });
+    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription({ mode: 'digest' })] });
+    bootstrap(h, TS, {});
+    adapter.enqueue(okPoll([snap('Old-Mod', '2.0.0', { previousVersion: '1.9.0' })]));
+    const report = await runTick(h.deps, scheduled);
+    expect(report.sources[TS]).toEqual({ status: 'ok', events: 1 });
+    expect(h.store.events.get(eventId(TS, 'Old-Mod', '2.0.0'))).toMatchObject({ kind: 'update', versionFrom: '1.9.0' });
+    expect(report.changelogFetches).toBe(0);
+    expect(adapter.changelogCalls).toHaveLength(0);
+    h.clock.set('2026-09-19T12:30:00.000Z');
+    await runTick(h.deps, scheduled + 23 * 60_000);
+    expect(h.renderer.digestCalls[0]!.detailed).toEqual([false]);
+  });
+
+  it('still gets the watchlist detail treatment like any update', async () => {
+    const adapter = new FakeAdapter({ id: TS });
+    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription({ mode: 'digest', filter: { watchlist: ['Old'] } })] });
+    bootstrap(h, TS, {});
+    adapter.enqueue(okPoll([snap('Old-Mod', '2.0.0', { previousVersion: '1.9.0' })]));
+    const report = await runTick(h.deps, scheduled);
+    expect(report.changelogFetches).toBe(1);
+  });
+
+  it('an unseen package without previousVersion is still new and fetches its changelog', async () => {
+    const adapter = new FakeAdapter({ id: TS });
+    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription({ mode: 'digest' })] });
+    bootstrap(h, TS, {});
+    adapter.enqueue(okPoll([snap('Fresh-Mod', '1.0.0')]));
+    const report = await runTick(h.deps, scheduled);
+    expect(h.store.events.get(eventId(TS, 'Fresh-Mod', '1.0.0'))).toMatchObject({ kind: 'new', versionFrom: null });
+    expect(report.changelogFetches).toBe(1);
   });
 });
 
@@ -406,5 +443,54 @@ describe('runTick: cross-store dedup', () => {
     await runTick(h.deps, scheduled);
     await runTick(h.deps, scheduled + 300_000);
     expect(h.store.outboxRows().map((r) => r.eventId)).toContain(eventId(HX, 'Au-Mod', '1.0.1'));
+  });
+});
+
+describe('runTick: report', () => {
+  it('starts with zeroed counters', async () => {
+    const h = makeHarness();
+    expect(await runTick(h.deps, scheduled)).toEqual({
+      sources: {},
+      sent: 0,
+      failed: 0,
+      changelogFetches: 0,
+      changelogSkipped: 0,
+      deferred: 0,
+      parked: 0,
+      filtered: 0,
+      purged: 0,
+      subrequests: 0,
+    });
+  });
+
+  it('carries the parked count of the drain', async () => {
+    const adapter = new FakeAdapter({ id: TS });
+    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription()] });
+    bootstrap(h, TS, {});
+    adapter.enqueue(okPoll([snap('A-One')]));
+    h.sender.enqueue(clientError(404));
+    const report = await runTick(h.deps, scheduled);
+    expect(report).toMatchObject({ sent: 0, failed: 1, parked: 1 });
+  });
+
+  it('carries the count of rows whose subscription filter no longer matches', async () => {
+    const adapter = new FakeAdapter({ id: TS });
+    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription({ mode: 'digest', filter: { allowNsfw: true } })] });
+    bootstrap(h, TS, {});
+    adapter.enqueue(okPoll([snap('A-Lewd', '1.0.0', { isNsfw: true })]));
+    await runTick(h.deps, scheduled);
+    h.store.addSubscription(makeSubscription({ mode: 'digest', filter: {} }));
+    h.clock.set('2026-09-19T12:30:00.000Z');
+    const report = await runTick(h.deps, scheduled + 23 * 60_000);
+    expect(report).toMatchObject({ sent: 0, filtered: 1 });
+  });
+
+  it('counts the subrequests spent on sends', async () => {
+    const adapter = new FakeAdapter({ id: TS });
+    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription()] });
+    bootstrap(h, TS, {});
+    adapter.enqueue(okPoll([snap('A-One'), snap('B-Two')]));
+    const report = await runTick(h.deps, scheduled);
+    expect(report.subrequests).toBe(h.sender.calls.length);
   });
 });

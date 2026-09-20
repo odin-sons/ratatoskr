@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import type { ModEvent, SubscriptionFilter } from './types.ts';
+import type { EventKind, ModEvent, SubscriptionFilter } from './types.ts';
 
 export interface CompiledFilter {
   matches(event: ModEvent): boolean;
@@ -55,4 +55,38 @@ export function matchesFilter(filter: SubscriptionFilter, event: ModEvent): bool
 
 export function isWatchlistHit(filter: SubscriptionFilter, event: ModEvent): boolean {
   return compileFilter(filter).isWatchlistHit(event);
+}
+
+const EVENT_KINDS: readonly string[] = ['new', 'update'] satisfies EventKind[];
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((v) => typeof v === 'string');
+}
+
+const STRING_LIST_KEYS = ['sources', 'watchlist', 'includeCategories', 'excludeCategories'] as const;
+const BOOLEAN_KEYS = ['allowNsfw', 'dedupAcrossStores'] as const;
+
+/** Narrows untrusted (stored) JSON to a filter; `null` when any known key has the wrong type. Unknown keys are dropped. */
+export function parseFilter(value: unknown): SubscriptionFilter | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const input = value as Record<string, unknown>;
+  const filter: SubscriptionFilter = {};
+  for (const key of STRING_LIST_KEYS) {
+    const v = input[key];
+    if (v === undefined) continue;
+    if (!isStringArray(v)) return null;
+    filter[key] = v;
+  }
+  for (const key of BOOLEAN_KEYS) {
+    const v = input[key];
+    if (v === undefined) continue;
+    if (typeof v !== 'boolean') return null;
+    filter[key] = v;
+  }
+  const kinds = input.kinds;
+  if (kinds !== undefined) {
+    if (!isStringArray(kinds) || !kinds.every((k) => EVENT_KINDS.includes(k))) return null;
+    filter.kinds = kinds as EventKind[];
+  }
+  return filter;
 }

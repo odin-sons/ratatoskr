@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import type { SubrequestBudget } from './budget.ts';
 import { DISCORD, OUTBOX_BACKOFF, OUTBOX_MAX_ATTEMPTS, TICK_BUDGET } from './constants.ts';
-import { compileFilter } from './filter.ts';
+import { fitDigestPrefix } from './digest-fit.ts';
+import { compileFilter, type CompiledFilter } from './filter.ts';
 import { releaseKey } from './ids.ts';
 import type { SendResult, Sender, Store } from './ports.ts';
 import type { DiscordMessage, DueDelivery, ModEvent, OutboxRow, Subscription } from './types.ts';
@@ -15,6 +17,8 @@ export interface DrainDeps {
   sender: Sender;
   renderer: Renderer;
   now: Date;
+  /** Shared per-invocation subrequest pool; every Discord send spends one. */
+  budget?: SubrequestBudget;
 }
 
 export interface DrainReport {
@@ -22,8 +26,12 @@ export interface DrainReport {
   sent: number;
   /** Discord messages that failed (or renders that threw). */
   failed: number;
-  /** Outbox rows left untouched because a per-tick cap was reached. */
+  /** Outbox rows left untouched because a per-tick cap or the budget was reached; they are due again next tick. */
   deferred: number;
+  /** Outbox rows parked in this drain. */
+  parked: number;
+  /** Due rows no longer matching their subscription's filter; marked delivered without sending. */
+  filtered: number;
   error?: string;
 }
 
@@ -77,33 +85,42 @@ export function collapseEquivalent(items: DueDelivery[]): CollapsedDelivery[] {
   return out;
 }
 
-interface Unit {
-  rows: OutboxRow[];
-  render(): DiscordMessage[];
-}
+const TRANSIENT_FAILURE: FailedResult = { ok: false, retryable: true, retryAfterSeconds: null, status: 0 };
 
-interface Progress {
+interface Drain {
+  deps: DrainDeps;
+  report: DrainReport;
   sends: number;
   perWebhook: Map<string, number>;
   blocked: Set<string>;
 }
 
 /**
- * Sends every due outbox row within the per-tick caps. A digest is one unit:
- * its rows are marked delivered only after all of its messages were accepted,
- * so a failure midway can resend earlier messages on the retry.
+ * Sends every due outbox row within the per-tick caps and the shared subrequest budget.
+ *
+ * A digest is delivered progressively: the oldest rows that fit the remaining message allowance of its webhook are
+ * rendered and sent, and only those rows are marked delivered; the rest stay due for the next tick. A failure midway
+ * fails just the rows of the attempted prefix, so a partly sent prefix may repeat its earlier messages on the retry.
+ *
+ * Cost: O(rows) grouping and filtering, one `markDelivered` and at most one render sequence per digest
+ * (see `fitDigestPrefix`), one send per message up to the caps.
  */
 export async function drainOutbox(deps: DrainDeps): Promise<DrainReport> {
   const { store, now } = deps;
-  const report: DrainReport = { sent: 0, failed: 0, deferred: 0 };
-  const progress: Progress = { sends: 0, perWebhook: new Map(), blocked: new Set() };
+  const drain: Drain = {
+    deps,
+    report: { sent: 0, failed: 0, deferred: 0, parked: 0, filtered: 0 },
+    sends: 0,
+    perWebhook: new Map(),
+    blocked: new Set(),
+  };
 
   let due: DueDelivery[];
   try {
     due = await store.takeDue(now.toISOString(), TICK_BUDGET.maxOutboxRows);
   } catch (err) {
-    report.error = errorMessage(err);
-    return report;
+    drain.report.error = errorMessage(err);
+    return drain.report;
   }
 
   const groups = new Map<string, { sub: Subscription; items: DueDelivery[] }>();
@@ -116,95 +133,137 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainReport> {
   for (const { sub, items } of groups.values()) {
     if (!sub.enabled) continue;
     try {
-      for (const unit of buildUnits(sub, items, deps)) await runUnit(sub, unit, deps, progress, report);
+      await deliverGroup(drain, sub, items);
     } catch (err) {
-      report.error ??= errorMessage(err);
+      drain.report.error ??= errorMessage(err);
     }
   }
-  return report;
+  return drain.report;
 }
 
-function buildUnits(sub: Subscription, items: DueDelivery[], deps: DrainDeps): Unit[] {
-  const { renderer, now } = deps;
-  const kept = sub.filter.dedupAcrossStores === false ? items.map((d) => ({ delivery: d, rows: [d.row] })) : collapseEquivalent(items);
-  if (sub.mode === 'immediate') {
-    return kept.map((k) => ({ rows: k.rows, render: () => [renderer.renderImmediate(k.delivery.event, { now })] }));
-  }
+
+async function deliverGroup(drain: Drain, sub: Subscription, items: DueDelivery[]): Promise<void> {
+  const { store, now } = drain.deps;
   const filter = compileFilter(sub.filter);
-  return [
-    {
-      rows: kept.flatMap((k) => k.rows),
-      render: () =>
-        renderer.renderDigest(
-          kept.map((k) => k.delivery.event),
-          { detailed: (e) => e.kind === 'new' || filter.isWatchlistHit(e), now },
-        ),
-    },
-  ];
+  const current: DueDelivery[] = [];
+  const stale: string[] = [];
+  for (const item of items) {
+    if (filter.matches(item.event)) current.push(item);
+    else stale.push(item.row.id);
+  }
+  if (stale.length > 0) {
+    await store.markDelivered(stale, now.toISOString());
+    drain.report.filtered += stale.length;
+  }
+  if (current.length === 0) return;
+
+  const kept = sub.filter.dedupAcrossStores === false ? current.map((d) => ({ delivery: d, rows: [d.row] })) : collapseEquivalent(current);
+  if (sub.mode === 'immediate') {
+    for (const entry of kept) await deliverImmediate(drain, sub, entry);
+  } else {
+    await deliverDigest(drain, sub, kept, filter);
+  }
 }
 
-async function runUnit(sub: Subscription, unit: Unit, deps: DrainDeps, progress: Progress, report: DrainReport): Promise<void> {
-  const { store, sender, now } = deps;
-  const webhook = sub.webhookUrl;
-  const webhookSends = (): number => progress.perWebhook.get(webhook) ?? 0;
-  const capReached = (): boolean =>
-    progress.blocked.has(webhook) || progress.sends >= TICK_BUDGET.maxDiscordSends || webhookSends() >= DISCORD.webhookRequestsPer2s;
+/** Messages still allowed for `webhook` in this tick: per-tick cap, per-webhook cap and the shared budget. */
+function allowance(drain: Drain, webhook: string): number {
+  if (drain.blocked.has(webhook)) return 0;
+  const room = Math.min(
+    TICK_BUDGET.maxDiscordSends - drain.sends,
+    DISCORD.webhookRequestsPer2s - (drain.perWebhook.get(webhook) ?? 0),
+    drain.deps.budget?.remaining ?? Number.POSITIVE_INFINITY,
+  );
+  return Math.max(0, room);
+}
 
-  if (capReached()) {
-    report.deferred += unit.rows.length;
+async function deliverImmediate(drain: Drain, sub: Subscription, entry: CollapsedDelivery): Promise<void> {
+  const { store, renderer, now } = drain.deps;
+  if (allowance(drain, sub.webhookUrl) < 1) {
+    drain.report.deferred += entry.rows.length;
     return;
   }
-
-  let messages: DiscordMessage[];
+  let message: DiscordMessage;
   try {
-    messages = unit.render();
+    message = renderer.renderImmediate(entry.delivery.event, { now });
   } catch {
-    report.failed += 1;
-    await failRows(store, unit.rows, { ok: false, retryable: true, retryAfterSeconds: null, status: 0 }, now);
+    drain.report.failed += 1;
+    await failRows(drain, entry.rows, TRANSIENT_FAILURE);
+    return;
+  }
+  const failure = await sendAll(drain, sub.webhookUrl, [message]);
+  if (failure === null) await store.markDelivered(entry.rows.map((r) => r.id), now.toISOString());
+  else await failRows(drain, entry.rows, failure);
+}
+
+async function deliverDigest(drain: Drain, sub: Subscription, kept: CollapsedDelivery[], filter: CompiledFilter): Promise<void> {
+  const { store, renderer, now } = drain.deps;
+  const allRows = kept.flatMap((k) => k.rows);
+  const room = allowance(drain, sub.webhookUrl);
+  if (room < 1) {
+    drain.report.deferred += allRows.length;
     return;
   }
 
-  // An oversized unit is still sent whole when it is first in line; splitting a digest would duplicate on retry.
-  const n = messages.length;
-  if (
-    (progress.sends > 0 && progress.sends + n > TICK_BUDGET.maxDiscordSends) ||
-    (webhookSends() > 0 && webhookSends() + n > DISCORD.webhookRequestsPer2s)
-  ) {
-    report.deferred += unit.rows.length;
+  const detailed = (event: ModEvent): boolean => event.kind === 'new' || filter.isWatchlistHit(event);
+  let fit;
+  try {
+    fit = fitDigestPrefix(
+      kept,
+      room,
+      (k) => detailed(k.delivery.event),
+      (prefix) => renderer.renderDigest(prefix.map((k) => k.delivery.event), { detailed, now }),
+    );
+  } catch {
+    drain.report.failed += 1;
+    await failRows(drain, allRows, TRANSIENT_FAILURE);
     return;
   }
 
-  let failure: FailedResult | null = null;
+  const sentRows = kept.slice(0, fit.count).flatMap((k) => k.rows);
+  drain.report.deferred += allRows.length - sentRows.length;
+  const failure = await sendAll(drain, sub.webhookUrl, fit.messages);
+  if (failure === null) await store.markDelivered(sentRows.map((r) => r.id), now.toISOString());
+  else await failRows(drain, sentRows, failure);
+}
+
+/** Sends in order, stopping at the first failure; returns it, or `null` when every message was accepted. */
+async function sendAll(drain: Drain, webhook: string, messages: DiscordMessage[]): Promise<FailedResult | null> {
+  const { sender, budget } = drain.deps;
   for (const message of messages) {
     let result: SendResult;
-    try {
-      result = await sender.send(webhook, message);
-    } catch {
-      result = { ok: false, retryable: true, retryAfterSeconds: null, status: 0 };
+    if (budget !== undefined && !budget.tryConsume()) {
+      result = TRANSIENT_FAILURE;
+    } else {
+      try {
+        result = await sender.send(webhook, message);
+      } catch {
+        result = TRANSIENT_FAILURE;
+      }
+      drain.sends += 1;
+      drain.perWebhook.set(webhook, (drain.perWebhook.get(webhook) ?? 0) + 1);
     }
-    progress.sends += 1;
-    progress.perWebhook.set(webhook, webhookSends() + 1);
     if (result.ok) {
-      report.sent += 1;
+      drain.report.sent += 1;
       continue;
     }
-    report.failed += 1;
-    failure = result;
-    break;
+    drain.report.failed += 1;
+    if (result.retryable) drain.blocked.add(webhook);
+    return result;
   }
-
-  if (failure === null) {
-    await store.markDelivered(unit.rows.map((r) => r.id));
-    return;
-  }
-  if (failure.retryable) progress.blocked.add(webhook);
-  await failRows(store, unit.rows, failure, now);
+  return null;
 }
 
-async function failRows(store: Store, rows: OutboxRow[], result: FailedResult, now: Date): Promise<void> {
+async function failRows(drain: Drain, rows: OutboxRow[], result: FailedResult): Promise<void> {
+  const { store, now } = drain.deps;
+  let parked = 0;
   for (const row of rows) {
-    const { nextAttemptAt, parked } = scheduleFailure(row, result, now);
-    await store.markFailed(row.id, nextAttemptAt, parked);
+    const next = scheduleFailure(row, result, now);
+    await store.markFailed(row.id, next.nextAttemptAt, next.parked);
+    if (next.parked) parked += 1;
+  }
+  if (parked > 0) {
+    drain.report.parked += parked;
+    console.warn(`outbox parked rows=${parked} status=${result.status}`);
   }
 }
 

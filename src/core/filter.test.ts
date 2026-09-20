@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
 import { makeEvent } from '../testing/fakes.ts';
-import { isWatchlistHit, matchesFilter } from './filter.ts';
+import { isWatchlistHit, matchesFilter, parseFilter } from './filter.ts';
 
 describe('matchesFilter', () => {
   it('accepts everything by default', () => {
@@ -66,5 +66,42 @@ describe('isWatchlistHit', () => {
 
   it('does not partial-match names', () => {
     expect(isWatchlistHit({ watchlist: ['Auth'] }, ev)).toBe(false);
+  });
+});
+
+describe('parseFilter', () => {
+  it('accepts an empty object and every known key', () => {
+    expect(parseFilter({})).toEqual({});
+    const full = {
+      sources: ['thunderstore:valheim'],
+      kinds: ['new', 'update'],
+      allowNsfw: true,
+      watchlist: ['Star'],
+      includeCategories: ['Tools'],
+      excludeCategories: ['Misc'],
+      dedupAcrossStores: false,
+    };
+    expect(parseFilter(full)).toEqual(full);
+  });
+
+  it('drops unknown keys', () => {
+    expect(parseFilter({ allowNsfw: true, extra: 1 })).toEqual({ allowNsfw: true });
+  });
+
+  it.each([
+    ['null', null],
+    ['an array', []],
+    ['a string', 'x'],
+    ['a number', 1],
+    ['sources that is not an array', { sources: 'thunderstore:valheim' }],
+    ['sources with a non-string', { sources: [1] }],
+    ['unknown kind', { kinds: ['new', 'delete'] }],
+    ['allowNsfw as a string', { allowNsfw: 'true' }],
+    ['allowNsfw as a number', { allowNsfw: 1 }],
+    ['dedupAcrossStores as a string', { dedupAcrossStores: 'false' }],
+    ['watchlist with a non-string', { watchlist: [null] }],
+    ['excludeCategories that is an object', { excludeCategories: {} }],
+  ])('rejects %s', (_label, value) => {
+    expect(parseFilter(value)).toBeNull();
   });
 });

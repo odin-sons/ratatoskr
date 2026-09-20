@@ -33,8 +33,9 @@ export const CLOUDFLARE = {
 } as const;
 
 /**
- * Per-tick budget. Caps sum to well under `CLOUDFLARE.subrequestsPerInvocation`;
- * whatever exceeds a cap is deferred to the next tick.
+ * Per-tick caps per category. Their sum can exceed `CLOUDFLARE.subrequestsPerInvocation`;
+ * the shared `SubrequestBudget` (core/budget.ts) enforces the real limit and
+ * whatever exceeds a cap or the budget is deferred to the next tick.
  */
 export const TICK_BUDGET = {
   maxListingFetches: 6,
@@ -43,6 +44,29 @@ export const TICK_BUDGET = {
   /** Outbox rows taken per drain. */
   maxOutboxRows: 400,
 } as const;
+
+/** Subrequests kept unspent as headroom below the platform limit. */
+export const SUBREQUEST_SAFETY_MARGIN = 2;
+
+/** Subrequests one invocation may spend across polls, sends and changelog fetches. */
+export const SUBREQUEST_LIMIT = CLOUDFLARE.subrequestsPerInvocation - SUBREQUEST_SAFETY_MARGIN;
+
+/** Changelog fetches leave this many subrequests unspent so Discord sends are never starved by them. */
+export const SUBREQUEST_SEND_RESERVE = TICK_BUDGET.maxDiscordSends;
+
+/** Timeout for one Discord webhook request. */
+export const DISCORD_SEND_TIMEOUT_MS = 10_000;
+
+export const MS_PER_DAY = 86_400_000;
+
+/** Delivered outbox rows are kept this long as the idempotency guard, then purged by reconciliation. */
+export const DELIVERED_RETENTION_DAYS = 7;
+
+/** Most delivered outbox rows deleted per reconcile run. */
+export const OUTBOX_PURGE_BATCH = 1000;
+
+/** Proportional re-renders tried when a digest exceeds its message allowance, before the prefix is halved. */
+export const DIGEST_FIT_ATTEMPTS = 3;
 
 /** Outbox rows whose attempts reach this are parked, not retried. */
 export const OUTBOX_MAX_ATTEMPTS = 8;
@@ -54,6 +78,8 @@ export const OUTBOX_BACKOFF = { baseSeconds: 30, maxSeconds: 3600 } as const;
 export const CADENCE = {
   tickMinutes: 5,
   hexiumIndexEveryNthTick: 3,
+  /** Number of reconcile cron triggers per day; `src/cloudflare/crons.ts` must list this many. */
+  reconcileRunsPerDay: 3,
 } as const;
 
 /** Cross-store dedup window. Source: docs/spec.md "What counts as an update". */

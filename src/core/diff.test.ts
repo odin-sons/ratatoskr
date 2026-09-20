@@ -29,6 +29,32 @@ describe('diffSnapshots', () => {
     expect(events[0]).toMatchObject({ kind: 'update', versionFrom: '1.0.0', versionTo: '1.1.0' });
   });
 
+  it('emits update with versionFrom = previousVersion for an unseen package that has one', () => {
+    const snap = makeSnapshot({ packageId: 'A-B', version: '1.1.0', previousVersion: '1.0.0' });
+    const { events } = diffSnapshots(new Map(), [snap], now);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: 'update', versionFrom: '1.0.0', versionTo: '1.1.0' });
+  });
+
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['empty', ''],
+    ['equal to the current version', '1.1.0'],
+  ])('emits new for an unseen package whose previousVersion is %s', (_label, previousVersion) => {
+    const snap = makeSnapshot({ packageId: 'A-B', version: '1.1.0', previousVersion });
+    expect(diffSnapshots(new Map(), [snap], now).events[0]).toMatchObject({ kind: 'new', versionFrom: null });
+  });
+
+  it('ignores previousVersion for a known package and keeps the version-change rule', () => {
+    const snap = makeSnapshot({ packageId: 'A-B', version: '1.2.0', previousVersion: '0.5.0' });
+    expect(diffSnapshots(new Map([['A-B', '1.1.0']]), [snap], now).events[0]).toMatchObject({
+      kind: 'update',
+      versionFrom: '1.1.0',
+    });
+    expect(diffSnapshots(new Map([['A-B', '1.2.0']]), [snap], now).events).toEqual([]);
+  });
+
   it('emits nothing for the same version', () => {
     const snap = makeSnapshot({ packageId: 'A-B', version: '1.0.0' });
     expect(diffSnapshots(new Map([['A-B', '1.0.0']]), [snap], now).events).toEqual([]);

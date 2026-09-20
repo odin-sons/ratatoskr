@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { renderDigest, renderImmediate } from '../render/index.ts';
-import { CADENCE, CLOUDFLARE, TICK_BUDGET } from './constants.ts';
+import { SubrequestBudget } from './budget.ts';
+import {
+  CADENCE,
+  CLOUDFLARE,
+  DELIVERED_RETENTION_DAYS,
+  MS_PER_DAY,
+  OUTBOX_PURGE_BATCH,
+  SUBREQUEST_SEND_RESERVE,
+  TICK_BUDGET,
+} from './constants.ts';
 import { dedupeSnapshots, diffSnapshots } from './diff.ts';
 import { drainOutbox, type Renderer } from './drain.ts';
 import { compileFilter } from './filter.ts';
@@ -20,6 +29,8 @@ export interface TickDeps {
   clock: Clock;
   /** Defaults to the real renderer; tests inject a stub. */
   renderer?: Renderer;
+  /** Reconcile cron triggers per day; defaults to `CADENCE.reconcileRunsPerDay`. */
+  reconcileRunsPerDay?: number;
 }
 
 export interface SourceReport {
@@ -34,8 +45,18 @@ export interface TickReport {
   sent: number;
   failed: number;
   changelogFetches: number;
-  /** Units of work left for the next tick: sources not polled, changelog fetches skipped, outbox rows not attempted. */
+  /** Changelog jobs dropped because of a cap or the subrequest budget. They are not retried. */
+  changelogSkipped: number;
+  /** Work that runs later: sources not polled this tick and outbox rows not attempted. */
   deferred: number;
+  /** Outbox rows parked in this run. */
+  parked: number;
+  /** Due rows no longer matching their subscription's filter; marked delivered without sending. */
+  filtered: number;
+  /** Delivered outbox rows deleted by a reconcile run. */
+  purged: number;
+  /** Subrequests spent: source fetches, changelog fetches and Discord sends. */
+  subrequests: number;
   drainError?: string;
 }
 
@@ -57,15 +78,18 @@ interface SourceOutcome {
 
 interface Run {
   deps: TickDeps;
+  budget: SubrequestBudget;
   now: Date;
   nowIso: string;
   tickIndex: number;
+  sliceHint: number | undefined;
   subs: CompiledSubscription[];
 }
 
 export async function runTick(deps: TickDeps, scheduledTimeMs: number): Promise<TickReport> {
   const report = newReport();
-  const run = await startRun(deps, scheduledTimeMs, report);
+  const budget = new SubrequestBudget();
+  const run = await startRun(deps, budget, scheduledTimeMs, undefined, report);
   const enabled = deps.adapters.filter((a) => {
     if (a.config.enabled) return true;
     report.sources[a.config.id] = { status: 'disabled', events: 0 };
@@ -77,7 +101,7 @@ export async function runTick(deps: TickDeps, scheduledTimeMs: number): Promise<
     let fetches = 0;
     for (const adapter of rotate(enabled, run.tickIndex)) {
       const id = adapter.config.id;
-      if (fetches >= TICK_BUDGET.maxListingFetches) {
+      if (fetches >= TICK_BUDGET.maxListingFetches || budget.remaining <= 0) {
         report.sources[id] = { status: 'deferred', events: 0 };
         report.deferred += 1;
         continue;
@@ -88,12 +112,15 @@ export async function runTick(deps: TickDeps, scheduledTimeMs: number): Promise<
       jobs.push(...outcome.jobs);
     }
   }
-  return finish(deps, report, jobs, run?.now ?? deps.clock.now());
+  return finish(deps, budget, report, jobs, run?.now ?? deps.clock.now());
 }
 
 export async function runReconcile(deps: TickDeps, scheduledTimeMs: number, reconcileIndex: number): Promise<TickReport> {
   const report = newReport();
-  const run = await startRun(deps, scheduledTimeMs, report);
+  const budget = new SubrequestBudget();
+  const runsPerDay = deps.reconcileRunsPerDay ?? CADENCE.reconcileRunsPerDay;
+  const sliceHint = Math.floor(scheduledTimeMs / MS_PER_DAY) * runsPerDay + reconcileIndex;
+  const run = await startRun(deps, budget, scheduledTimeMs, sliceHint, report);
   const candidates = deps.adapters.filter((a) => a.config.enabled && a.reconcile !== undefined);
   const jobs: ChangelogJob[] = [];
 
@@ -103,20 +130,50 @@ export async function runReconcile(deps: TickDeps, scheduledTimeMs: number, reco
     report.sources[adapter.config.id] = outcome.report;
     jobs.push(...outcome.jobs);
   }
-  return finish(deps, report, jobs, run?.now ?? deps.clock.now());
+  const now = run?.now ?? deps.clock.now();
+  await finish(deps, budget, report, jobs, now);
+  report.purged = await purgeDelivered(deps, now);
+  return report;
 }
 
 function newReport(): TickReport {
-  return { sources: {}, sent: 0, failed: 0, changelogFetches: 0, deferred: 0 };
+  return {
+    sources: {},
+    sent: 0,
+    failed: 0,
+    changelogFetches: 0,
+    changelogSkipped: 0,
+    deferred: 0,
+    parked: 0,
+    filtered: 0,
+    purged: 0,
+    subrequests: 0,
+  };
 }
 
-async function startRun(deps: TickDeps, scheduledTimeMs: number, report: TickReport): Promise<Run | null> {
+async function purgeDelivered(deps: TickDeps, now: Date): Promise<number> {
+  const cutoff = new Date(now.getTime() - DELIVERED_RETENTION_DAYS * MS_PER_DAY).toISOString();
+  try {
+    return await deps.store.purgeDelivered(cutoff, OUTBOX_PURGE_BATCH);
+  } catch (err) {
+    console.warn(`purge of delivered outbox rows failed: ${errorMessage(err)}`);
+    return 0;
+  }
+}
+
+async function startRun(
+  deps: TickDeps,
+  budget: SubrequestBudget,
+  scheduledTimeMs: number,
+  sliceHint: number | undefined,
+  report: TickReport,
+): Promise<Run | null> {
   const now = deps.clock.now();
   try {
     const subs = (await deps.store.listSubscriptions())
       .filter((s) => s.enabled)
       .map((sub) => ({ sub, filter: compileFilter(sub.filter) }));
-    return { deps, now, nowIso: now.toISOString(), tickIndex: Math.floor(scheduledTimeMs / TICK_MS), subs };
+    return { deps, budget, now, nowIso: now.toISOString(), tickIndex: Math.floor(scheduledTimeMs / TICK_MS), sliceHint, subs };
   } catch (err) {
     report.drainError = `listSubscriptions failed: ${errorMessage(err)}`;
     for (const a of deps.adapters) {
@@ -126,17 +183,21 @@ async function startRun(deps: TickDeps, scheduledTimeMs: number, report: TickRep
   }
 }
 
-async function finish(deps: TickDeps, report: TickReport, jobs: ChangelogJob[], now: Date): Promise<TickReport> {
-  await fetchChangelogs(deps.store, jobs, report);
+async function finish(deps: TickDeps, budget: SubrequestBudget, report: TickReport, jobs: ChangelogJob[], now: Date): Promise<TickReport> {
+  await fetchChangelogs(deps, budget, jobs, report);
   const drained = await drainOutbox({
     store: deps.store,
     sender: deps.sender,
     renderer: deps.renderer ?? defaultRenderer,
     now,
+    budget,
   });
   report.sent += drained.sent;
   report.failed += drained.failed;
   report.deferred += drained.deferred;
+  report.parked += drained.parked;
+  report.filtered += drained.filtered;
+  report.subrequests = budget.used;
   if (drained.error !== undefined) report.drainError ??= drained.error;
   return report;
 }
@@ -155,12 +216,13 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
   const id = adapter.config.id;
   const state = await store.getSourceState(id);
   const ctx: PollContext = {
-    fetch: deps.fetch,
+    fetch: run.budget.wrapFetch(deps.fetch),
     userAgent: deps.config.userAgent,
     state,
     tickIndex: run.tickIndex,
     now,
     secrets: deps.secrets,
+    ...(run.sliceHint === undefined ? {} : { sliceHint: run.sliceHint }),
   };
 
   if (kind === 'reconcile' && (state === null || !state.bootstrapped)) {
@@ -216,16 +278,18 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
   return { report: { status: 'ok', events: events.length }, jobs, fetched: true };
 }
 
-async function fetchChangelogs(store: Store, jobs: ChangelogJob[], report: TickReport): Promise<void> {
-  const selected = jobs.slice(0, TICK_BUDGET.maxChangelogFetches);
-  report.deferred += jobs.length - selected.length;
+async function fetchChangelogs(deps: TickDeps, budget: SubrequestBudget, jobs: ChangelogJob[], report: TickReport): Promise<void> {
+  const allowed = Math.max(0, Math.min(TICK_BUDGET.maxChangelogFetches, budget.remaining - SUBREQUEST_SEND_RESERVE));
+  const selected = jobs.slice(0, allowed);
+  report.changelogSkipped += jobs.length - selected.length;
   report.changelogFetches += selected.length;
+  const changelogFetch = budget.wrapFetch(deps.fetch, SUBREQUEST_SEND_RESERVE);
   for (let i = 0; i < selected.length; i += CLOUDFLARE.simultaneousConnections) {
     await Promise.all(
       selected.slice(i, i + CLOUDFLARE.simultaneousConnections).map(async ({ adapter, ctx, event }) => {
         try {
-          const { excerpt, url } = await adapter.fetchChangelog(ctx, event.pkg, event.versionTo);
-          if (excerpt !== null || url !== null) await store.setEventChangelog(event.id, excerpt, url);
+          const { excerpt, url } = await adapter.fetchChangelog({ ...ctx, fetch: changelogFetch }, event.pkg, event.versionTo);
+          if (excerpt !== null || url !== null) await deps.store.setEventChangelog(event.id, excerpt, url);
         } catch {
           // Ignored: a missing changelog never blocks delivery.
         }

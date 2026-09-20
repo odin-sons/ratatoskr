@@ -12,7 +12,10 @@ export function dedupeSnapshots(snapshots: PackageSnapshot[]): PackageSnapshot[]
   return [...byId.values()];
 }
 
-/** Unknown id → `new`; known with a different version → `update`; same version → nothing (timestamps never trigger). */
+/**
+ * Known with a different version → `update`; same version → nothing (timestamps never trigger).
+ * Unknown id → `update` when the snapshot carries a distinct `previousVersion`, otherwise `new`.
+ */
 export function diffSnapshots(
   known: Map<string, string>,
   snapshots: PackageSnapshot[],
@@ -23,10 +26,11 @@ export function diffSnapshots(
   for (const pkg of dedupeSnapshots(snapshots)) {
     const knownVersion = known.get(pkg.packageId);
     if (knownVersion === pkg.version) continue;
+    const versionFrom = knownVersion ?? seenBefore(pkg);
     events.push({
       id: eventId(pkg.source, pkg.packageId, pkg.version),
-      kind: knownVersion === undefined ? 'new' : 'update',
-      versionFrom: knownVersion ?? null,
+      kind: versionFrom === null ? 'new' : 'update',
+      versionFrom,
       versionTo: pkg.version,
       changelog: null,
       changelogUrl: null,
@@ -36,4 +40,9 @@ export function diffSnapshots(
     });
   }
   return { events };
+}
+
+function seenBefore(pkg: PackageSnapshot): string | null {
+  const previous = pkg.previousVersion;
+  return previous !== undefined && previous !== null && previous !== '' && previous !== pkg.version ? previous : null;
 }

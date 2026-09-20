@@ -54,4 +54,65 @@ describe('fanOut', () => {
     const { detailedEventIds } = await fanOut([fresh, hit, plain], [sub], new MemoryStore(), now);
     expect([...detailedEventIds].sort()).toEqual([fresh.id, hit.id].sort());
   });
+
+  describe('cross-store lookups', () => {
+    const counting = (store = new MemoryStore()) => {
+      const calls: string[][] = [];
+      return {
+        calls,
+        store: {
+          recentEventsByReleaseKeys: (keys: string[], since: string) => {
+            calls.push(keys);
+            return store.recentEventsByReleaseKeys(keys, since);
+          },
+        },
+      };
+    };
+
+    it('queries once for the whole batch, with each release key once', async () => {
+      const { calls, store } = counting();
+      const events = Array.from({ length: 30 }, (_, i) => makeEvent({ pkg: { packageId: `O${i}-M`, owner: `O${i}`, name: 'M' } }));
+      const subs = [compiled(makeSubscription({ id: 'a' })), compiled(makeSubscription({ id: 'b' }))];
+      await fanOut(events, subs, store, now);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toHaveLength(30);
+      expect(new Set(calls[0]).size).toBe(30);
+    });
+
+    it('does not query when no event needs a cross-store check', async () => {
+      const { calls, store } = counting();
+      const noDedup = compiled(makeSubscription({ filter: { dedupAcrossStores: false } }));
+      await fanOut([makeEvent()], [noDedup], store, now);
+      const rejecting = compiled(makeSubscription({ filter: { kinds: ['update'] } }));
+      await fanOut([makeEvent()], [rejecting], store, now);
+      await fanOut([], [compiled()], store, now);
+      expect(calls).toEqual([]);
+    });
+
+    it('only asks about events some dedup-enabled subscription would receive', async () => {
+      const { calls, store } = counting();
+      const wanted = makeEvent({ pkg: { packageId: 'A-New', owner: 'A', name: 'New' } });
+      const nsfw = makeEvent({ pkg: { packageId: 'B-Nsfw', owner: 'B', name: 'Nsfw', isNsfw: true } });
+      await fanOut([wanted, nsfw], [compiled()], store, now);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toHaveLength(1);
+    });
+
+    it('suppresses only when the other-store event also matches that subscription filter', async () => {
+      const memory = new MemoryStore();
+      const ts = makeEvent({ pkg: { store: 'thunderstore', owner: 'Au', name: 'Mod', version: '1.0.0' } });
+      const hx = makeEvent({ pkg: { store: 'hexium', owner: 'Au', name: 'Mod', version: '1.0.0' } });
+      await memory.commit({
+        source: ts.pkg.source,
+        packages: [],
+        events: [ts],
+        outbox: [],
+        state: { id: ts.pkg.source, cursor: null, etag: null, bootstrapped: true, lastOkAt: null },
+      });
+      const open = compiled(makeSubscription({ id: 'open' }));
+      const hxOnly = compiled(makeSubscription({ id: 'hx-only', filter: { sources: [hx.pkg.source] } }));
+      const { rows } = await fanOut([hx], [open, hxOnly], memory, now);
+      expect(rows.map((r) => r.subscriptionId)).toEqual(['hx-only']);
+    });
+  });
 });

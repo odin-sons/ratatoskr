@@ -27,11 +27,13 @@ export function nextDigestBoundary(now: Date, intervalMin: number): string {
  * Creates one outbox row per (subscription, event) pair that matches the
  * subscription's filter. Skips a pair when the same release from another
  * store already produced an event that this subscription's filter also accepts.
+ *
+ * Cost: O(events x subscriptions) filter checks, one store query per call.
  */
 export async function fanOut(
   events: ModEvent[],
   subs: CompiledSubscription[],
-  store: Pick<Store, 'recentEventsByReleaseKey'>,
+  store: Pick<Store, 'recentEventsByReleaseKeys'>,
   now: Date,
 ): Promise<FanOutResult> {
   const rows: OutboxRow[] = [];
@@ -39,13 +41,21 @@ export async function fanOut(
   const nowIso = now.toISOString();
   const sinceIso = new Date(now.getTime() - DEDUP_WINDOW_HOURS * 3_600_000).toISOString();
 
+  const matched: { event: ModEvent; subs: CompiledSubscription[] }[] = [];
+  const keys = new Set<string>();
   for (const event of events) {
-    let recent: ModEvent[] | undefined;
-    for (const { sub, filter } of subs) {
-      if (!filter.matches(event)) continue;
-      if (sub.filter.dedupAcrossStores !== false) {
-        recent ??= await store.recentEventsByReleaseKey(releaseKey(event.pkg, event.versionTo), sinceIso);
-        if (recent.some((r) => r.id !== event.id && r.pkg.store !== event.pkg.store && filter.matches(r))) continue;
+    const receivers = subs.filter(({ filter }) => filter.matches(event));
+    if (receivers.length === 0) continue;
+    matched.push({ event, subs: receivers });
+    if (receivers.some(({ sub }) => sub.filter.dedupAcrossStores !== false)) keys.add(releaseKey(event.pkg, event.versionTo));
+  }
+  const recent = keys.size === 0 ? new Map<string, ModEvent[]>() : await store.recentEventsByReleaseKeys([...keys], sinceIso);
+
+  for (const { event, subs: receivers } of matched) {
+    const others = recent.get(releaseKey(event.pkg, event.versionTo)) ?? [];
+    for (const { sub, filter } of receivers) {
+      if (sub.filter.dedupAcrossStores !== false && others.some((r) => r.id !== event.id && r.pkg.store !== event.pkg.store && filter.matches(r))) {
+        continue;
       }
       rows.push({
         id: outboxId(sub.id, event.id),
