@@ -141,6 +141,11 @@ Until then, use the manual steps below.
    pnpm run deploy
    ```
 
+   To keep your real `database_id` out of git, copy `wrangler.jsonc` to
+   `wrangler.local.jsonc` (git-ignored), put the id there and deploy with
+   `pnpm run deploy:local`. Pass `-c wrangler.local.jsonc` to the other
+   `wrangler` commands as well.
+
 ## Configuration
 
 ### `ratatoskr.config.json`

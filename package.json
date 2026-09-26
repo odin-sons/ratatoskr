@@ -16,7 +16,8 @@
     "validate-config": "node --experimental-strip-types scripts/validate-config.ts",
     "add-subscription": "node --experimental-strip-types scripts/add-subscription.ts",
     "check": "pnpm typecheck && pnpm test && pnpm validate-config",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "deploy:local": "wrangler deploy -c wrangler.local.jsonc"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260918.1",
