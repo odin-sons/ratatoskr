@@ -117,9 +117,12 @@ Until then, use the manual steps below.
    not run it. Review the output, then run it.
 
    ```sh
-   export DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/<id>/<token>'
+   cp .env.example .env   # then put the webhook URL into .env (git-ignored)
    pnpm add-subscription --guild-id <guild id> --webhook-url-env DISCORD_WEBHOOK_URL
    ```
+
+   `pnpm add-subscription` loads `.env` automatically; a variable already
+   exported in your shell takes precedence over the file.
 
    The webhook URL is a credential: anyone holding it can post to the channel.
    Passing it with `--webhook-url` leaves it in your shell history, so prefer

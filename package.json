@@ -14,7 +14,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "validate-config": "node --experimental-strip-types scripts/validate-config.ts",
-    "add-subscription": "node --experimental-strip-types scripts/add-subscription.ts",
+    "add-subscription": "node --env-file-if-exists=.env --experimental-strip-types scripts/add-subscription.ts",
     "check": "pnpm typecheck && pnpm test && pnpm validate-config",
     "deploy": "wrangler deploy",
     "deploy:local": "wrangler deploy -c wrangler.local.jsonc"

@@ -6,3 +6,4 @@ dist/
 .env
 .env.*
 wrangler.local.jsonc
+!.env.example
