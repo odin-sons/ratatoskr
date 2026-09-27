@@ -103,7 +103,7 @@ Until then, use the manual steps below.
 
    Upgrading an existing database: apply the files in `migrations/` you have not
    applied yet, in order, before `schema.sql`
-   (`wrangler d1 execute ratatoskr --remote --file=./migrations/0001_outbox_delivered_at.sql`).
+   (for example `wrangler d1 execute ratatoskr --remote --file=./migrations/0002_package_download_url_and_downloads.sql`).
    A database created from the current `schema.sql` needs none of them.
 
 4. Review `ratatoskr.config.json` (sources, game, User-Agent) and validate it.
@@ -145,9 +145,10 @@ Until then, use the manual steps below.
    ```
 
    To keep your real `database_id` out of git, copy `wrangler.jsonc` to
-   `wrangler.local.jsonc` (git-ignored), put the id there and deploy with
-   `pnpm run deploy:local`. Pass `-c wrangler.local.jsonc` to the other
-   `wrangler` commands as well.
+   `wrangler.local.jsonc` (git-ignored) and put the id there. `pnpm run deploy`
+   uses that file when it exists and loads `.env`, so the optional store emoji
+   (`STORE_EMOJI_*`, see below) reach the Worker without being committed. Pass
+   `-c wrangler.local.jsonc` to the other `wrangler` commands as well.
 
 ## Configuration
 
@@ -175,6 +176,51 @@ in CI) and not bundled into the Worker.
   or Nexus game domain.
 - `sources[].enabled`: Nexus is disabled by default. The validator warns if a
   Nexus source is enabled.
+
+### Store emoji (`STORE_EMOJIS`)
+
+Optional. Messages can show a custom emoji per store at the start of the info
+line (`<emoji> Updated mod by ...`) and of each per-store digest heading. It is
+a Worker variable, an object (or a JSON string of one) keyed by store:
+
+```json
+{
+  "thunderstore": "<:thunderstore:123456789012345678>",
+  "hexium": "<:hexium:123456789012345678>",
+  "nexus": "<:nexus:123456789012345678>"
+}
+```
+
+- Values are full Discord emoji markup, `<:name:id>` (or `<a:name:id>` for an
+  animated one); plain `:name:` does not work through the API. To get the
+  markup, type `\:name:` in a Discord message and copy what it shows.
+- They must be custom emoji from a server the webhook can use; the safest choice
+  is an emoji of the server that owns the channel. Otherwise Discord shows the
+  raw `<:name:id>` text.
+- Each value must match `<a?:[A-Za-z0-9_]{2,32}:[0-9]{17,20}>`. Invalid
+  entries and unknown keys are ignored (one warning in the log names only the
+  keys); a store without an entry shows no emoji.
+- `wrangler.jsonc` ships `"vars": { "STORE_EMOJIS": {} }`. The easy way to set
+  it: put `STORE_EMOJI_THUNDERSTORE`, `STORE_EMOJI_HEXIUM` and `STORE_EMOJI_NEXUS`
+  in the git-ignored `.env` (see `.env.example`); `pnpm run deploy` validates them
+  and passes them to the Worker as `STORE_EMOJIS`. You can also set the variable
+  in the git-ignored `wrangler.local.jsonc`. Do not commit your ids. Always
+  deploy with `pnpm run deploy` on a machine that has your `.env`: a plain
+  `wrangler deploy`, or a CI deploy without those variables, publishes the
+  config's empty `STORE_EMOJIS` and the emoji silently disappear.
+
+### Message format
+
+Immediate messages, new packages and watchlist hits are one embed: a linked h1
+title (`# [Name 1.2.2 -> 1.2.3](url)`), an info line (`⬆️ Updated mod by Owner ·
+94.2 MB · <relative time>`, or `🆕 New mod by ...`), the description excerpt,
+fields (an optional Changelog, Total downloads and Categories) and the store name in
+the footer. Immediate messages also carry link
+buttons (`Mod page`, and `Download` when the source provides a direct download
+URL); Discord only shows them because the bot sends `with_components=true`. Every
+message ends with a small `-# ratatoskr v<version>` line, the last field of its last
+embed, linking to the source repository (the AGPL notice). In immediate mode every update also gets a
+changelog excerpt, within the per-tick fetch cap; digest updates stay compact.
 
 ### Subscriptions
 

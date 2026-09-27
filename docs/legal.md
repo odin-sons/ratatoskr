@@ -7,9 +7,10 @@ Not legal advice. This is the working position the project operates under.
 - `LICENSE` at the repository root.
 - `// SPDX-License-Identifier: AGPL-3.0-or-later` header in every source file.
 - AGPL's network clause requires that users of the running service can obtain
-  the source. For a Discord bot that means a visible link in the output: an
-  embed footer or an `/about` line along the lines of
-  `ratatoskr v0.1.0 · source: github.com/odin-sons/ratatoskr`.
+  the source. For a Discord bot that means a visible link in the output. Every
+  message ends with a small linked line, `ratatoskr v0.1.0`, pointing at
+  `github.com/odin-sons/ratatoskr`, as the last field of its last embed
+  (embed footers cannot carry links).
   This also answers "what is this thing posting in our channel".
 
 AGPL was chosen over GPL deliberately: this is server-side software, and plain

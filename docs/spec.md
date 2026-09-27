@@ -86,19 +86,21 @@ Hexium therefore runs on a **split cadence**:
   nothing is ever emitted from lean index data. The index has no NSFW or
   deprecated flag, so those come from the lookup and fail closed: a missing
   community entry or a `has_nsfw_content` other than boolean `false` means NSFW,
-  a non-boolean `is_deprecated` quarantines the candidate. A package the
+  a non-boolean `is_deprecated` quarantines the candidate (a listing item and a lookup alike). A package the
   listing already delivered at the same version needs no lookup
 
 Updates on Hexium arrive with up to 15 minutes of latency, plus one scan
 interval per 15 pending changes. That is acceptable for a digest that fires
 every 30 minutes anyway. Neither the listing nor the index honours
 `If-None-Match` (no `ETag`, no `Last-Modified`), so every scan downloads the
-whole index; do not raise the cadence without measuring. A scan costs ~1.5 ms
-CPU at 1318 lines (4 ms for the whole tick, 7 ms at the 3000-line cap
-`HEXIUM_INDEX_MAX_LINES`; `docs/api-notes.md` has the numbers). An index beyond
-the caps, or one that cannot be read, is skipped with one log line and the
-listing result is kept; the source then only sees new packages until the cap is
-raised.
+whole index; do not raise the cadence without measuring. A scan with comparison
+costs ~1.9-2.7 ms CPU cold at 1318 lines and about 4.3 ms including decode and the
+stored-version map at the 3500-line cap `HEXIUM_INDEX_MAX_LINES` (`docs/api-notes.md`
+has the numbers and the growth estimate: the cap is reached in about two months). An
+index beyond the caps, or one that cannot be read, is skipped and the listing result
+is kept; the source then only sees new packages. That degradation is not silent: the
+poll result carries `warnings`, which the core puts in the source report and the run
+log line.
 
 - **Cold start** seeds every package from the index as a lean snapshot (index
   version, size, `isNsfw` and `isDeprecated` false, no metadata) in 8 stable
@@ -111,7 +113,9 @@ raised.
   cursor is `seed:<next slice>`; a cursor that is out of range or of an older
   format restarts at slice 0, and the cursor is empty after the last slice.
   Packages created while seeding are found by the first index scans after
-  bootstrap as unseen packages.
+  bootstrap as unseen packages. A poll whose index has more unreadable lines than
+  `max(3, 1%)` seeds nothing, keeps the cursor and warns, so a transient glitch cannot
+  leave holes that would later be announced as new packages.
 
 ### Reconciliation
 
@@ -179,6 +183,8 @@ CREATE TABLE packages (
   owner TEXT NOT NULL,
   url TEXT NOT NULL,
   icon_url TEXT,
+  download_url TEXT,                -- direct download link for the Download button, nullable, sticky like icon_url
+  downloads INTEGER,                -- total download count, nullable; the latest non-null value wins
   categories TEXT,                  -- JSON array
   is_nsfw INTEGER NOT NULL DEFAULT 0,
   is_deprecated INTEGER NOT NULL DEFAULT 0,
@@ -244,7 +250,8 @@ subscriptions.
 
 `schema.sql` creates a fresh database and does not alter existing tables. A change
 to an existing table ships as a numbered file in `migrations/`, applied once
-(`0001_outbox_delivered_at.sql` adds `outbox.delivered_at` and its indexes); a test
+(`0001_outbox_delivered_at.sql` adds `outbox.delivered_at` and its indexes,
+`0002_package_download_url_and_downloads.sql` adds `packages.download_url` and `packages.downloads`); a test
 applies each migration over the previous schema shape and runs the current queries.
 
 ## Volume
@@ -286,11 +293,87 @@ every two minutes. Default output is therefore a digest.
 
 - New packages: full embeds with icon and description. There are only tens per
   day and they deserve the space.
-- Updates: a compact list, one embed per store with its own colour and footer.
+- Updates: a compact list, one embed per store with its own colour and a heading
+  line carrying the store and the count.
 - Digest interval per subscription, default 30 minutes.
-- Changelog excerpts only for packages the subscription shows in detail — new
-  packages and watchlist hits. This keeps changelog fetches in the tens per day
-  rather than the hundreds.
+- Changelog excerpts only for packages shown in detail: new packages, watchlist
+  hits, and every event delivered to an `immediate` subscription (see "Detailed
+  events and changelogs").
+
+### Message layout
+
+Every text is untrusted upstream data: names, owners, versions and descriptions
+go through the escaping and mention-neutralising in `src/render/text.ts`; URLs are
+validated http(s) and percent-encoded; `allowed_mentions.parse` is always `[]`.
+
+**Detailed embed** (new packages, watchlist hits, every immediate message). There
+is no embed `title`, `url` or `timestamp`; the description is
+
+```
+# [Name 1.2.2 -> 1.2.3](package url)                       h1 link; new packages: # [Name 1.0.0](url)
+{store emoji }⬆️ Updated mod by Owner · 94.2 MB · <t:UNIX:R>   🆕 New mod by Owner ... for new packages
+Also on [Hexium](url)                                       only when the release exists on other stores
+(blank line)
+description excerpt                                         only when there is one
+```
+
+followed by the fields, in this order: `Changelog` (full width, only when there is
+one), `Total downloads` (inline; `12,345`, grouped by a small manual function, `0`
+shown, omitted when the count is unknown or not a non-negative safe number),
+`Categories` (inline; escaped names, at most 8 entries of at most 32 characters and
+200 characters in total, a cut list ends with `…`, omitted when empty) and, last,
+the project field (below). The kind emoji are `KIND_EMOJI` in `src/render/layout.ts`
+(update: U+2B06 U+FE0F).
+
+- `<t:UNIX:R>` is a Discord relative timestamp (viewer-local; hovering shows the
+  full local time). It uses `pkg.updatedAt`, then the event's `createdAt`, then the
+  render time; the style letter is `DISCORD.timestampStyleRelative`.
+- Owner is plain escaped text; missing owner, size or timestamp drop their part of
+  the line. Without a usable package URL the heading is not a link.
+- The changelog field, the thumbnail and the store colour bar are as before. The
+  footer is only the store label (`Thunderstore`).
+- Immediate messages (`renderImmediate`) additionally carry one action row of
+  link buttons: `Mod page` (`pkg.url`) and `Download` (`pkg.downloadUrl`, only when
+  present). Only http(s) URLs without credentials, at most 512 characters (label at
+  most 80, at most 5 buttons) are kept; an invalid one drops its button and no
+  `components` field is sent when none remain. Non-application webhooks may send
+  non-interactive components when the request has `?with_components=true`, which
+  `DiscordSender` adds only when the payload has components. Digest messages
+  never carry buttons.
+
+**Compact list embed** (digest updates). The first description line is the
+heading `{emoji }**Thunderstore** · 37 updates` (the count of that embed; a store
+split over several embeds gets one heading each), followed by one line per mod.
+Footers cannot render custom emoji or links, so list embeds have no footer.
+
+**Project link** (AGPL notice). The last field of the last embed of every message is
+non-inline, named with a zero-width space (Discord requires a non-empty name) and
+valued `-# [ratatoskr v0.1.0](https://github.com/odin-sons/ratatoskr)`, built from
+`PROJECT` (`PROJECT_FIELD` in `src/render/layout.ts`). It is not part of any
+description. A paged digest keeps its `(i/n)` suffix in the footer of the last embed
+(`Thunderstore · (2/3)` or just `(2/3)` when that embed is a list). The packer
+reserves room for the field and the suffix up front (`TEXT_BUDGET`); an embed holds at
+most three other fields, so the 25-field and 1024-character value limits cannot be
+hit, and the line can never be dropped or push a message beyond 6000 characters.
+Tests assert that every message ends with it, including pathological digests.
+
+**Store emoji.** The optional Worker setting `STORE_EMOJIS` (an object or JSON
+string keyed by store) holds full custom emoji markup, validated with
+`^<a?:[A-Za-z0-9_]{2,32}:[0-9]{17,20}>$`. It is parsed once per invocation
+(`parseStoreEmojis`; invalid entries are ignored with one warning naming only the
+keys), carried in `TickDeps`/`DrainDeps` to every render call, and re-validated by
+the renderer. A store without an entry shows no emoji.
+
+### Detailed events and changelogs
+
+An event is fetched with a changelog when at least one subscription receiving it
+shows it in detail: it is a new package, or a watchlist hit of a digest
+subscription, or the subscription is `immediate` (every immediate message is a
+detailed embed). The per-tick caps are unchanged: at most
+`maxChangelogFetches` fetches, always leaving the send reserve of the shared
+subrequest budget unspent; the remainder is rendered without a changelog and counted
+in `changelogSkipped`. Many mods ship no `CHANGELOG.md`; their field is simply
+omitted.
 
 ### Progressive delivery
 
@@ -342,7 +425,8 @@ backlog (two renders, 250 then 177 entries).
 ### Discord limits
 
 Every number here is an external constraint. Put them in one constants module
-with this file cited.
+with this file cited. Message components (link buttons): at most 5 action rows and
+5 buttons per row, label at most 80 characters, URL at most 512 characters.
 
 | Limit | Value | Status |
 |---|---|---|
@@ -367,8 +451,9 @@ figures.
 **A mod is never dropped from a digest.** Secondary information may be omitted;
 positions may not. Degrade detail first, then add messages.
 
-Draft — to be finalised during implementation, including exact formats and
-where the store icon goes:
+Draft — implemented in `src/render`. Each list embed opens with its store heading
+line and the message ends with the project field (see "Message layout"); the ladder
+counts only the item lines:
 
 ```
 L0  **[Name](url)** 1.2.3 → 1.2.4 · Author · 2.4 MB        ~130 chars
@@ -451,6 +536,10 @@ logged error text goes through this filter. Webhook URLs and secrets are never l
 
 No inbound endpoint means no slash commands. Configuration is `wrangler secret`
 and `wrangler d1 execute`. Accepted trade-off for a zero-surface deployment.
+
+Optional Worker variable `STORE_EMOJIS` (object or JSON string, keyed by store) sets
+custom store emoji; see "Message layout". Real ids belong in the operator's
+git-ignored `wrangler.local.jsonc`, never in the repository.
 
 Build-time validation: a schema in `scripts/`, run in CI and pre-deploy, types
 generated from it, **not bundled into the Worker**. Runtime input from D1 and
