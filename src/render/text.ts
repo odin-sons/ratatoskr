@@ -54,6 +54,20 @@ export function mdLink(text: string, url: string): string {
   return `[${text}](${url})`;
 }
 
+/** Whole count with comma thousands separators; null unless the value is a non-negative safe number. */
+export function formatCount(value: number | null | undefined): string | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
+  const whole = Math.floor(value);
+  if (!Number.isSafeInteger(whole)) return null;
+  const digits = String(whole);
+  let out = '';
+  for (let end = digits.length; end > 0; end -= 3) {
+    const group = digits.slice(Math.max(0, end - 3), end);
+    out = out === '' ? group : `${group},${out}`;
+  }
+  return out;
+}
+
 export function formatBytes(bytes: number | null | undefined): string | null {
   if (bytes == null || !Number.isFinite(bytes) || bytes <= 0) return null;
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];

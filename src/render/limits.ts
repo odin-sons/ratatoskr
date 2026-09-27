@@ -29,6 +29,19 @@ export function assertWithinLimits(msg: DiscordMessage): string[] {
   over('total embed text', measureMessage(msg), DISCORD.embedTotalTextMax);
   if (embeds.length === 0 && !msg.content) errors.push('message has neither content nor embeds');
   if (msg.allowed_mentions?.parse?.length !== 0) errors.push('allowed_mentions.parse must be []');
+  const rows = msg.components ?? [];
+  over('components', rows.length, DISCORD.actionRowsPerMessage);
+  rows.forEach((row, i) => {
+    over(`components[${i}].components`, row.components.length, DISCORD.buttonsPerRow);
+    if (row.components.length === 0) errors.push(`components[${i}] is empty`);
+    row.components.forEach((button, j) => {
+      const at = `components[${i}].components[${j}]`;
+      over(`${at}.label`, button.label.length, DISCORD.buttonLabelMax);
+      over(`${at}.url`, button.url.length, DISCORD.buttonUrlMax);
+      if (button.label.length === 0) errors.push(`${at}.label is empty`);
+      if (!/^https?:\/\//.test(button.url)) errors.push(`${at}.url must be http(s)`);
+    });
+  });
 
   embeds.forEach((embed, i) => {
     const at = `embeds[${i}]`;

@@ -12,18 +12,20 @@ function countSeparators(line: string): number {
 }
 
 /**
- * Counts mods in rendered output: one per titled (detailed) embed, one per compact list line,
- * plus one per unescaped `|` separator inside a grouped (L3) line.
+ * Counts mods in rendered output: one per detailed embed (its description opens with an h1 line), one per compact
+ * list line after the store heading, plus one per unescaped `|` separator inside a grouped (L3) line.
  */
 export function countItems(messages: readonly DiscordMessage[]): number {
   let total = 0;
   for (const msg of messages) {
     for (const embed of msg.embeds ?? []) {
-      if (embed.title !== undefined) {
+      if (!embed.description) continue;
+      if (embed.description.startsWith('# ')) {
         total += 1;
-      } else if (embed.description) {
-        for (const line of embed.description.split('\n')) total += 1 + countSeparators(line);
+        continue;
       }
+      const lines = embed.description.split('\n');
+      for (let i = 1; i < lines.length; i++) total += 1 + countSeparators(lines[i]!);
     }
   }
   return total;

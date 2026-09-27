@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
-import { DISCORD, PROJECT } from '../core/constants.ts';
-import { eventId } from '../core/ids.ts';
-import type { DiscordMessage, EventKind, ModEvent, StoreKind } from '../core/types.ts';
+import { DISCORD } from '../core/constants.ts';
+import type { DiscordMessage, EventKind, ModEvent } from '../core/types.ts';
 import { extractChangelog } from '../changelog/extract.ts';
 import { hasInvisible, INVISIBLE_CODE_POINTS } from '../text/__fixtures__/invisible.ts';
 import { bestOf } from '../testing/timing.ts';
@@ -12,79 +11,14 @@ import { prepare, renderBlocks } from './compact.ts';
 import { planDigest } from './digest.ts';
 import { renderDigest, renderImmediate } from './index.ts';
 import { assertWithinLimits, measureMessage } from './limits.ts';
-import { SOURCE_FOOTER } from './layout.ts';
+import { KIND_EMOJI, PROJECT_LINE } from './layout.ts';
+import { endsWithProjectField, makeEvent, NOW, realisticUpdates, STORE_KINDS, type EventSeed } from './__fixtures__/events.ts';
 import { escapeTruncate, formatBytes, inline, safeUrl } from './text.ts';
 
-const NOW = new Date('2026-09-19T12:00:00Z');
-const STORE_KINDS: StoreKind[] = ['thunderstore', 'hexium', 'nexus'];
-
-interface EventSeed {
-  store: StoreKind;
-  kind: EventKind;
-  name: string;
-  owner: string;
-  url: string;
-  versionFrom: string | null;
-  versionTo: string;
-  sizeBytes: number | null;
-  description: string | null;
-  changelog: string | null;
-  changelogUrl: string | null;
-  alsoOn: { store: StoreKind; url: string }[];
-}
-
-function makeEvent(seed: Partial<EventSeed> = {}, index = 0): ModEvent {
-  const s: EventSeed = {
-    store: 'thunderstore',
-    kind: 'update',
-    name: `Mod${index}`,
-    owner: `Author${index % 20}`,
-    url: `https://thunderstore.io/c/valheim/p/Author${index % 20}/Mod${index}/`,
-    versionFrom: '1.2.3',
-    versionTo: '1.2.4',
-    sizeBytes: 2_516_582,
-    description: null,
-    changelog: null,
-    changelogUrl: null,
-    alsoOn: [],
-    ...seed,
-  };
-  const packageId = `${s.owner}-${s.name}-${index}`;
-  return {
-    id: eventId(`${s.store}:valheim`, packageId, s.versionTo),
-    kind: s.kind,
-    versionFrom: s.versionFrom,
-    versionTo: s.versionTo,
-    changelog: s.changelog,
-    changelogUrl: s.changelogUrl,
-    createdAt: '2026-09-19T11:30:00Z',
-    alsoOn: s.alsoOn,
-    pkg: {
-      source: `${s.store}:valheim`,
-      store: s.store,
-      packageId,
-      owner: s.owner,
-      name: s.name,
-      version: s.versionTo,
-      url: s.url,
-      iconUrl: 'https://gcdn.thunderstore.io/live/repository/icons/x.png',
-      description: s.description,
-      categories: [],
-      isNsfw: false,
-      isDeprecated: false,
-      updatedAt: '2026-09-19T11:30:00Z',
-      sizeBytes: s.sizeBytes,
-    },
-  };
-}
-
-function realisticUpdates(n: number, store: StoreKind = 'thunderstore'): ModEvent[] {
-  return Array.from({ length: n }, (_, i) =>
-    makeEvent({ store, name: `Valheim Mod Name ${i}`, versionTo: `2.${i % 10}.${i % 7}`, versionFrom: `2.${i % 10}.${(i % 7) + 1}` }, i),
-  );
-}
-
 const noDetail = { detailed: () => false, now: NOW };
+
+const WORST_EMOJI = `<a:${'e'.repeat(32)}:${'9'.repeat(20)}>`;
+const WORST_EMOJIS = { thunderstore: WORST_EMOJI, hexium: WORST_EMOJI, nexus: WORST_EMOJI };
 
 function unescapedCount(text: string, ch: string): number {
   let n = 0;
@@ -98,17 +32,23 @@ function unescapedCount(text: string, ch: string): number {
 function allText(messages: DiscordMessage[]): string {
   return messages
     .flatMap((m) => m.embeds ?? [])
-    .flatMap((e) => [e.title, e.description, e.footer?.text, ...(e.fields ?? []).flatMap((f) => [f.name, f.value])])
+    .flatMap((e) => [e.description, e.footer?.text, ...(e.fields ?? []).filter((f) => f.value !== PROJECT_LINE).flatMap((f) => [f.name, f.value])])
     .filter((t): t is string => typeof t === 'string')
-    .join('\n');
+    .join('\n')
+    .replaceAll(KIND_EMOJI.update, '')
+    .replaceAll(KIND_EMOJI.new, '');
 }
 
 function expectValid(messages: DiscordMessage[]): void {
   for (const msg of messages) {
     expect(assertWithinLimits(msg)).toEqual([]);
     expect(msg.allowed_mentions).toEqual({ parse: [] });
-    expect(msg.embeds!.at(-1)!.footer!.text).toContain(SOURCE_FOOTER);
+    expectEndsWithProjectLine(msg);
   }
+}
+
+function expectEndsWithProjectLine(msg: DiscordMessage): void {
+  expect(endsWithProjectField(msg)).toBe(true);
 }
 
 const trickyText = fc.oneof(
@@ -141,6 +81,11 @@ const seedArb: fc.Arbitrary<EventSeed> = fc.record({
   changelog: fc.option(fc.oneof(trickyText, fc.constant('line one\n\n\n\nline two\r\n- x\n'.repeat(400))), { nil: null }),
   changelogUrl: fc.option(urlArb, { nil: null }),
   alsoOn: fc.array(fc.record({ store: fc.constantFrom(...STORE_KINDS), url: urlArb }), { maxLength: 5 }),
+  downloadUrl: fc.option(urlArb, { nil: null }),
+  downloads: fc.option(fc.oneof(fc.nat(), fc.constant(Number.NaN), fc.constant(-5), fc.constant(1e30), fc.double()), { nil: null }),
+  categories: fc.array(trickyText, { maxLength: 30 }),
+  updatedAt: fc.oneof(fc.constant('2026-09-19T11:30:00Z'), trickyText),
+  createdAt: fc.oneof(fc.constant('2026-09-19T11:30:00Z'), trickyText),
 });
 
 const seedListArb = fc.oneof(
@@ -151,14 +96,19 @@ const seedListArb = fc.oneof(
 describe('digest invariants', () => {
   it('never drops a mod and always satisfies Discord limits (property)', () => {
     fc.assert(
-      fc.property(seedListArb, fc.integer({ min: 0, max: 6 }), (seeds, detailEvery) => {
+      fc.property(seedListArb, fc.integer({ min: 0, max: 6 }), fc.boolean(), (seeds, detailEvery, withEmoji) => {
         const events = seeds.map((seed, i) => makeEvent(seed, i));
-        const plan = planDigest(events, { detailed: (e) => detailEvery > 0 && e.pkg.packageId.length % detailEvery === 0, now: NOW });
+        const plan = planDigest(events, {
+          detailed: (e) => detailEvery > 0 && e.pkg.packageId.length % detailEvery === 0,
+          now: NOW,
+          ...(withEmoji ? { storeEmojis: WORST_EMOJIS } : {}),
+        });
         expect(countItems(plan.messages)).toBe(events.length);
         for (const msg of plan.messages) {
           expect(assertWithinLimits(msg)).toEqual([]);
           expect(msg.allowed_mentions).toEqual({ parse: [] });
-          expect(msg.embeds!.at(-1)!.footer!.text).toContain(SOURCE_FOOTER);
+          expect(msg.components).toBeUndefined();
+          expectEndsWithProjectLine(msg);
         }
         if (events.length === 0) expect(plan.messages).toEqual([]);
       }),
@@ -239,12 +189,15 @@ describe('degradation ladder', () => {
   it('uses L0 for a small digest with author and size', () => {
     const [msg] = renderDigest([makeEvent({ name: 'Alpha', owner: 'Bob', url: 'https://thunderstore.io/c/valheim/p/Bob/Mod0/' })], noDetail);
     const desc = msg!.embeds![0]!.description!;
-    expect(desc).toBe('**[Alpha](https://thunderstore.io/c/valheim/p/Bob/Mod0/)** 1.2.3 → 1.2.4 · Bob · 2.4 MB');
+    expect(desc).toBe(
+      ['**Thunderstore** · 1 update', '**[Alpha](https://thunderstore.io/c/valheim/p/Bob/Mod0/)** 1.2.3 → 1.2.4 · Bob · 2.4 MB'].join('\n'),
+    );
+    expect(msg!.embeds![0]!.footer).toBeUndefined();
   });
 
   it('applies one level to the whole section', () => {
     const plan = planDigest(realisticUpdates(120, 'thunderstore').concat(realisticUpdates(30, 'hexium')), noDetail);
-    const lines = plan.messages.flatMap((m) => m.embeds!).flatMap((e) => e.description!.split('\n'));
+    const lines = plan.messages.flatMap((m) => m.embeds!).flatMap((e) => e.description!.split('\n').slice(1));
     const hasLinks = lines.map((l) => l.includes('](http'));
     expect(new Set(hasLinks).size).toBe(1);
   });
@@ -255,14 +208,15 @@ describe('degradation ladder', () => {
     expect(block!.lines.reduce((sum, l) => sum + l.count, 0)).toBe(200);
     expect(block!.lines[0]!.text.startsWith('**Solo** · [M\\|0](')).toBe(true);
     for (const line of block!.lines) expect(line.text.length).toBeLessThan(1100);
-    const messages = [{ embeds: [{ description: block!.lines.map((l) => l.text).join('\n') }], allowed_mentions: { parse: [] as [] } }];
+    const description = ['**Thunderstore** · 200 updates', ...block!.lines.map((l) => l.text)].join('\n');
+    const messages = [{ embeds: [{ description }], allowed_mentions: { parse: [] as [] } }];
     expect(countItems(messages)).toBe(200);
   });
 
   it('L4 lines carry no links', () => {
     const plan = planDigest(realisticUpdates(300), noDetail);
     expect(plan.level).toBe(4);
-    expect(allText(plan.messages)).not.toContain('](');
+    expect(allText(plan.messages).replaceAll(PROJECT_LINE, '')).not.toContain('](');
   });
 });
 
@@ -282,7 +236,7 @@ describe('injection', () => {
 
   it('cannot break out of the markdown link at L0', () => {
     const [msg] = renderDigest([makeEvent({ name: evil })], noDetail);
-    const line = msg!.embeds![0]!.description!.split('\n')[0]!;
+    const line = msg!.embeds![0]!.description!.split('\n')[1]!;
     expect(unescapedCount(line, '[')).toBe(1);
     expect(unescapedCount(line, ']')).toBe(1);
     expect(unescapedCount(line, '(')).toBe(1);
@@ -325,7 +279,7 @@ describe('invisible characters in text fields', () => {
       expect(hasInvisible(text)).toBe(false);
     }
     const detailed = renderImmediate(event, { now: NOW }).embeds![0]!;
-    expect(detailed.title?.replace(/\s/g, '')).toBe('Mod1.0→2.0');
+    expect(detailed.description?.split('\n')[0]?.replace(/\s/g, '')).toBe(`#[Mod1.0→2.0](${event.pkg.url})`);
     expect(detailed.description?.replace(/\s/g, '')).toContain('byOwner');
     expect(detailed.description?.replace(/\s/g, '')).toContain('Desc');
   });
@@ -351,9 +305,10 @@ describe('splitting', () => {
     expect(total).toBeGreaterThan(1);
     expect(countItems(plan.messages)).toBe(events.length);
     plan.messages.forEach((msg, i) => {
-      expect(msg.embeds!.at(-1)!.footer!.text).toContain(`(${i + 1}/${total})`);
+      expect(msg.embeds!.at(-1)!.footer!.text).toBe(`(${i + 1}/${total})`);
+      for (const embed of msg.embeds!.slice(0, -1)) expect(embed.footer).toBeUndefined();
     });
-    const storesPerMessage = plan.messages.map((m) => new Set(m.embeds!.map((e) => e.footer!.text.split(' · ')[0])));
+    const storesPerMessage = plan.messages.map((m) => new Set(m.embeds!.map((e) => e.description!.split('\n')[0]!.replace(/\*\*/g, '').split(' · ')[0])));
     const thunderstoreMessages = storesPerMessage.filter((s) => s.has('Thunderstore')).length;
     const hexiumMessages = storesPerMessage.filter((s) => s.has('Hexium')).length;
     expect(thunderstoreMessages).toBe(1);
@@ -377,9 +332,9 @@ describe('splitting', () => {
     const plan = planDigest(events, noDetail);
     expect(plan.messages).toHaveLength(1);
     const [first, second] = plan.messages[0]!.embeds!;
-    expect(first!.title).toBe('Brand New 1.2.4');
+    expect(first!.description!.split('\n')[0]).toBe('# [Brand New 1.2.4](https://thunderstore.io/c/valheim/p/Author0/Mod900/)');
     expect(first!.fields![0]!.value).toContain('[Full changelog](https://x.io/changelog)');
-    expect(second!.title).toBeUndefined();
+    expect(second!.description!.startsWith('# ')).toBe(false);
     expect(countItems(plan.messages)).toBe(31);
   });
 
@@ -387,7 +342,7 @@ describe('splitting', () => {
     const events = realisticUpdates(3);
     const messages = renderDigest(events, { detailed: (e) => e === events[1], now: NOW });
     const embeds = messages.flatMap((m) => m.embeds!);
-    expect(embeds.filter((e) => e.title !== undefined)).toHaveLength(1);
+    expect(embeds.filter((e) => e.description!.startsWith('# '))).toHaveLength(1);
     expect(countItems(messages)).toBe(3);
   });
 });
@@ -396,26 +351,27 @@ describe('renderImmediate', () => {
   it('stays within limits for hostile input', () => {
     fc.assert(
       fc.property(seedArb, (seed) => {
-        const msg = renderImmediate(makeEvent(seed), { now: NOW });
+        const msg = renderImmediate(makeEvent(seed), { now: NOW, storeEmojis: WORST_EMOJIS });
         expect(assertWithinLimits(msg)).toEqual([]);
         expect(msg.embeds).toHaveLength(1);
         expect(msg.allowed_mentions).toEqual({ parse: [] });
-        expect(msg.embeds![0]!.footer!.text).toContain(SOURCE_FOOTER);
+        expectEndsWithProjectLine(msg);
       }),
       { numRuns: 200 },
     );
   });
 
-  it('carries the AGPL source footer', () => {
+  it('carries the AGPL project link as the last field and only the store in the footer', () => {
     const msg = renderImmediate(makeEvent({ kind: 'new' }), { now: NOW });
-    expect(msg.embeds![0]!.footer!.text).toBe(`Thunderstore · new package · ratatoskr v${PROJECT.version} · source: github.com/odin-sons/ratatoskr`);
+    expect(msg.embeds![0]!.fields!.at(-1)).toEqual({ name: '\u200b', value: '-# [ratatoskr v0.1.0](https://github.com/odin-sons/ratatoskr)' });
+    expect(msg.embeds![0]!.footer!.text).toBe('Thunderstore');
     expect(measureMessage(msg)).toBeLessThan(DISCORD.embedTotalTextMax);
   });
 });
 
 describe('changelog field', () => {
   const URL_ = 'https://x.io/changelog';
-  const field = (event: ModEvent): string | undefined => renderImmediate(event, { now: NOW }).embeds![0]!.fields?.[0]?.value;
+  const field = (event: ModEvent): string | undefined => renderImmediate(event, { now: NOW }).embeds![0]!.fields?.find((f) => f.name === 'Changelog')?.value;
   const count = (text: string, part: string): number => text.split(part).length - 1;
 
   it('inserts an extracted excerpt exactly as the changelog module produced it', () => {
@@ -431,9 +387,9 @@ describe('changelog field', () => {
     expect(count(value, '[Full changelog](')).toBe(1);
   });
 
-  it('adds the link itself when the excerpt carries none, and shows the link alone without an excerpt', () => {
+  it('adds the link itself when the excerpt carries none, and omits the field without an excerpt', () => {
     expect(field(makeEvent({ kind: 'new', changelog: '- a\n- b', changelogUrl: URL_ }))).toBe(`- a\n- b\n[Full changelog](${URL_})`);
-    expect(field(makeEvent({ kind: 'new', changelog: null, changelogUrl: URL_ }))).toBe(`[Full changelog](${URL_})`);
+    expect(field(makeEvent({ kind: 'new', changelog: null, changelogUrl: URL_ }))).toBeUndefined();
     expect(field(makeEvent({ kind: 'new', changelog: null, changelogUrl: null }))).toBeUndefined();
   });
 
