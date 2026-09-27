@@ -16,7 +16,7 @@ export interface Env {
   NEXUS_API_KEY?: string;
   /** Custom emoji per store: an object, or a JSON string of one, `{"thunderstore":"<:name:id>", ...}`. */
   STORE_EMOJIS?: string | Record<string, string>;
-  /** Full custom emoji markup for the source button. */
+  /** Full custom emoji markup for the source subtext link. */
   RATATOSKR_EMOJI?: string;
   /** Message language, a catalog name from `src/i18n`: `en` (default) or `ru`. */
   LANGUAGE?: string;

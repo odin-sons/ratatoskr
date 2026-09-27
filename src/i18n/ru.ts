@@ -17,7 +17,6 @@ export const ru: Messages = {
   modPage: 'Страница мода',
   download: 'Скачать',
   website: 'Сайт',
-  sourceCode: 'ratatoskr',
   updates: (count) => `${count} ${pick(russianPlural(count), { one: 'обновление', few: 'обновления', many: 'обновлений', other: 'обновления' })}`,
   alsoOn: 'Также на',
   page: (index, total) => `(стр. ${index}/${total})`,

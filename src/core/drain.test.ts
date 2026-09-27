@@ -171,12 +171,12 @@ describe('drainOutbox', () => {
       rejectsOptionalButtons(h);
       await enqueue(h, makeSubscription({ mode: 'immediate' }), [rich()]);
       const report = await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now });
-      expect(h.sender.calls.map((c) => labelsOf(c.payload))).toEqual([['Mod page', 'Download', 'Website', 'ratatoskr'], ['Mod page', 'ratatoskr']]);
+      expect(h.sender.calls.map((c) => labelsOf(c.payload))).toEqual([['Mod page', 'Download', 'Website'], ['Mod page']]);
       expect(report).toMatchObject({ sent: 1, failed: 0, parked: 0, degraded: 1 });
       expect(h.store.outboxRows()[0]).toMatchObject({ delivered: true, parked: false });
     });
 
-    it('keeps the mod page and the source button and everything else in the message', async () => {
+    it('keeps the mod page button and everything else in the message', async () => {
       const h = makeHarness();
       rejectsOptionalButtons(h);
       await enqueue(h, makeSubscription({ mode: 'immediate' }), [rich()]);
@@ -309,7 +309,7 @@ describe('drainOutbox', () => {
         expect(payload.content).toBeUndefined();
         const container = payload.components![0] as { components: { type: number; components?: { label: string }[] }[] };
         const row = container.components.at(-1)!;
-        expect(row.components!.map((b) => b.label)).toEqual(['Страница мода', 'Скачать', 'ratatoskr']);
+        expect(row.components!.map((b) => b.label)).toEqual(['Страница мода', 'Скачать']);
         expect(JSON.stringify(payload)).toContain('<:thunderstore:123456789012345678>');
         expect(JSON.stringify(payload)).toContain('Обновление от A');
       } else {

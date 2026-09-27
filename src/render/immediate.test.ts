@@ -32,11 +32,13 @@ const displayTexts = (msg: DiscordMessage): string[] =>
   blocks(msg).flatMap((b) => (b.type === 10 ? [b.content] : b.type === 9 ? b.components.map((t) => t.content) : []));
 const headerText = (msg: DiscordMessage): string => displayTexts(msg)[0]!;
 const headerLines = (msg: DiscordMessage): string[] => headerText(msg).split('\n');
-const buttons = (msg: DiscordMessage): DiscordLinkButton[] => {
+/** The action row's buttons, or `null` when the message has none (mod page, download and website were all invalid). */
+const buttons = (msg: DiscordMessage): DiscordLinkButton[] | null => {
   const row = blocks(msg).at(-1)!;
-  if (row.type !== 1) throw new Error('last block is not an action row');
-  return row.components;
+  return row.type === 1 ? row.components : null;
 };
+/** The trailing subtext block: a top-level sibling of the container, outside its coloured bar. */
+const sourceSubtext = (msg: DiscordMessage): string => (msg.components!.at(-1) as { type: 10; content: string }).content;
 
 describe('renderImmediate payload', () => {
   it('is a Components V2 message: flag, one container, no content, no embeds, no mentions', () => {
@@ -46,9 +48,21 @@ describe('renderImmediate payload', () => {
     expect('content' in msg).toBe(false);
     expect('embeds' in msg).toBe(false);
     expect(msg.allowed_mentions).toEqual({ parse: [] });
-    expect(msg.components).toHaveLength(1);
+    expect(msg.components).toHaveLength(2);
     expect(container(msg).type).toBe(17);
     expect(assertWithinLimits(msg)).toEqual([]);
+  });
+
+  it('always ends with the source subtext, outside the container, with the repo link and the fallback emoji', () => {
+    const msg = render();
+    const last = msg.components!.at(-1)!;
+    expect(last.type).toBe(10);
+    expect(sourceSubtext(msg)).toBe(`-# 🐿️ [${PROJECT.name} v${PROJECT.version}](${PROJECT.repoUrl})`);
+  });
+
+  it('uses the configured ratatoskr emoji in the source subtext, else the squirrel fallback', () => {
+    expect(sourceSubtext(render({}, { now: NOW, ratatoskrEmoji: RT_EMOJI }))).toContain(RT_EMOJI);
+    expect(sourceSubtext(render({}, { now: NOW, ratatoskrEmoji: '<:x:1>' }))).toContain(SQUIRREL);
   });
 
   it('uses the store colour as the container accent', () => {
@@ -77,7 +91,6 @@ describe('header block', () => {
       `${UPD} · 1.2.3 → 1.2.4 · ${TIME}`,
       'ℹ️ 94.2 MB · Downloaded 12,345 times · 5 likes',
       '',
-      '**📜 Description**',
       'Does things',
     ]);
   });
@@ -133,9 +146,8 @@ describe('header block', () => {
   it('has no description section without an excerpt, and one blank line before it with one', () => {
     expect(headerLines(render({ description: null, sizeBytes: null }))).toHaveLength(2);
     expect(headerLines(render({ description: null, sizeBytes: null }))).not.toContain('');
-    expect(headerLines(render({ description: '   ' }))).not.toContain('**📜 Description**');
     const lines = headerLines(render({ description: 'Body text', sizeBytes: null }));
-    expect(lines.slice(-3)).toEqual(['', '**📜 Description**', 'Body text']);
+    expect(lines.slice(-2)).toEqual(['', 'Body text']);
     expect(lines.filter((l) => l === '')).toHaveLength(1);
   });
 
@@ -147,7 +159,7 @@ describe('header block', () => {
 
   it('keeps the also-on line in the header block, before the blank line', () => {
     const msg = render({ description: 'Body', sizeBytes: null, alsoOn: [{ store: 'hexium', url: 'https://hexium.example/p' }] });
-    expect(headerLines(msg).slice(2)).toEqual(['Also on [Hexium](https://hexium.example/p)', '', '**📜 Description**', 'Body']);
+    expect(headerLines(msg).slice(2)).toEqual(['Also on [Hexium](https://hexium.example/p)', '', 'Body']);
   });
 
   it('links the title only when the page url is usable', () => {
@@ -251,44 +263,43 @@ describe('changelog and categories blocks', () => {
 describe('link buttons', () => {
   const WEBSITE = 'https://example.com/mod';
 
-  it('carries mod page, download, website and source, in that order, with fallback emoji', () => {
+  it('carries mod page, download and website, in that order, with fallback emoji; the source link is not one of them', () => {
     const list = buttons(render({ downloadUrl: DL, websiteUrl: WEBSITE }));
     expect(list).toEqual([
       { type: 2, style: 5, label: 'Mod page', url: PAGE, emoji: { name: '⚡' } },
       { type: 2, style: 5, label: 'Download', url: DL, emoji: { name: '⬇️' } },
       { type: 2, style: 5, label: 'Website', url: WEBSITE, emoji: { name: '🌐' } },
-      { type: 2, style: 5, label: 'ratatoskr', url: PROJECT.repoUrl, emoji: { name: SQUIRREL } },
     ]);
   });
 
   it('gives each store its own fallback emoji on the mod page button', () => {
-    const emoji = STORE_LIST.map((store) => buttons(render({ store }))[0]!.emoji!.name);
+    const emoji = STORE_LIST.map((store) => buttons(render({ store }))![0]!.emoji!.name);
     expect(emoji).toEqual(['⚡', '🟣', '🌀']);
   });
 
-  it('uses the configured custom store emoji on the mod page button and the ratatoskr emoji on the source button', () => {
-    const list = buttons(render({}, { now: NOW, storeEmojis: { thunderstore: TS_EMOJI }, ratatoskrEmoji: RT_EMOJI }));
+  it('uses the configured custom store emoji on the mod page button', () => {
+    const list = buttons(render({}, { now: NOW, storeEmojis: { thunderstore: TS_EMOJI } }))!;
     expect(list[0]!.emoji).toEqual({ id: '123456789012345678', name: 'thunderstore', animated: false });
-    expect(list.at(-1)!.emoji).toEqual({ id: '123456789012345680', name: 'ratatoskr', animated: true });
-    const invalid = buttons(render({}, { now: NOW, storeEmojis: { thunderstore: 'nope' }, ratatoskrEmoji: '<:x:1>' }));
+    const invalid = buttons(render({}, { now: NOW, storeEmojis: { thunderstore: 'nope' } }))!;
     expect(invalid[0]!.emoji).toEqual({ name: '⚡' });
-    expect(invalid.at(-1)!.emoji).toEqual({ name: SQUIRREL });
   });
 
   it('omits download and website without valid urls, and drops invalid ones', () => {
-    expect(buttons(render()).map((b) => b.label)).toEqual(['Mod page', 'ratatoskr']);
+    expect(buttons(render())!.map((b) => b.label)).toEqual(['Mod page']);
     for (const bad of ['nope', 'javascript:alert(1)', 'ftp://x.io/a', 'https://user:pw@x.io/a', `https://x.io/${'a'.repeat(600)}`, '']) {
-      expect(buttons(render({ downloadUrl: bad, websiteUrl: bad })).map((b) => b.label), bad).toEqual(['Mod page', 'ratatoskr']);
+      expect(buttons(render({ downloadUrl: bad, websiteUrl: bad }))!.map((b) => b.label), bad).toEqual(['Mod page']);
     }
   });
 
-  it('always keeps the source button, whatever the other urls', () => {
-    const list = buttons(render({ url: 'nope', downloadUrl: null, websiteUrl: null }));
-    expect(list).toEqual([{ type: 2, style: 5, label: 'ratatoskr', url: PROJECT.repoUrl, emoji: { name: SQUIRREL } }]);
+  it('has no action row, but keeps the source subtext, when nothing is valid', () => {
+    const msg = render({ url: 'nope', downloadUrl: null, websiteUrl: null });
+    expect(buttons(msg)).toBeNull();
+    expect(blocks(msg).some((b) => b.type === 1)).toBe(false);
+    expect(sourceSubtext(msg)).toContain(PROJECT.repoUrl);
   });
 
   it('never uses more than five buttons and only http(s) urls', () => {
-    const list = buttons(render({ downloadUrl: DL, websiteUrl: WEBSITE }));
+    const list = buttons(render({ downloadUrl: DL, websiteUrl: WEBSITE }))!;
     expect(list.length).toBeLessThanOrEqual(5);
     for (const b of list) expect(b.url).toMatch(/^https?:\/\//);
   });
@@ -325,9 +336,8 @@ describe('injection', () => {
     for (const ch of ['[', ']', '(', ')', '|', '<']) expect(unescapedCount(text, ch), ch).toBe(0);
     expect(lines[1]!.startsWith(`${KIND_EMOJI.update} Updated by `)).toBe(true);
     expect(lines[2]).toBe('');
-    expect(lines[3]).toBe('**📜 Description**');
-    expect(lines).toHaveLength(5);
-    const excerpt = lines[4]!;
+    expect(lines).toHaveLength(4);
+    const excerpt = lines[3]!;
     for (const start of ['#', '-', '>']) expect(excerpt.startsWith(start)).toBe(false);
     const all = JSON.stringify(msg);
     expect(all).not.toMatch(/@(everyone|here)/);
@@ -409,7 +419,8 @@ describe('limits', () => {
         expect(componentCount(msg)).toBeLessThanOrEqual(DISCORD.componentsV2ComponentsMax);
         expect(msg.allowed_mentions).toEqual({ parse: [] });
         expect('content' in msg || 'embeds' in msg).toBe(false);
-        expect(buttons(msg).at(-1)!.url).toBe(PROJECT.repoUrl);
+        expect(msg.components!.at(-1)).toMatchObject({ type: 10 });
+        expect(sourceSubtext(msg)).toContain(PROJECT.repoUrl);
         expect(JSON.stringify(msg)).not.toMatch(/@(everyone|here)/);
       }),
       { numRuns: 250 },

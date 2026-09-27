@@ -48,13 +48,12 @@ describe('Components V2 message in every language', () => {
         'ℹ️ 94.2 MB · Downloaded 12,345 times · 21 likes',
         'Also on [Hexium](https://hexium.example/p)',
         '',
-        '**📜 Description**',
         'Does things',
       ].join('\n'),
       '**Changelog**\n- fixed\n[Full changelog](https://x.io/c)',
       '**🗂️ Categories**\nTools',
     ]);
-    expect(labels(msg)).toEqual(['Mod page', 'Download', 'Website', 'ratatoskr']);
+    expect(labels(msg)).toEqual(['Mod page', 'Download', 'Website']);
   });
 
   it('renders russian wording with russian plurals, number format and units', () => {
@@ -66,13 +65,12 @@ describe('Components V2 message in every language', () => {
         `ℹ️ 94,2 МБ · Скачан 12${NBSP}345 раз · 21 лайк`,
         'Также на [Hexium](https://hexium.example/p)',
         '',
-        '**📜 Описание**',
         'Does things',
       ].join('\n'),
       '**Изменения**\n- fixed\n[Полный список изменений](https://x.io/c)',
       '**🗂️ Категории**\nTools',
     ]);
-    expect(labels(msg)).toEqual(['Страница мода', 'Скачать', 'Сайт', 'ratatoskr']);
+    expect(labels(msg)).toEqual(['Страница мода', 'Скачать', 'Сайт']);
   });
 
   it('uses the russian new-package wording', () => {

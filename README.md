@@ -217,8 +217,9 @@ JSON string of one) keyed by store:
 
 ### Source-link emoji (`RATATOSKR_EMOJI`)
 
-Optional. The `ratatoskr` button of an immediate message links to this
-project's source (the AGPL notice); it shows a squirrel by default. Set the
+Optional. Every message ends with a small `-# <emoji> [ratatoskr vX](url)`
+line linking to this project's source (the AGPL notice); it shows a squirrel
+by default. Set the
 Worker variable `RATATOSKR_EMOJI` to full custom emoji markup (same format and
 rules as `STORE_EMOJIS`) to use your own. An invalid value is ignored with one
 warning that names only the variable. Easiest: put `RATATOSKR_EMOJI` in the
@@ -244,19 +245,21 @@ the run report stay English.
 An immediate message is one Discord Components V2 message: a container in the
 store's colour holding
 
-- the header: a linked h1 title (`# <store emoji> [Name](url)`), the kind line
+- the header: a linked h2 title (`## <store emoji> [Name](url)`), the kind line
   (`⬆️ Updated by Owner · 1.2.2 → 1.2.3 · <relative time>`, or `🆕 New by
   Owner · 1.0.0 · ...`), an info line (`ℹ️ 94.2 MB · Downloaded 12,345 times ·
-  21 likes`, each part only when known) and the description excerpt under a
-  `📜 Description` heading, with the mod icon as a thumbnail beside it;
+  21 likes`, each part only when known) and the description excerpt, with the
+  mod icon as a thumbnail beside it;
 - a `Changelog` block (about 500 characters, ending with a link to the full
   changelog) and a `🗂️ Categories` block, each only when there is something to show;
-- a row of link buttons: `Mod page`, `Download` and `Website` (each only when
-  the source provides a URL) and always `ratatoskr`, the link to this project's
-  source (the AGPL notice). Discord refuses a button whose host has no real
+- a row of link buttons: `Mod page`, `Download` and `Website`, each only when
+  the source provides a URL. Discord refuses a button whose host has no real
   top-level domain (`https://mysite`), so such a URL gets no button; if Discord
-  rejects a message anyway, the bot resends it once with only `Mod page` and
-  `ratatoskr` before giving up (counted as `degraded` in the run log).
+  rejects a message anyway, the bot resends it once with only `Mod page`
+  before giving up (counted as `degraded` in the run log);
+- outside the coloured block, a trailing small `-# <emoji> [ratatoskr
+  v<version>](url)` line linking to this project's source (the AGPL notice).
+  It is always present, whatever else in the message failed to render.
 
 In immediate mode every update also gets a changelog excerpt, within the
 per-tick fetch cap. Discord only accepts this format because the bot sends

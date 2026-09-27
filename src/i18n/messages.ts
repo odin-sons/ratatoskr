@@ -20,8 +20,6 @@ export interface Messages {
   modPage: string;
   download: string;
   website: string;
-  /** Label of the button that links to this project's source code (AGPL notice). */
-  sourceCode: string;
   /** Count line of a compact store list, e.g. `37 updates`. */
   updates(count: number): string;
   alsoOn: string;

@@ -7,11 +7,11 @@ import { resolveRatatoskrEmoji, resolveStoreEmojis } from './emoji.ts';
 export interface RenderSettings {
   /** Custom emoji markup per store; entries that are not valid custom emoji are ignored. */
   storeEmojis?: StoreEmojis;
-  /** Custom emoji markup for the source button; ignored unless valid. */
+  /** Custom emoji markup for the source subtext link; ignored unless valid. */
   ratatoskrEmoji?: string;
   /** Catalog to render in; unknown values resolve to English. */
   locale?: Language;
-  /** `false` leaves out the Download and Website buttons (default `true`); the mod page and source buttons stay. */
+  /** `false` leaves out the Download and Website buttons (default `true`); the mod page button stays. */
   optionalButtons?: boolean;
   /** `false` never shows the Changelog block, however long or short the excerpt (default `true`). */
   includeChangelog?: boolean;

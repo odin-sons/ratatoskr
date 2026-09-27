@@ -89,7 +89,9 @@ function header(event: ModEvent, ctx: Ctx, now: Date): string {
   const also = alsoOnLine(event, ctx);
   if (also) lines.push(also);
   const excerpt = event.pkg.description ? inline(stripHtml(head(event.pkg.description, CAPS.excerpt * CAPS.rawFactor)), CAPS.excerpt) : '';
-  if (excerpt) lines.push('', `**${SECTION_EMOJI.description} ${ctx.messages.description}**`, excerpt);
+  // The "description" catalog message and SECTION_EMOJI.description stay defined for future template customisation,
+  // even though the heading itself is not shown.
+  if (excerpt) lines.push('', excerpt);
   return lines.join('\n');
 }
 

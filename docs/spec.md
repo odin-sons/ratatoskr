@@ -397,9 +397,11 @@ Every user-visible string of the renderer comes from a catalog in `src/i18n` (se
                                                      count (it is always zero); the line is omitted when none is left
 Also on [Hexium](url)                               only when the release exists on other stores
 (blank line)
-**📜 Description**                                  only when there is an excerpt
-description excerpt                                 at most 350 characters
+description excerpt                                 only when there is one, at most 350 characters
 ```
+
+The `description` catalog message and `SECTION_EMOJI.description` stay defined (for future
+template customisation) even though no heading is rendered from them today.
 
 - The kind emoji are `KIND_EMOJI` in `src/render/layout.ts` (update: U+2B06 U+FE0F);
   the label emoji are `SECTION_EMOJI`. Owner is plain escaped text; a missing owner
@@ -433,22 +435,29 @@ dividers (type 14):
    else in a plain TextDisplay (type 10);
 2. `**Changelog**` and the excerpt, in a TextDisplay, only when there is one;
 3. `**🗂️ Categories**` and the list, in a TextDisplay, only when non-empty;
-4. an action row (type 1) of link buttons (type 2, style 5): `Mod page` (`pkg.url`; emoji
-   = the store's custom emoji, else a Unicode fallback per store), `Download`
-   (`pkg.downloadUrl`, U+2B07 U+FE0F), `Website` (`pkg.websiteUrl`, placed right after
-   Download) and always `ratatoskr`, the link to `PROJECT.repoUrl` with the emoji from
-   `RATATOSKR_EMOJI` or a squirrel. The source button is the AGPL notice: it is present
-   even when every other URL is invalid. Only http(s) URLs without credentials, at most
-   512 characters, whose host Discord accepts are kept (label at most 80, at most 5
-   buttons); an invalid URL drops its button. Discord answers 400 for a host without a real
-   top-level domain (`https://mysite`, `https://a.b`), so `hasDeliverableHost` (`src/text/url.ts`)
-   admits only an IPv4 literal or a dotted name of `[a-z0-9-]` labels ending in a letters-only
-   label of two or more letters or an `xn--` label; the Website URL is filtered by the same
-   rule before it is stored. A custom emoji becomes `{ id, name, animated }`; a Unicode one
-   `{ name }` only when it is a pictographic emoji (a non-emoji symbol makes Discord answer 400).
-   If Discord answers an immediate message with 400 anyway, the drain renders it once more
-   with only the mod page and source buttons (`optionalButtons: false`) and resends it; the
-   run report counts that as `degraded`, and when the resend fails too the row is parked.
+4. an action row (type 1) of link buttons (type 2, style 5), only when at least one is
+   valid (an empty action row is not a valid component, so the row is left out entirely
+   when it would be): `Mod page` (`pkg.url`; emoji = the store's custom emoji, else a
+   Unicode fallback per store), `Download` (`pkg.downloadUrl`, U+2B07 U+FE0F), `Website`
+   (`pkg.websiteUrl`, placed right after Download). Only http(s) URLs without credentials,
+   at most 512 characters, whose host Discord accepts are kept (label at most 80, at most
+   5 buttons); an invalid URL drops its button. Discord answers 400 for a host without a
+   real top-level domain (`https://mysite`, `https://a.b`), so `hasDeliverableHost`
+   (`src/text/url.ts`) admits only an IPv4 literal or a dotted name of `[a-z0-9-]` labels
+   ending in a letters-only label of two or more letters or an `xn--` label; the Website
+   URL is filtered by the same rule before it is stored. A custom emoji becomes
+   `{ id, name, animated }`; a Unicode one `{ name }` only when it is a pictographic emoji
+   (a non-emoji symbol makes Discord answer 400). If Discord answers an immediate message
+   with 400 anyway, the drain renders it once more with only the mod page button
+   (`optionalButtons: false`) and resends it; the run report counts that as `degraded`,
+   and when the resend fails too the row is parked;
+5. outside the container, as a second top-level component (a Text Display is itself a
+   top-level content component, so it needs no container of its own): a trailing subtext
+   line, `-# <emoji> [ratatoskr v<version>](repo url)`, built by `sourceSubtext` in
+   `src/render/layout.ts` from `PROJECT` and the emoji from `RATATOSKR_EMOJI` or a
+   squirrel fallback. This is the AGPL notice; it is always present, whatever else in the
+   message is missing or invalid, and it is not part of the action row (which the 400-retry
+   above can drop).
 
 Discord limits for a V2 message (`DISCORD.componentsV2*`): 40 components in total (nested
 ones count), 4000 characters of text across all text displays. The renderer's caps
@@ -481,7 +490,8 @@ footer. The packer reserves room for the field and the footer up front (`TEXT_BU
 `PAGE_SUFFIX_RESERVE`, whose fit for every catalog a test asserts), so the line can never be
 dropped or push a message beyond 6000 characters. Tests assert that every digest message
 ends with it, including pathological digests, in every language. Immediate messages have no
-project field; their `ratatoskr` button replaces it.
+project field; their trailing source subtext (see the action-row paragraph above) carries
+the same notice instead.
 
 **Store emoji.** The optional Worker setting `STORE_EMOJIS` (an object or JSON
 string keyed by store) holds full custom emoji markup, validated with
@@ -491,7 +501,8 @@ keys), carried in `TickDeps`/`DrainDeps` to every render call, and re-validated 
 the renderer. It appears in the title of detailed messages, on the `Mod page` button and
 in compact list headings; a store without an entry shows no emoji in the title and a
 Unicode fallback on the button. `RATATOSKR_EMOJI` (a string, same validation, invalid
-value ignored with one warning naming only the key) is the source button's emoji.
+value ignored with one warning naming only the key) is the emoji of the trailing source
+subtext line.
 
 **Localisation.** `src/i18n` holds a typed catalog per language (`en.ts`, `ru.ts`); the
 `Messages` interface makes a missing key a compile error. Plural forms come from small
@@ -681,7 +692,7 @@ No inbound endpoint means no slash commands. Configuration is `wrangler secret`
 and `wrangler d1 execute`. Accepted trade-off for a zero-surface deployment.
 
 Optional Worker variable `STORE_EMOJIS` (object or JSON string, keyed by store) sets
-custom store emoji, `RATATOSKR_EMOJI` (string) the emoji of the source button and
+custom store emoji, `RATATOSKR_EMOJI` (string) the emoji of the trailing source subtext and
 `LANGUAGE` (`en` default, `ru`) the message language; see "Message layout". Real ids
 belong in the operator's git-ignored `wrangler.local.jsonc` or `.env`, never in the
 repository. `pnpm run deploy` reads `STORE_EMOJI_*`, `RATATOSKR_EMOJI` and `RATATOSKR_LANGUAGE`

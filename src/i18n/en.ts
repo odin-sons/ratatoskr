@@ -17,7 +17,6 @@ export const en: Messages = {
   modPage: 'Mod page',
   download: 'Download',
   website: 'Website',
-  sourceCode: 'ratatoskr',
   updates: (count) => `${count} ${pick(englishPlural(count), { one: 'update', other: 'updates' })}`,
   alsoOn: 'Also on',
   page: (index, total) => `(${index}/${total})`,

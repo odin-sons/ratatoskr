@@ -13,11 +13,11 @@ import type { DiscordMessage, DueDelivery, ModEvent, OutboxRow, StoreEmojis, Sub
 export interface RenderContext {
   /** Custom emoji markup per store. */
   storeEmojis?: StoreEmojis;
-  /** Custom emoji markup for the source button. */
+  /** Custom emoji markup for the source subtext link. */
   ratatoskrEmoji?: string;
   /** Message language. */
   locale?: Language;
-  /** `false` renders an immediate message with only the mod page and source buttons. */
+  /** `false` renders an immediate message with only the mod page button. */
   optionalButtons?: boolean;
   /** `false` never shows the Changelog block, however long or short the excerpt. */
   includeChangelog?: boolean;
@@ -35,7 +35,7 @@ export interface DrainDeps {
   now: Date;
   /** Custom emoji markup per store, handed to every render call. */
   storeEmojis?: StoreEmojis;
-  /** Custom emoji markup for the source button, handed to every render call. */
+  /** Custom emoji markup for the source subtext link, handed to every render call. */
   ratatoskrEmoji?: string;
   /** Language of every rendered message. */
   locale?: Language;
@@ -273,7 +273,7 @@ async function deliverImmediate(drain: Drain, sub: Subscription, entry: Collapse
 
 /**
  * After Discord answers 400 to a message with components (a button URL it refuses that we cannot predict), the same event
- * rendered with only the mod page and source buttons; null when the failure is another one, no send is left, or the
+ * rendered with only the mod page button; null when the failure is another one, no send is left, or the
  * message has nothing more to drop.
  */
 function reducedMessage(drain: Drain, sub: Subscription, event: ModEvent, message: DiscordMessage, failure: SendFailure): DiscordMessage | null {

@@ -11,7 +11,7 @@ import { prepare, renderBlocks } from './compact.ts';
 import { planDigest } from './digest.ts';
 import { renderDigest, renderImmediate } from './index.ts';
 import { assertWithinLimits } from './limits.ts';
-import { KIND_EMOJI, PROJECT_LINE, SECTION_EMOJI } from './layout.ts';
+import { BUTTON_EMOJI, KIND_EMOJI, PROJECT_LINE, SECTION_EMOJI } from './layout.ts';
 import { endsWithProjectField, makeEvent, NOW, realisticUpdates, STORE_KINDS, type EventSeed } from './__fixtures__/events.ts';
 import { escapeTruncate, formatBytes, inline, safeUrl } from './text.ts';
 
@@ -53,7 +53,8 @@ function allText(messages: DiscordMessage[]): string {
     .replaceAll(KIND_EMOJI.update, '')
     .replaceAll(KIND_EMOJI.new, '')
     .replaceAll(SECTION_EMOJI.info, '')
-    .replaceAll(SECTION_EMOJI.categories, '');
+    .replaceAll(SECTION_EMOJI.categories, '')
+    .replaceAll(BUTTON_EMOJI.source, '');
 }
 
 function expectValid(messages: DiscordMessage[]): void {

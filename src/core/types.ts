@@ -198,8 +198,8 @@ export interface DiscordContainer {
   components: (DiscordSection | DiscordTextDisplay | DiscordSeparator | DiscordActionRow)[];
 }
 
-/** What may sit at the top level of a message. */
-export type DiscordTopComponent = DiscordActionRow | DiscordContainer;
+/** What may sit at the top level of a message. A Text Display is a top-level content component in its own right. */
+export type DiscordTopComponent = DiscordActionRow | DiscordContainer | DiscordTextDisplay;
 
 /** Store id -> full Discord custom emoji markup, e.g. `<:name:123456789012345678>`. */
 export type StoreEmojis = Partial<Record<StoreKind, string>>;

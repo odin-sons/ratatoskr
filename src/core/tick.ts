@@ -33,7 +33,7 @@ export interface TickDeps {
   renderer?: Renderer;
   /** Custom emoji markup per store, used when rendering messages. */
   storeEmojis?: StoreEmojis;
-  /** Custom emoji markup for the source button, used when rendering messages. */
+  /** Custom emoji markup for the source subtext link, used when rendering messages. */
   ratatoskrEmoji?: string;
   /** Language of every rendered message. */
   locale?: Language;

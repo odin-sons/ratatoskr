@@ -4,7 +4,7 @@ import type { DiscordContainer, DiscordMessage, DiscordSeparator, ModEvent } fro
 import { buildActionRow } from './components.ts';
 import type { Ctx } from './context.ts';
 import { buildParts } from './detailed.ts';
-import { SECTION_EMOJI } from './layout.ts';
+import { SECTION_EMOJI, sourceSubtext } from './layout.ts';
 
 const SEPARATOR: DiscordSeparator = { type: 14, divider: true, spacing: 1 };
 
@@ -24,10 +24,11 @@ export function buildImmediate(event: ModEvent, now: Date, ctx: Ctx): DiscordMes
   };
   if (parts.changelog !== null) push({ type: 10, content: `**${ctx.messages.changelog}**\n${parts.changelog}` });
   if (parts.categories !== null) push({ type: 10, content: `**${SECTION_EMOJI.categories} ${ctx.messages.categories}**\n${parts.categories}` });
-  push(buildActionRow(event, ctx));
+  const row = buildActionRow(event, ctx);
+  if (row !== null) push(row);
   return {
     flags: DISCORD.componentsV2Flag,
     allowed_mentions: { parse: [] },
-    components: [{ type: 17, accent_color: parts.color, components: blocks }],
+    components: [{ type: 17, accent_color: parts.color, components: blocks }, sourceSubtext(ctx.ratatoskrEmoji)],
   };
 }

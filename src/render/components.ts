@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { DISCORD, PROJECT } from '../core/constants.ts';
+import { DISCORD } from '../core/constants.ts';
 import { hasDeliverableHost } from '../text/url.ts';
 import type { DiscordActionRow, DiscordButtonEmoji, DiscordLinkButton, ModEvent } from '../core/types.ts';
 import type { Ctx } from './context.ts';
@@ -33,19 +33,18 @@ function button(label: string, raw: string | null | undefined, emoji: string): D
 }
 
 /**
- * The action row of a detailed message: mod page, download and website (each only with a valid URL) and the source link,
- * which is always present because it carries the AGPL notice.
+ * The action row of a detailed message: mod page, download and website, each only with a valid URL. The AGPL source
+ * link lives outside the row, as the message's trailing subtext block (see `sourceSubtext`), so it is not a candidate here.
+ * Null when none of the candidates has a usable URL: an empty action row is not a valid component.
  */
-export function buildActionRow(event: ModEvent, ctx: Ctx): DiscordActionRow {
+export function buildActionRow(event: ModEvent, ctx: Ctx): DiscordActionRow | null {
   const { messages } = ctx;
   const { pkg } = event;
   const candidates = [button(messages.modPage, pkg.url, ctx.storeEmojis[pkg.store] ?? STORES[pkg.store].buttonEmoji)];
   if (ctx.optionalButtons) candidates.push(button(messages.download, pkg.downloadUrl, BUTTON_EMOJI.download), button(messages.website, pkg.websiteUrl, BUTTON_EMOJI.website));
-  const source = button(messages.sourceCode, PROJECT.repoUrl, ctx.ratatoskrEmoji ?? BUTTON_EMOJI.source);
   const buttons: DiscordLinkButton[] = [];
   for (const candidate of candidates) {
-    if (candidate !== null && buttons.length < DISCORD.buttonsPerRow - 1) buttons.push(candidate);
+    if (candidate !== null && buttons.length < DISCORD.buttonsPerRow) buttons.push(candidate);
   }
-  if (source !== null) buttons.push(source);
-  return { type: 1, components: buttons };
+  return buttons.length === 0 ? null : { type: 1, components: buttons };
 }

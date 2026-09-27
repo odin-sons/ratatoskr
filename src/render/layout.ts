@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { DISCORD, PROJECT } from '../core/constants.ts';
+import type { DiscordTextDisplay } from '../core/types.ts';
 
 /** AGPL notice text. */
 export const PROJECT_LINE = `-# [${PROJECT.name} v${PROJECT.version}](${PROJECT.repoUrl})`;
@@ -20,6 +21,11 @@ export const SECTION_EMOJI = { description: '📜', categories: '🗂️', info:
 
 /** Button emoji that are not configurable. */
 export const BUTTON_EMOJI = { download: '\u2b07\ufe0f', website: '🌐', source: '\u{1f43f}\ufe0f' } as const;
+
+/** AGPL notice as a trailing subtext block, outside the coloured container: small grey text, with a link and an emoji. */
+export function sourceSubtext(ratatoskrEmoji: string | null): DiscordTextDisplay {
+  return { type: 10, content: `-# ${ratatoskrEmoji ?? BUTTON_EMOJI.source} [${PROJECT.name} v${PROJECT.version}](${PROJECT.repoUrl})` };
+}
 
 const PROJECT_FIELD_LENGTH = PROJECT_FIELD.name.length + PROJECT_FIELD.value.length;
 

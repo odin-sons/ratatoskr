@@ -68,7 +68,7 @@ describe('project link', () => {
     }
   });
 
-  it('is not in an immediate message: the source button replaces it', () => {
+  it('is not in an immediate message: the trailing subtext replaces it', () => {
     const msg = renderImmediate(makeEvent({ kind: 'new' }), { now: NOW });
     expect(JSON.stringify(msg)).not.toContain(PROJECT_LINE);
     expect(msg.embeds).toBeUndefined();
@@ -140,7 +140,6 @@ describe('detailed embed layout (digest)', () => {
         `${KIND_EMOJI.update} Updated by Bob · 1.2.3 → 1.2.4 · ${TIME}`,
         'ℹ️ 94.2 MB · Downloaded 12,345 times · 5 likes',
         '',
-        '**📜 Description**',
         'Does things',
       ].join('\n'),
     );
@@ -199,7 +198,7 @@ describe('detailed embed layout (digest)', () => {
 
   it('separates the header block from the description with exactly one blank line, and only when there is an excerpt', () => {
     const withExcerpt = lines(digestOf({ description: 'Body text', sizeBytes: null }));
-    expect(withExcerpt).toEqual([expect.any(String), expect.any(String), '', '**📜 Description**', 'Body text']);
+    expect(withExcerpt).toEqual([expect.any(String), expect.any(String), '', 'Body text']);
     const without = lines(digestOf({ description: null, sizeBytes: null }));
     expect(without).toHaveLength(2);
     expect(without).not.toContain('');
@@ -207,7 +206,7 @@ describe('detailed embed layout (digest)', () => {
 
   it('keeps the also-on line in the header block, before the blank line', () => {
     const msg = digestOf({ description: 'Body', sizeBytes: null, alsoOn: [{ store: 'hexium', url: 'https://hexium.example/p' }] });
-    expect(lines(msg).slice(2)).toEqual(['Also on [Hexium](https://hexium.example/p)', '', '**📜 Description**', 'Body']);
+    expect(lines(msg).slice(2)).toEqual(['Also on [Hexium](https://hexium.example/p)', '', 'Body']);
   });
 
   it('links the heading only when the url is usable', () => {
@@ -300,9 +299,8 @@ describe('detailed embed layout (digest)', () => {
       for (const ch of ['[', ']', '(', ')', '|', '<']) expect(unescapedCount(text, ch), ch).toBe(0);
       expect(all[1]!.startsWith(`${KIND_EMOJI.update} Updated by `)).toBe(true);
       expect(all[2]).toBe('');
-      expect(all[3]).toBe('**📜 Description**');
-      expect(all).toHaveLength(5);
-      const excerpt = all[4]!;
+      expect(all).toHaveLength(4);
+      const excerpt = all[3]!;
       for (const start of ['#', '-', '>']) expect(excerpt.startsWith(start)).toBe(false);
       expect(msg.embeds![0]!.description).not.toMatch(/@(everyone|here)/);
       expect(msg.embeds![0]!.description).not.toMatch(/<[@#][!&]?\d+>/);
