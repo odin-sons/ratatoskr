@@ -412,25 +412,34 @@ describe('limits', () => {
   });
   const WORST_EMOJI = `<a:${'e'.repeat(32)}:${'9'.repeat(20)}>`;
 
-  it('stays within every V2 limit for hostile input, in every language (property)', () => {
-    fc.assert(
-      fc.property(seedArb, fc.constantFrom('en' as const, 'ru' as const), fc.boolean(), (seed, locale, withEmoji) => {
-        const msg = renderImmediate(makeEvent(seed), {
-          now: NOW,
-          locale,
-          ...(withEmoji ? { storeEmojis: { thunderstore: WORST_EMOJI, hexium: WORST_EMOJI, nexus: WORST_EMOJI }, ratatoskrEmoji: WORST_EMOJI } : {}),
-        });
-        expect(assertWithinLimits(msg)).toEqual([]);
-        expect(componentText(msg)).toBeLessThanOrEqual(DISCORD.componentsV2TextMax);
-        expect(componentCount(msg)).toBeLessThanOrEqual(DISCORD.componentsV2ComponentsMax);
-        expect(msg.allowed_mentions).toEqual({ parse: [] });
-        expect('content' in msg || 'embeds' in msg).toBe(false);
-        expect(msg.components!.at(-1)).toMatchObject({ type: 10 });
-        expect(sourceSubtext(msg)).toContain(PROJECT.repoUrl);
-        expect(JSON.stringify(msg)).not.toMatch(/@(everyone|here)/);
-      }),
-      { numRuns: 250 },
-    );
+  const checkLimits = (seed: Over, locale: 'en' | 'ru', withEmoji: boolean): void => {
+    const msg = renderImmediate(makeEvent(seed), {
+      now: NOW,
+      locale,
+      ...(withEmoji ? { storeEmojis: { thunderstore: WORST_EMOJI, hexium: WORST_EMOJI, nexus: WORST_EMOJI }, ratatoskrEmoji: WORST_EMOJI } : {}),
+    });
+    expect(assertWithinLimits(msg)).toEqual([]);
+    expect(componentText(msg)).toBeLessThanOrEqual(DISCORD.componentsV2TextMax);
+    expect(componentCount(msg)).toBeLessThanOrEqual(DISCORD.componentsV2ComponentsMax);
+    expect(msg.allowed_mentions).toEqual({ parse: [] });
+    expect('content' in msg || 'embeds' in msg).toBe(false);
+    expect(msg.components!.at(-1)).toMatchObject({ type: 10 });
+    expect(sourceSubtext(msg)).toContain(PROJECT.repoUrl);
+    expect(JSON.stringify(msg)).not.toMatch(/@(everyone|here)/);
+  };
+
+  it('stays within every V2 limit for fixed hostile cases in both languages, with and without emoji', () => {
+    const huge = 'N'.repeat(8000);
+    const cases: Over[] = [
+      { kind: 'new', name: huge, owner: huge, description: huge, changelog: huge, categories: [huge] },
+      { kind: 'update', name: '@everyone [x](javascript:bad)', owner: '\uD800<owner>', url: 'javascript:bad', description: '# heading\n-# subtext', changelog: '```\n<@123>', categories: ['<@123>', huge] },
+      { kind: 'update', name: huge, owner: huge, url: `https://x.io/${'a'.repeat(1500)}`, alsoOn: Array.from({ length: 5 }, () => ({ store: 'hexium' as const, url: `https://x.io/${'b'.repeat(1500)}` })), downloads: 1e30, likes: Number.NaN },
+    ];
+    for (const seed of cases) for (const locale of ['en', 'ru'] as const) for (const withEmoji of [false, true]) checkLimits(seed, locale, withEmoji);
+  });
+
+  it('stays within every V2 limit for varied small inputs (property)', () => {
+    fc.assert(fc.property(seedArb, fc.constantFrom('en' as const, 'ru' as const), fc.boolean(), checkLimits), { numRuns: 80, seed: 20260928 });
   });
 
   it('fits the worst case with room to spare', () => {

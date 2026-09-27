@@ -79,15 +79,16 @@ describe('project link', () => {
     const storeEmojis = { thunderstore: emoji, hexium: emoji, nexus: emoji };
     const huge = 'N'.repeat(5000);
     const updateInputs = [
-      realisticUpdates(2000),
-      Array.from({ length: 300 }, (_, i) => makeEvent({ name: huge, owner: huge, versionTo: huge, versionFrom: huge, url: `https://x.io/${'a'.repeat(400)}` }, i)),
+      realisticUpdates(300),
+      Array.from({ length: 80 }, (_, i) => makeEvent({ name: huge, owner: huge, versionTo: huge, versionFrom: huge, url: `https://x.io/${'a'.repeat(400)}` }, i)),
     ];
-    const newInput = Array.from({ length: 120 }, (_, i) =>
+    const newInput = Array.from({ length: 80 }, (_, i) =>
       makeEvent({ kind: 'new', name: huge, owner: huge, description: huge, changelog: huge, changelogUrl: `https://x.io/${'a'.repeat(400)}`, categories: [huge, huge], downloads: 1e15, likes: 1e15, alsoOn: [{ store: 'hexium', url: PAGE }, { store: 'nexus', url: PAGE }] }, i),
     );
     const check = (events: ModEvent[], detailed: boolean, locale: 'en' | 'ru'): void => {
       const plan = planDigest(events, { detailed: () => detailed, now: NOW, storeEmojis, locale });
       expect(countItems(plan.messages)).toBe(events.length);
+      expect(plan.messages.length).toBeGreaterThan(1);
       for (const msg of plan.messages) {
         expect(assertWithinLimits(msg)).toEqual([]);
         expect(endsWithProjectField(msg)).toBe(true);

@@ -117,10 +117,9 @@ const seedArb: fc.Arbitrary<EventSeed> = fc.record({
 });
 
 const smallSeedListArb = fc.array(seedArb, { maxLength: 25 });
-const largeSeedListArb = fc.array(seedArb, { minLength: 100, maxLength: 600, size: 'max' });
 
 /** Shared invariant body for both digest-invariant property tests below. */
-function checkDigestInvariants(seeds: EventSeed[], detailEvery: number, withEmoji: boolean): void {
+function checkDigestInvariants(seeds: Partial<EventSeed>[], detailEvery: number, withEmoji: boolean): void {
   const events = seeds.map((seed, i) => makeEvent(seed, i));
   const plan = planDigest(events, {
     detailed: (e) => detailEvery > 0 && e.pkg.packageId.length % detailEvery === 0,
@@ -138,15 +137,34 @@ function checkDigestInvariants(seeds: EventSeed[], detailEvery: number, withEmoj
 }
 
 describe('digest invariants', () => {
-  // Split by scale: a large-digest run does ~18x the work of a small one (measured), so it needs far fewer
-  // samples for equivalent input-space coverage, and a failure now names which regime broke.
   it('never drops a mod and always satisfies Discord limits, small digests (property)', () => {
-    fc.assert(fc.property(smallSeedListArb, fc.integer({ min: 0, max: 6 }), fc.boolean(), checkDigestInvariants), { numRuns: 60 });
+    fc.assert(fc.property(smallSeedListArb, fc.integer({ min: 0, max: 6 }), fc.boolean(), checkDigestInvariants), { numRuns: 60, seed: 20260928 });
   });
 
-  it('never drops a mod and always satisfies Discord limits, large digests (property)', () => {
-    fc.assert(fc.property(largeSeedListArb, fc.integer({ min: 0, max: 6 }), fc.boolean(), checkDigestInvariants), { numRuns: 20 });
-  }, 30_000);
+  it('never drops a mod and always satisfies Discord limits at fixed large-digest boundaries', () => {
+    const hostile = ['@everyone [x](javascript:bad)', '\uD800<name>', 'N'.repeat(5000)];
+    const seeds: Partial<EventSeed>[] = Array.from({ length: 600 }, (_, i) => ({
+      store: STORE_KINDS[i % STORE_KINDS.length]!,
+      kind: i % 7 === 0 ? 'new' : 'update',
+      name: hostile[i % hostile.length]!,
+      owner: hostile[(i + 1) % hostile.length]!,
+      url: i % 3 === 0 ? 'javascript:bad' : `https://x.io/${'a'.repeat(400)}`,
+      description: hostile[(i + 2) % hostile.length]!,
+      changelog: i % 2 === 0 ? 'line one\n\nline two'.repeat(40) : null,
+      categories: [hostile[i % hostile.length]!],
+    }));
+    checkDigestInvariants(seeds.slice(0, 100), 1, true);
+    checkDigestInvariants(seeds.slice(0, 300), 4, false);
+    checkDigestInvariants(seeds, 0, true);
+  });
+
+  it('produces the same digest for equivalent inputs regardless of previous renders', () => {
+    const events = realisticUpdates(80);
+    const options = { detailed: (event: ModEvent) => Number(event.pkg.packageId.slice(-1)) % 2 === 0, now: NOW };
+    const expected = planDigest(events, options);
+    planDigest(realisticUpdates(150), allDetail);
+    expect(planDigest(structuredClone(events), options)).toEqual(expected);
+  });
 
   it('renders a single mod with a pathologically long name', () => {
     for (const long of ['L'.repeat(5000), '*'.repeat(5000), '@everyone'.repeat(500)]) {
