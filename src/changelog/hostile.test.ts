@@ -3,6 +3,7 @@ import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { eventId } from '../core/ids.ts';
 import type { ModEvent } from '../core/types.ts';
+import { makeCtx } from '../render/context.ts';
 import { buildDetailed } from '../render/detailed.ts';
 import { nestedLinkDocument, nestedLinkText, unsafeLinkTargets } from './__fixtures__/link-oracle.ts';
 import { hasInvisible, INVISIBLE_CODE_POINTS } from '../text/__fixtures__/invisible.ts';
@@ -11,6 +12,7 @@ import { extractNexusChangelog } from './nexus.ts';
 
 const FULL_URL = 'https://thunderstore.io/c/valheim/p/Author/Mod/changelog/';
 const NOW = new Date('2026-09-19T12:00:00Z');
+const CTX = makeCtx({});
 
 
 function eventWith(changelog: string | null, changelogUrl: string | null = FULL_URL): ModEvent {
@@ -44,7 +46,7 @@ function eventWith(changelog: string | null, changelogUrl: string | null = FULL_
 
 const viaThunderstore = (md: string): string => extractChangelog(`## 1.0.0\n${md}`, '1.0.0', { fullUrl: FULL_URL }) ?? '';
 const viaNexus = (md: string): string => extractNexusChangelog({ '1.0.0': md.split('\n') }, '1.0.0', { fullUrl: FULL_URL }) ?? '';
-const viaRenderer = (md: string): string => buildDetailed(eventWith(extractChangelog(`## 1.0.0\n${md}`, '1.0.0', { fullUrl: FULL_URL })), NOW).fields?.[0]?.value ?? '';
+const viaRenderer = (md: string): string => buildDetailed(eventWith(extractChangelog(`## 1.0.0\n${md}`, '1.0.0', { fullUrl: FULL_URL })), NOW, CTX).fields?.[0]?.value ?? '';
 
 const ROUTES: Array<[string, (md: string) => string]> = [
   ['extractChangelog', viaThunderstore],
@@ -255,7 +257,7 @@ describe('invisible and bidi characters written as numeric entities', () => {
   it('drops the raw characters too, also through the renderer', () => {
     const raw = `a${String.fromCharCode(0x202e)}b${String.fromCharCode(0x2066)}c${String.fromCharCode(0x200b)}d`;
     expect(hasInvisible(viaThunderstore(raw))).toBe(false);
-    expect(buildDetailed(eventWith(raw, null), NOW).fields?.[0]?.value).toBe('abcd');
+    expect(buildDetailed(eventWith(raw, null), NOW, CTX).fields?.[0]?.value).toBe('abcd');
   });
 
   it('keeps entities inside code fences literal', () => {

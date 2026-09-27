@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { ModEvent, StoreKind } from '../core/types.ts';
+import { getMessages, type Messages } from '../i18n/index.ts';
 import { CAPS } from './layout.ts';
 import { STORE_ORDER } from './stores.ts';
 import { formatBytes, inline, mdLink, safeUrl } from './text.ts';
@@ -30,18 +31,18 @@ export interface Prepared {
   size: string | null;
 }
 
-export function prepare(event: ModEvent): Prepared {
+export function prepare(event: ModEvent, messages: Messages = getMessages(undefined)): Prepared {
   const { pkg } = event;
   const from = event.versionFrom ? inline(event.versionFrom, CAPS.version) : '';
   return {
     store: pkg.store,
     ownerKey: pkg.owner,
-    name: inline(pkg.name, CAPS.name) || 'unnamed',
+    name: inline(pkg.name, CAPS.name) || messages.unnamed,
     url: safeUrl(pkg.url),
     from: from || null,
     to: inline(event.versionTo, CAPS.version) || '?',
     owner: inline(pkg.owner, CAPS.owner),
-    size: formatBytes(pkg.sizeBytes),
+    size: formatBytes(pkg.sizeBytes, messages.byteUnits, messages.decimalSeparator),
   };
 }
 

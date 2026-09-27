@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
-import { DISCORD } from '../core/constants.ts';
+import { CHANGELOG_DISPLAY_MAX, DISCORD } from '../core/constants.ts';
 import type { DiscordMessage, EventKind, ModEvent } from '../core/types.ts';
 import { extractChangelog } from '../changelog/extract.ts';
 import { hasInvisible, INVISIBLE_CODE_POINTS } from '../text/__fixtures__/invisible.ts';
@@ -10,12 +10,13 @@ import { countItems } from './count.ts';
 import { prepare, renderBlocks } from './compact.ts';
 import { planDigest } from './digest.ts';
 import { renderDigest, renderImmediate } from './index.ts';
-import { assertWithinLimits, measureMessage } from './limits.ts';
-import { KIND_EMOJI, PROJECT_LINE } from './layout.ts';
+import { assertWithinLimits } from './limits.ts';
+import { KIND_EMOJI, PROJECT_LINE, SECTION_EMOJI } from './layout.ts';
 import { endsWithProjectField, makeEvent, NOW, realisticUpdates, STORE_KINDS, type EventSeed } from './__fixtures__/events.ts';
 import { escapeTruncate, formatBytes, inline, safeUrl } from './text.ts';
 
 const noDetail = { detailed: () => false, now: NOW };
+const allDetail = { detailed: () => true, now: NOW };
 
 const WORST_EMOJI = `<a:${'e'.repeat(32)}:${'9'.repeat(20)}>`;
 const WORST_EMOJIS = { thunderstore: WORST_EMOJI, hexium: WORST_EMOJI, nexus: WORST_EMOJI };
@@ -29,14 +30,30 @@ function unescapedCount(text: string, ch: string): number {
   return n;
 }
 
+function displayTexts(message: DiscordMessage): string[] {
+  const out: string[] = [];
+  const visit = (node: unknown): void => {
+    if (typeof node !== 'object' || node === null) return;
+    const rec = node as { type?: number; content?: string; components?: unknown[] };
+    if (rec.type === 10 && typeof rec.content === 'string') out.push(rec.content);
+    for (const child of rec.components ?? []) visit(child);
+  };
+  for (const top of message.components ?? []) visit(top);
+  return out;
+}
+
 function allText(messages: DiscordMessage[]): string {
   return messages
-    .flatMap((m) => m.embeds ?? [])
-    .flatMap((e) => [e.description, e.footer?.text, ...(e.fields ?? []).filter((f) => f.value !== PROJECT_LINE).flatMap((f) => [f.name, f.value])])
+    .flatMap((m) => [
+      ...(m.embeds ?? []).flatMap((e) => [e.description, e.footer?.text, ...(e.fields ?? []).filter((f) => f.value !== PROJECT_LINE).flatMap((f) => [f.name, f.value])]),
+      ...displayTexts(m),
+    ])
     .filter((t): t is string => typeof t === 'string')
     .join('\n')
     .replaceAll(KIND_EMOJI.update, '')
-    .replaceAll(KIND_EMOJI.new, '');
+    .replaceAll(KIND_EMOJI.new, '')
+    .replaceAll(SECTION_EMOJI.info, '')
+    .replaceAll(SECTION_EMOJI.categories, '');
 }
 
 function expectValid(messages: DiscordMessage[]): void {
@@ -82,6 +99,9 @@ const seedArb: fc.Arbitrary<EventSeed> = fc.record({
   changelogUrl: fc.option(urlArb, { nil: null }),
   alsoOn: fc.array(fc.record({ store: fc.constantFrom(...STORE_KINDS), url: urlArb }), { maxLength: 5 }),
   downloadUrl: fc.option(urlArb, { nil: null }),
+  websiteUrl: fc.option(urlArb, { nil: null }),
+  iconUrl: fc.option(urlArb, { nil: null }),
+  likes: fc.option(fc.oneof(fc.nat(), fc.constant(Number.NaN), fc.constant(-5), fc.constant(1e30), fc.double()), { nil: null }),
   downloads: fc.option(fc.oneof(fc.nat(), fc.constant(Number.NaN), fc.constant(-5), fc.constant(1e30), fc.double()), { nil: null }),
   categories: fc.array(trickyText, { maxLength: 30 }),
   updatedAt: fc.oneof(fc.constant('2026-09-19T11:30:00Z'), trickyText),
@@ -204,7 +224,7 @@ describe('degradation ladder', () => {
 
   it('L3 groups mods by author and keeps every mod countable', () => {
     const events = Array.from({ length: 200 }, (_, i) => makeEvent({ owner: i < 150 ? 'Solo' : `Other${i}`, name: `M|${i}` }, i));
-    const [block] = renderBlocks(events.map(prepare), 3);
+    const [block] = renderBlocks(events.map((e) => prepare(e)), 3);
     expect(block!.lines.reduce((sum, l) => sum + l.count, 0)).toBe(200);
     expect(block!.lines[0]!.text.startsWith('**Solo** · [M\\|0](')).toBe(true);
     for (const line of block!.lines) expect(line.text.length).toBeLessThan(1100);
@@ -275,18 +295,20 @@ describe('invisible characters in text fields', () => {
 
   it.each(RAW)('%s written raw is dropped from name, owner, versions and description, detailed and compact', (_label, mark) => {
     const event = makeEvent({ kind: 'update', name: `Mo${mark}d`, owner: `Ow${mark}ner`, versionFrom: `1${mark}.0`, versionTo: `2${mark}.0`, description: `De${mark}sc` });
-    for (const text of [allText([renderImmediate(event, { now: NOW })]), allText(renderDigest([event], noDetail))]) {
+    for (const text of [allText([renderImmediate(event, { now: NOW })]), allText(renderDigest([event], noDetail)), allText(renderDigest([event], allDetail))]) {
       expect(hasInvisible(text)).toBe(false);
     }
-    const detailed = renderImmediate(event, { now: NOW }).embeds![0]!;
-    expect(detailed.description?.split('\n')[0]?.replace(/\s/g, '')).toBe(`#[Mod1.0→2.0](${event.pkg.url})`);
-    expect(detailed.description?.replace(/\s/g, '')).toContain('byOwner');
-    expect(detailed.description?.replace(/\s/g, '')).toContain('Desc');
+    const detailed = renderDigest([event], allDetail)[0]!.embeds![0]!;
+    const compact = detailed.description!.replace(/\s/g, '');
+    expect(detailed.description?.split('\n')[0]?.replace(/\s/g, '')).toBe(`#[Mod](${event.pkg.url})`);
+    expect(compact).toContain('byOwner');
+    expect(compact).toContain('1.0→2.0');
+    expect(compact).toContain('Desc');
   });
 
   it.each(ENTITIES)('%s written as an entity is dropped from the description', (_label, mark) => {
     const event = makeEvent({ kind: 'new', description: `De${mark}sc` });
-    const text = allText([renderImmediate(event, { now: NOW })]);
+    const text = allText([renderImmediate(event, { now: NOW }), ...renderDigest([event], allDetail)]);
     expect(hasInvisible(text)).toBe(false);
     expect(text).toContain('Desc');
   });
@@ -332,7 +354,7 @@ describe('splitting', () => {
     const plan = planDigest(events, noDetail);
     expect(plan.messages).toHaveLength(1);
     const [first, second] = plan.messages[0]!.embeds!;
-    expect(first!.description!.split('\n')[0]).toBe('# [Brand New 1.2.4](https://thunderstore.io/c/valheim/p/Author0/Mod900/)');
+    expect(first!.description!.split('\n')[0]).toBe('# [Brand New](https://thunderstore.io/c/valheim/p/Author0/Mod900/)');
     expect(first!.fields![0]!.value).toContain('[Full changelog](https://x.io/changelog)');
     expect(second!.description!.startsWith('# ')).toBe(false);
     expect(countItems(plan.messages)).toBe(31);
@@ -347,31 +369,10 @@ describe('splitting', () => {
   });
 });
 
-describe('renderImmediate', () => {
-  it('stays within limits for hostile input', () => {
-    fc.assert(
-      fc.property(seedArb, (seed) => {
-        const msg = renderImmediate(makeEvent(seed), { now: NOW, storeEmojis: WORST_EMOJIS });
-        expect(assertWithinLimits(msg)).toEqual([]);
-        expect(msg.embeds).toHaveLength(1);
-        expect(msg.allowed_mentions).toEqual({ parse: [] });
-        expectEndsWithProjectLine(msg);
-      }),
-      { numRuns: 200 },
-    );
-  });
-
-  it('carries the AGPL project link as the last field and only the store in the footer', () => {
-    const msg = renderImmediate(makeEvent({ kind: 'new' }), { now: NOW });
-    expect(msg.embeds![0]!.fields!.at(-1)).toEqual({ name: '\u200b', value: '-# [ratatoskr v0.1.0](https://github.com/odin-sons/ratatoskr)' });
-    expect(msg.embeds![0]!.footer!.text).toBe('Thunderstore');
-    expect(measureMessage(msg)).toBeLessThan(DISCORD.embedTotalTextMax);
-  });
-});
-
 describe('changelog field', () => {
   const URL_ = 'https://x.io/changelog';
-  const field = (event: ModEvent): string | undefined => renderImmediate(event, { now: NOW }).embeds![0]!.fields?.find((f) => f.name === 'Changelog')?.value;
+  const field = (event: ModEvent): string | undefined => renderDigest([event], allDetail)[0]!.embeds![0]!.fields?.find((f) => f.name === 'Changelog')?.value;
+  const display = (event: ModEvent): string | undefined => displayTexts(renderImmediate(event, { now: NOW })).find((t) => t.startsWith('**Changelog**\n'))?.slice('**Changelog**\n'.length);
   const count = (text: string, part: string): number => text.split(part).length - 1;
 
   it('inserts an extracted excerpt exactly as the changelog module produced it', () => {
@@ -379,6 +380,7 @@ describe('changelog field', () => {
     const excerpt = extractChangelog(markdown, '1.0.0', { fullUrl: URL_ });
     expect(excerpt).toBe('**Added**\n- **bold** item with \\`code\\`\n\\`\\`\\`\nconst a = 1;\n\\`\\`\\`\n- [docs](https://example.com/d)\n[Full changelog](https://x.io/changelog)');
     expect(field(makeEvent({ kind: 'new', changelog: excerpt, changelogUrl: URL_ }))).toBe(excerpt);
+    expect(display(makeEvent({ kind: 'new', changelog: excerpt, changelogUrl: URL_ }))).toBe(excerpt);
   });
 
   it('shows exactly one full-changelog link when the excerpt already ends with it', () => {
@@ -402,7 +404,7 @@ describe('changelog field', () => {
     const value = field(makeEvent({ kind: 'new', changelog: `@everyone <@123>\n${'x'.repeat(5000)}`, changelogUrl: URL_ }))!;
     expect(value).not.toMatch(/@(everyone|here)/);
     expect(value).not.toMatch(/<@\d+>/);
-    expect(value.length).toBeLessThanOrEqual(DISCORD.embedFieldValueMax);
+    expect(value.length).toBeLessThanOrEqual(CHANGELOG_DISPLAY_MAX);
     expect(value.endsWith(`[Full changelog](${URL_})`)).toBe(true);
     expect(value).toContain('…\n');
   });
@@ -420,6 +422,7 @@ describe('changelog field', () => {
     ].join('\n');
     const excerpt = extractChangelog(hostile, '1.0.0', { fullUrl: URL_ });
     const messages = renderDigest([makeEvent({ kind: 'new', name: 'Hostile', changelog: excerpt, changelogUrl: URL_ })], noDetail);
+    expect(display(makeEvent({ kind: 'new', name: 'Hostile', changelog: excerpt, changelogUrl: URL_ }))).toBe(messages[0]!.embeds![0]!.fields![0]!.value);
     const value = messages[0]!.embeds![0]!.fields![0]!.value;
     expect(count(value, '[Full changelog](')).toBe(1);
     expect(value.endsWith(`[Full changelog](${URL_})`)).toBe(true);
@@ -430,7 +433,7 @@ describe('changelog field', () => {
     expect(value).not.toMatch(/<\/[\w -]+:\d+>/);
     expect(value).not.toMatch(/<\/?(script|img|b)\b/i);
     expect(value).toContain('](https://ok.example/p_%28q%29)');
-    expect(value.length).toBeLessThanOrEqual(DISCORD.embedFieldValueMax);
+    expect(value.length).toBeLessThanOrEqual(CHANGELOG_DISPLAY_MAX);
     expectValid(messages);
   });
 
@@ -441,7 +444,7 @@ describe('changelog field', () => {
         const excerpt = extractChangelog(parts.join(''), '1.0.0', { fullUrl: withUrl ? URL_ : null });
         const value = field(makeEvent({ kind: 'new', changelog: excerpt, changelogUrl: withUrl ? URL_ : null }));
         if (value !== undefined) {
-          expect(value.length).toBeLessThanOrEqual(DISCORD.embedFieldValueMax);
+          expect(value.length).toBeLessThanOrEqual(CHANGELOG_DISPLAY_MAX);
           expect(count(value, '[Full changelog](')).toBeLessThanOrEqual(1);
           expect(value).not.toMatch(/@(everyone|here)/i);
         }
@@ -513,9 +516,11 @@ describe('unbounded fields are cut before they are processed', () => {
     expect(description.length).toBeGreaterThan(1_000_000);
     const event = makeEvent({ kind: 'new', description });
     expect(timed(() => renderImmediate(event, { now: NOW }))).toBeLessThan(10);
-    const embed = renderImmediate(event, { now: NOW }).embeds![0]!;
+    expect(timed(() => renderDigest([event], allDetail))).toBeLessThan(10);
+    const embed = renderDigest([event], allDetail)[0]!.embeds![0]!;
     expect(embed.description!.length).toBeLessThanOrEqual(DISCORD.embedDescriptionMax);
     expect(embed.description).toContain('x x x');
+    expect(allText([renderImmediate(event, { now: NOW })])).toContain('x x x');
   });
 
   it('renders hundreds of 20 000-character names, owners and versions cheaply', () => {

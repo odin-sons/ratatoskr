@@ -54,28 +54,37 @@ export function mdLink(text: string, url: string): string {
   return `[${text}](${url})`;
 }
 
-/** Whole count with comma thousands separators; null unless the value is a non-negative safe number. */
-export function formatCount(value: number | null | undefined): string | null {
+/** The whole part of a count, or null unless the value is a non-negative safe number. */
+export function wholeCount(value: number | null | undefined): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
   const whole = Math.floor(value);
-  if (!Number.isSafeInteger(whole)) return null;
+  return Number.isSafeInteger(whole) ? whole : null;
+}
+
+/** Whole count with a separator between digit groups of three; null unless the value is a non-negative safe number. */
+export function formatCount(value: number | null | undefined, separator = ','): string | null {
+  const whole = wholeCount(value);
+  if (whole === null) return null;
   const digits = String(whole);
   let out = '';
   for (let end = digits.length; end > 0; end -= 3) {
     const group = digits.slice(Math.max(0, end - 3), end);
-    out = out === '' ? group : `${group},${out}`;
+    out = out === '' ? group : `${group}${separator}${out}`;
   }
   return out;
 }
 
-export function formatBytes(bytes: number | null | undefined): string | null {
+const ENGLISH_UNITS: readonly string[] = ['B', 'KB', 'MB', 'GB', 'TB'];
+
+export function formatBytes(bytes: number | null | undefined, units: readonly string[] = ENGLISH_UNITS, decimalSeparator = '.'): string | null {
   if (bytes == null || !Number.isFinite(bytes) || bytes <= 0) return null;
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let value = bytes;
   let unit = 0;
   while (unit < units.length - 1 && (unit === 0 ? value >= 1024 : Math.round(value * 10) / 10 >= 1024)) {
     value /= 1024;
     unit += 1;
   }
-  return unit === 0 ? `${Math.round(value)} B` : `${value.toFixed(1)} ${units[unit]}`;
+  if (unit === 0) return `${Math.round(value)} ${units[0]}`;
+  const fixed = value.toFixed(1);
+  return `${decimalSeparator === '.' ? fixed : fixed.replace('.', decimalSeparator)} ${units[unit]}`;
 }

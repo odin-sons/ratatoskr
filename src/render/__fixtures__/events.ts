@@ -21,6 +21,9 @@ export interface EventSeed {
   alsoOn: { store: StoreKind; url: string }[];
   downloadUrl: string | null;
   downloads: number | null;
+  likes: number | null;
+  websiteUrl: string | null;
+  iconUrl: string | null;
   categories: string[];
   updatedAt: string;
   createdAt: string;
@@ -42,6 +45,9 @@ export function makeEvent(seed: Partial<EventSeed> = {}, index = 0): ModEvent {
     alsoOn: [],
     downloadUrl: null,
     downloads: null,
+    likes: null,
+    websiteUrl: null,
+    iconUrl: 'https://gcdn.thunderstore.io/live/repository/icons/x.png',
     categories: [],
     updatedAt: '2026-09-19T11:30:00Z',
     createdAt: '2026-09-19T11:30:00Z',
@@ -65,7 +71,7 @@ export function makeEvent(seed: Partial<EventSeed> = {}, index = 0): ModEvent {
       name: s.name,
       version: s.versionTo,
       url: s.url,
-      iconUrl: 'https://gcdn.thunderstore.io/live/repository/icons/x.png',
+      iconUrl: s.iconUrl,
       description: s.description,
       categories: s.categories,
       isNsfw: false,
@@ -74,6 +80,8 @@ export function makeEvent(seed: Partial<EventSeed> = {}, index = 0): ModEvent {
       sizeBytes: s.sizeBytes,
       downloadUrl: s.downloadUrl,
       downloads: s.downloads,
+      likes: s.likes,
+      websiteUrl: s.websiteUrl,
     },
   };
 }

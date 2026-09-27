@@ -50,9 +50,20 @@ function cutAtLine(body: string, limit: number): string | null {
   return null;
 }
 
+const WHITESPACE = /\s/;
+
+function lastSpace(text: string): number {
+  for (let i = text.length - 1; i >= 0; i--) if (WHITESPACE.test(text.charAt(i))) return i;
+  return -1;
+}
+
 /** Fallback when no whole line fits: hard cut, drop a half link and a dangling backslash. */
-function cutHard(body: string, limit: number): string | null {
+function cutHard(body: string, limit: number, words: boolean): string | null {
   let text = body.slice(0, safeEnd(body, Math.min(limit, body.length)));
+  if (words && body.length > limit && !WHITESPACE.test(body.charAt(text.length))) {
+    const space = lastSpace(text);
+    if (space * 2 >= text.length) text = text.slice(0, space);
+  }
   const open = text.lastIndexOf('[');
   if (open > text.lastIndexOf(']')) {
     text = text.slice(0, open);
@@ -69,6 +80,10 @@ export interface FinalizeOptions {
   fullUrl?: string | null;
   /** The caller already dropped text from the end of `text`, so an ellipsis is always due. */
   cut?: boolean;
+  /** Text of the trailing link; defaults to the english label. */
+  label?: string;
+  /** When no whole line fits, back off to the last whitespace instead of cutting mid-word (unless that would drop half the text). */
+  wordBoundary?: boolean;
 }
 
 /**
@@ -82,7 +97,7 @@ export function finalizeExcerpt(text: string, opts: FinalizeOptions): string | n
   if (body === '') return null;
 
   const target = linkTarget(opts.fullUrl);
-  let link = target === null ? null : `[${FULL_CHANGELOG_LABEL}](${target})`;
+  let link = target === null ? null : `[${opts.label ?? FULL_CHANGELOG_LABEL}](${target})`;
   if (link !== null && (link.length + 1) * 2 >= maxChars) link = null;
   const suffix = link === null ? '' : `\n${link}`;
   const budget = maxChars - suffix.length;
@@ -91,6 +106,6 @@ export function finalizeExcerpt(text: string, opts: FinalizeOptions): string | n
 
   const limit = budget - 1;
   if (limit < 1) return ELLIPSIS + suffix;
-  const cut = cutAtLine(body, limit) ?? cutHard(body, limit);
+  const cut = cutAtLine(body, limit) ?? cutHard(body, limit, opts.wordBoundary === true);
   return cut === null ? null : `${cut}${ELLIPSIS}${suffix}`;
 }

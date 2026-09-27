@@ -1,40 +1,70 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
-import { DISCORD } from '../core/constants.ts';
-import { buildComponents, linkButtonUrl } from './components.ts';
+import { DISCORD, PROJECT } from '../core/constants.ts';
+import { getMessages } from '../i18n/index.ts';
+import { makeEvent } from './__fixtures__/events.ts';
+import { buildActionRow, linkButtonUrl } from './components.ts';
+import { makeCtx } from './context.ts';
 
 const PAGE = 'https://thunderstore.io/c/valheim/p/Owner/Mod/';
 const DL = 'https://thunderstore.io/package/download/Owner/Mod/1.2.3/';
+const WEB = 'https://example.com/mod';
+const ctx = makeCtx({});
+const row = (over: Parameters<typeof makeEvent>[0], c = ctx) => buildActionRow(makeEvent(over), c);
+const labels = (over: Parameters<typeof makeEvent>[0], c = ctx) => row(over, c).components.map((b) => b.label);
 
-describe('buildComponents', () => {
-  it('builds one action row with a page button and a download button', () => {
-    expect(buildComponents(PAGE, DL)).toEqual([
-      {
-        type: 1,
-        components: [
-          { type: 2, style: 5, label: 'Mod page', url: PAGE },
-          { type: 2, style: 5, label: 'Download', url: DL },
-        ],
-      },
-    ]);
+describe('buildActionRow', () => {
+  it('builds one row with page, download, website and source buttons in order', () => {
+    expect(labels({ url: PAGE, downloadUrl: DL, websiteUrl: WEB })).toEqual(['Mod page', 'Download', 'Website', 'ratatoskr']);
+    expect(row({ url: PAGE, downloadUrl: DL, websiteUrl: WEB }).type).toBe(1);
   });
 
-  it('omits the download button when there is no download url', () => {
-    const rows = buildComponents(PAGE, null);
-    expect(rows![0]!.components.map((b) => b.label)).toEqual(['Mod page']);
-    expect(buildComponents(PAGE, undefined)![0]!.components).toHaveLength(1);
+  it('omits the download and website buttons without a url', () => {
+    expect(labels({ url: PAGE, downloadUrl: null, websiteUrl: null })).toEqual(['Mod page', 'ratatoskr']);
+    expect(labels({ url: PAGE, downloadUrl: DL, websiteUrl: null })).toEqual(['Mod page', 'Download', 'ratatoskr']);
+    expect(labels({ url: PAGE, downloadUrl: null, websiteUrl: WEB })).toEqual(['Mod page', 'Website', 'ratatoskr']);
   });
 
-  it('drops an invalid button and keeps the valid one', () => {
-    expect(buildComponents('javascript:alert(1)', DL)![0]!.components.map((b) => b.label)).toEqual(['Download']);
-    expect(buildComponents(PAGE, 'ftp://x.io/a')![0]!.components.map((b) => b.label)).toEqual(['Mod page']);
+  it('places the website button right after the download button', () => {
+    expect(labels({ url: PAGE, downloadUrl: DL, websiteUrl: WEB }).indexOf('Website')).toBe(labels({ url: PAGE, downloadUrl: DL, websiteUrl: WEB }).indexOf('Download') + 1);
   });
 
-  it('returns nothing when no button is valid', () => {
-    expect(buildComponents('nope', null)).toBeUndefined();
-    expect(buildComponents('', '')).toBeUndefined();
-    expect(buildComponents(null, undefined)).toBeUndefined();
+  it('drops an invalid button and keeps the valid ones', () => {
+    expect(labels({ url: 'javascript:alert(1)', downloadUrl: DL })).toEqual(['Download', 'ratatoskr']);
+    expect(labels({ url: PAGE, downloadUrl: 'ftp://x.io/a' })).toEqual(['Mod page', 'ratatoskr']);
+  });
+
+  it('keeps the source button when nothing else is valid', () => {
+    const only = row({ url: 'nope', downloadUrl: '', websiteUrl: '' }).components;
+    expect(only).toHaveLength(1);
+    expect(only[0]).toMatchObject({ label: 'ratatoskr', url: PROJECT.repoUrl });
+  });
+
+  it('offers only the mod page and the source button without optional buttons', () => {
+    const core = makeCtx({ optionalButtons: false });
+    expect(labels({ url: PAGE, downloadUrl: DL, websiteUrl: WEB }, core)).toEqual(['Mod page', 'ratatoskr']);
+    expect(labels({ url: 'nope', downloadUrl: DL, websiteUrl: WEB }, core)).toEqual(['ratatoskr']);
+    expect(labels({ url: PAGE, downloadUrl: DL, websiteUrl: WEB }, makeCtx({ optionalButtons: true }))).toHaveLength(4);
+  });
+
+  it('takes labels from the catalog', () => {
+    expect(labels({ url: PAGE, downloadUrl: DL, websiteUrl: WEB }, makeCtx({ locale: 'ru' }))).toEqual(['Страница мода', 'Скачать', 'Сайт', 'ratatoskr']);
+  });
+
+  it('uses real Unicode emoji for every store fallback, since Discord rejects other symbols on buttons', () => {
+    for (const store of ['thunderstore', 'hexium', 'nexus'] as const) {
+      const emoji = row({ url: PAGE, store }).components[0]!.emoji as { name: string };
+      expect(emoji.name).toMatch(/^\p{Extended_Pictographic}/u);
+    }
+  });
+
+  it('gives the mod page button the configured store emoji, else the store fallback', () => {
+    const custom = '<:thunderstore:123456789012345678>';
+    expect(row({ url: PAGE }, makeCtx({ storeEmojis: { thunderstore: custom } })).components[0]!.emoji).toEqual({ id: '123456789012345678', name: 'thunderstore', animated: false });
+    expect(row({ url: PAGE }).components[0]!.emoji).toEqual({ name: '⚡' });
+    expect(row({ url: PAGE, store: 'hexium' }).components[0]!.emoji).toEqual({ name: '🟣' });
+    expect(row({ url: PAGE, store: 'nexus' }).components[0]!.emoji).toEqual({ name: '🌀' });
   });
 
   it('never exceeds the Discord button limits (property)', () => {
@@ -44,15 +74,14 @@ describe('buildComponents', () => {
       fc.constantFrom('http://a.io/x', 'https://user:pw@a.io/x', 'https://', 'HTTPS://A.IO/X', 'data:text/html,x', 'https://a.io/x y', ''),
       fc.constant(null),
     );
+    const languages = fc.constantFrom('en' as const, 'ru' as const);
     fc.assert(
-      fc.property(url, url, (page, download) => {
-        const rows = buildComponents(page, download);
-        if (rows === undefined) return;
-        expect(rows).toHaveLength(1);
-        expect(rows[0]!.type).toBe(1);
-        expect(rows[0]!.components.length).toBeGreaterThan(0);
-        expect(rows[0]!.components.length).toBeLessThanOrEqual(DISCORD.buttonsPerRow);
-        for (const b of rows[0]!.components) {
+      fc.property(url, url, url, languages, (page, download, website, locale) => {
+        const built = row({ url: page ?? '', downloadUrl: download, websiteUrl: website }, makeCtx({ locale }));
+        expect(built.type).toBe(1);
+        expect(built.components.length).toBeGreaterThan(0);
+        expect(built.components.length).toBeLessThanOrEqual(DISCORD.buttonsPerRow);
+        for (const b of built.components) {
           expect(b.type).toBe(2);
           expect(b.style).toBe(5);
           expect(b.label.length).toBeGreaterThan(0);
@@ -61,9 +90,41 @@ describe('buildComponents', () => {
           expect(b.url).toMatch(/^https?:\/\//);
           expect(() => new URL(b.url)).not.toThrow();
         }
+        expect(built.components.at(-1)!.url).toBe(PROJECT.repoUrl);
       }),
       { numRuns: 500 },
     );
+  });
+
+  it('keeps every catalog label within the button label limit', () => {
+    for (const language of ['en', 'ru']) {
+      const m = getMessages(language);
+      for (const label of [m.modPage, m.download, m.website, m.sourceCode]) {
+        expect(label.length).toBeGreaterThan(0);
+        expect(label.length).toBeLessThanOrEqual(DISCORD.buttonLabelMax);
+      }
+    }
+  });
+});
+
+describe('hosts Discord rejects', () => {
+  const BAD = ['https://mysite/x', 'https://example/', 'https://a.b/', 'http://localhost/', 'http://localhost:8080/x', 'http://[::1]/', 'https://site.c0m/'];
+
+  it('drops the button of a page, download or website URL with such a host, keeping the others', () => {
+    for (const bad of BAD) {
+      expect(labels({ url: PAGE, downloadUrl: bad, websiteUrl: bad }), bad).toEqual(['Mod page', 'ratatoskr']);
+      expect(labels({ url: bad, downloadUrl: DL, websiteUrl: WEB }), bad).toEqual(['Download', 'Website', 'ratatoskr']);
+    }
+  });
+
+  it('keeps IPv4 literals, dotted names and punycode hosts', () => {
+    for (const ok of ['http://192.168.1.1/x', 'https://example.co/', 'https://xn--e1afmkfd.xn--p1ai/']) {
+      expect(labels({ url: PAGE, websiteUrl: ok }), ok).toEqual(['Mod page', 'Website', 'ratatoskr']);
+    }
+  });
+
+  it('linkButtonUrl refuses them too, so a thumbnail never carries one', () => {
+    for (const bad of BAD) expect(linkButtonUrl(bad), bad).toBeNull();
   });
 });
 

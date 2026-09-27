@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { DISCORD_CUSTOM_EMOJI } from '../core/constants.ts';
-import type { StoreEmojis, StoreKind } from '../core/types.ts';
+import type { DiscordButtonEmoji, StoreEmojis, StoreKind } from '../core/types.ts';
 import { STORE_ORDER } from './stores.ts';
 
 const MAX_CONFIG_CHARS = 2000;
@@ -68,4 +68,36 @@ export function parseStoreEmojis(raw: unknown, warn: (message: string) => void =
     warn(`STORE_EMOJIS ignored entries: ${shown}${rejected.length > MAX_NAMED_KEYS ? ', ...' : ''}`);
   }
   return out;
+}
+
+const MAX_UNICODE_EMOJI_CHARS = 16;
+/** One pictographic base, then variation selectors, skin tones and joined pictographs (a ZWJ sequence). */
+const UNICODE_EMOJI = /^\p{Extended_Pictographic}(?:[\u{fe0f}\p{Emoji_Modifier}]|\u{200d}\p{Extended_Pictographic})*$/u;
+
+/** Validates the `RATATOSKR_EMOJI` Worker setting: valid custom emoji markup, or unset. Anything else is ignored with one warning naming only the key. */
+export function parseRatatoskrEmoji(raw: unknown, warn: (message: string) => void = console.warn): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw === 'string') {
+    const value = raw.trim();
+    if (value === '') return undefined;
+    if (isEmoji(value)) return value;
+  }
+  warn('RATATOSKR_EMOJI ignored: expected full custom emoji markup like <:name:123456789012345678>');
+  return undefined;
+}
+
+/** The emoji if it is valid custom emoji markup, else null. */
+export function resolveRatatoskrEmoji(raw: string | undefined): string | null {
+  return isEmoji(raw) ? raw : null;
+}
+
+/** Button emoji object for custom emoji markup or a short unicode emoji; null for anything that looks like neither. */
+export function buttonEmoji(emoji: string): DiscordButtonEmoji | null {
+  if (DISCORD_CUSTOM_EMOJI.test(emoji)) {
+    const animated = emoji.startsWith('<a:');
+    const [name, id] = emoji.slice(animated ? 3 : 2, -1).split(':') as [string, string];
+    return { id, name, animated };
+  }
+  if (emoji.length > MAX_UNICODE_EMOJI_CHARS || !UNICODE_EMOJI.test(emoji)) return null;
+  return { name: emoji };
 }

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { DISCORD } from '../core/constants.ts';
-import type { DiscordEmbed, DiscordMessage, StoreEmojis, StoreKind } from '../core/types.ts';
+import type { DiscordEmbed, DiscordMessage, StoreKind } from '../core/types.ts';
+import type { Messages } from '../i18n/index.ts';
 import type { Block, Line } from './compact.ts';
-import { resolveStoreEmojis } from './emoji.ts';
+import type { Ctx } from './context.ts';
 import { FOOTER_SEP, PROJECT_FIELD, TEXT_BUDGET } from './layout.ts';
 import { measureEmbed } from './limits.ts';
 import { STORE_ORDER, STORES } from './stores.ts';
@@ -25,8 +26,24 @@ const EMPTY: State = { used: 0, embeds: 0, lastStore: null, lastDesc: 0 };
 
 const WORST_COUNT = 9999;
 
-function listHeading(store: StoreKind, count: number, emoji: string): string {
-  return `${emoji ? `${emoji} ` : ''}**${STORES[store].label}**${FOOTER_SEP}${count} ${count === 1 ? 'update' : 'updates'}`;
+function listHeading(store: StoreKind, updates: string, emoji: string): string {
+  return `${emoji ? `${emoji} ` : ''}**${STORES[store].label}**${FOOTER_SEP}${updates}`;
+}
+
+const worstUpdatesCache = new WeakMap<Messages, string>();
+
+/** The longest count text a list can show, over the plural forms of the largest counts. */
+function worstUpdates(messages: Messages): string {
+  let worst = worstUpdatesCache.get(messages);
+  if (worst === undefined) {
+    worst = '';
+    for (let n = WORST_COUNT - 9; n <= WORST_COUNT; n++) {
+      const text = messages.updates(n);
+      if (text.length > worst.length) worst = text;
+    }
+    worstUpdatesCache.set(messages, worst);
+  }
+  return worst;
 }
 
 function advance(state: State, store: StoreKind, len: number, headingWorst: number): { state: State; appended: boolean } | null {
@@ -53,13 +70,14 @@ function fitsEmbed(state: State, cost: number): boolean {
 export class Packer {
   private drafts: Draft[] = [];
   private current: Draft | null = null;
-  private readonly emojis: StoreEmojis;
+  private readonly ctx: Ctx;
   private readonly headingWorst: Record<StoreKind, number>;
 
-  constructor(storeEmojis?: StoreEmojis) {
-    this.emojis = resolveStoreEmojis(storeEmojis);
+  constructor(ctx: Ctx) {
+    this.ctx = ctx;
     const worst = {} as Record<StoreKind, number>;
-    for (const store of STORE_ORDER) worst[store] = listHeading(store, WORST_COUNT, this.emojis[store] ?? '').length;
+    const updates = worstUpdates(ctx.messages);
+    for (const store of STORE_ORDER) worst[store] = listHeading(store, updates, ctx.storeEmojis[store] ?? '').length;
     this.headingWorst = worst;
   }
 
@@ -117,7 +135,7 @@ export class Packer {
 
   private listEmbed(slot: { store: StoreKind; lines: Line[] }): DiscordEmbed {
     const count = slot.lines.reduce((sum, line) => sum + line.count, 0);
-    const heading = listHeading(slot.store, count, this.emojis[slot.store] ?? '');
+    const heading = listHeading(slot.store, this.ctx.messages.updates(count), this.ctx.storeEmojis[slot.store] ?? '');
     return { description: `${heading}\n${slot.lines.map((line) => line.text).join('\n')}`, color: STORES[slot.store].color };
   }
 
@@ -125,9 +143,7 @@ export class Packer {
     const embeds = draft.slots.map((slot) => (slot.kind === 'embed' ? { ...slot.embed } : this.listEmbed(slot)));
     const last = embeds[embeds.length - 1]!;
     last.fields = [...(last.fields ?? []), { ...PROJECT_FIELD }];
-    const page = total > 1 ? `(${index + 1}/${total})` : undefined;
-    const footer = [last.footer?.text, page].filter((part): part is string => Boolean(part)).join(FOOTER_SEP);
-    if (footer) last.footer = { text: footer };
+    if (total > 1) last.footer = { text: this.ctx.messages.page(index + 1, total) };
     return { embeds, allowed_mentions: { parse: [] } };
   }
 

@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { DISCORD } from '../core/constants.ts';
-import type { DiscordActionRow, DiscordLinkButton } from '../core/types.ts';
+import { DISCORD, PROJECT } from '../core/constants.ts';
+import { hasDeliverableHost } from '../text/url.ts';
+import type { DiscordActionRow, DiscordButtonEmoji, DiscordLinkButton, ModEvent } from '../core/types.ts';
+import type { Ctx } from './context.ts';
+import { buttonEmoji } from './emoji.ts';
+import { BUTTON_EMOJI } from './layout.ts';
+import { STORES } from './stores.ts';
 import { safeUrl } from './text.ts';
 
-const PAGE_LABEL = 'Mod page';
-const DOWNLOAD_LABEL = 'Download';
-
-/** A normalised http(s) URL without credentials that fits a link button, or null. */
+/** A normalised http(s) URL without credentials, with a host Discord accepts, that fits a link button or a thumbnail, or null. */
 export function linkButtonUrl(raw: string | null | undefined): string | null {
   const safe = safeUrl(raw);
   if (safe === null) return null;
@@ -17,20 +19,33 @@ export function linkButtonUrl(raw: string | null | undefined): string | null {
     return null;
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
-  if (parsed.username !== '' || parsed.password !== '') return null;
+  if (parsed.username !== '' || parsed.password !== '' || !hasDeliverableHost(parsed.hostname)) return null;
   return parsed.href.length <= DISCORD.buttonUrlMax ? parsed.href : null;
 }
 
-function button(label: string, raw: string | null | undefined): DiscordLinkButton | null {
+function button(label: string, raw: string | null | undefined, emoji: string): DiscordLinkButton | null {
   const url = linkButtonUrl(raw);
-  return url === null ? null : { type: 2, style: 5, label, url };
+  if (url === null || label.length === 0 || label.length > DISCORD.buttonLabelMax) return null;
+  const built: DiscordLinkButton = { type: 2, style: 5, label, url };
+  const icon: DiscordButtonEmoji | null = buttonEmoji(emoji);
+  if (icon !== null) built.emoji = icon;
+  return built;
 }
 
-/** One action row of link buttons (mod page, download); invalid URLs drop their button; undefined when none remain. */
-export function buildComponents(pageUrl: string | null | undefined, downloadUrl: string | null | undefined): DiscordActionRow[] | undefined {
+/**
+ * The action row of a detailed message: mod page, download and website (each only with a valid URL) and the source link,
+ * which is always present because it carries the AGPL notice.
+ */
+export function buildActionRow(event: ModEvent, ctx: Ctx): DiscordActionRow {
+  const { messages } = ctx;
+  const { pkg } = event;
+  const candidates = [button(messages.modPage, pkg.url, ctx.storeEmojis[pkg.store] ?? STORES[pkg.store].buttonEmoji)];
+  if (ctx.optionalButtons) candidates.push(button(messages.download, pkg.downloadUrl, BUTTON_EMOJI.download), button(messages.website, pkg.websiteUrl, BUTTON_EMOJI.website));
+  const source = button(messages.sourceCode, PROJECT.repoUrl, ctx.ratatoskrEmoji ?? BUTTON_EMOJI.source);
   const buttons: DiscordLinkButton[] = [];
-  for (const candidate of [button(PAGE_LABEL, pageUrl), button(DOWNLOAD_LABEL, downloadUrl)]) {
-    if (candidate !== null && buttons.length < DISCORD.buttonsPerRow) buttons.push(candidate);
+  for (const candidate of candidates) {
+    if (candidate !== null && buttons.length < DISCORD.buttonsPerRow - 1) buttons.push(candidate);
   }
-  return buttons.length === 0 ? undefined : [{ type: 1, components: buttons }];
+  if (source !== null) buttons.push(source);
+  return { type: 1, components: buttons };
 }

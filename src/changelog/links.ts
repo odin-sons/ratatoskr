@@ -63,12 +63,17 @@ function labelSpoofsHost(text: string, url: string): boolean {
   return labelHost === null || labelHost !== hostOf(url);
 }
 
-function safeLink(text: string, target: string): string {
+function isReservedLabel(text: string, reserved: string | undefined): boolean {
+  const label = text.trim().toLowerCase();
+  return label === FULL_CHANGELOG_LABEL.toLowerCase() || (reserved !== undefined && label === reserved.toLowerCase());
+}
+
+function safeLink(text: string, target: string, reserved: string | undefined): string {
   const url = urlOf(target);
   const safe = HTTP_URL.test(url) ? linkTarget(url) : null;
   if (safe === null || labelSpoofsHost(text, url)) return text;
   if (text.trim() === '') return safe;
-  if (text.includes(']') || text.trim().toLowerCase() === FULL_CHANGELOG_LABEL.toLowerCase()) return text;
+  if (text.includes(']') || isReservedLabel(text, reserved)) return text;
   return `[${text}](${safe})`;
 }
 
@@ -76,7 +81,7 @@ function safeLink(text: string, target: string): string {
  * One left-to-right pass. Every `](` that does not open a kept http(s) link is escaped or degraded.
  * Time O(L): every character is visited once, parentheses are paired in one pass.
  */
-function scan(line: string): string {
+function scan(line: string, reserved: string | undefined): string {
   let out = '';
   let tail = 0;
   let last = 0;
@@ -104,7 +109,7 @@ function scan(line: string): string {
         continue;
       }
       emit(line.slice(last, open));
-      emit(safeLink(line.slice(open + 1, i), line.slice(i + 2, close)));
+      emit(safeLink(line.slice(open + 1, i), line.slice(i + 2, close), reserved));
       last = close + 1;
       i = close;
       open = -1;
@@ -117,8 +122,9 @@ function scan(line: string): string {
 /**
  * Keeps `[text](url)` links whose target is http(s) and turns every other one into its plain text.
  * No `](` survives outside a kept link; a link labelled like the trailing full-changelog link is degraded too,
- * so that link stays unique. Code spans are not modelled: the caller escapes every backtick.
+ * so that link stays unique; `reserved` is a second such label (the localised one). Code spans are not modelled: the caller
+ * escapes every backtick.
  */
-export function sanitizeLinks(line: string): string {
-  return line.indexOf('](') === -1 ? line : scan(line);
+export function sanitizeLinks(line: string, reserved?: string): string {
+  return line.indexOf('](') === -1 ? line : scan(line, reserved);
 }
