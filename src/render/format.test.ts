@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
-import { DISCORD, PROJECT } from '../core/constants.ts';
-import type { DiscordEmbed, DiscordMessage } from '../core/types.ts';
+import { DISCORD, MAX_DETAILED_PER_DIGEST, PROJECT } from '../core/constants.ts';
+import type { DiscordEmbed, DiscordMessage, ModEvent } from '../core/types.ts';
 import { endsWithProjectField, makeEvent, NOW, realisticUpdates, unixSeconds } from './__fixtures__/events.ts';
 import { countItems } from './count.ts';
 import { planDigest } from './digest.ts';
@@ -78,25 +78,25 @@ describe('project link', () => {
     const emoji = `<a:${'e'.repeat(32)}:${'9'.repeat(20)}>`;
     const storeEmojis = { thunderstore: emoji, hexium: emoji, nexus: emoji };
     const huge = 'N'.repeat(5000);
-    const inputs = [
+    const updateInputs = [
       realisticUpdates(2000),
       Array.from({ length: 300 }, (_, i) => makeEvent({ name: huge, owner: huge, versionTo: huge, versionFrom: huge, url: `https://x.io/${'a'.repeat(400)}` }, i)),
-      Array.from({ length: 120 }, (_, i) =>
-        makeEvent({ kind: 'new', name: huge, owner: huge, description: huge, changelog: huge, changelogUrl: `https://x.io/${'a'.repeat(400)}`, categories: [huge, huge], downloads: 1e15, likes: 1e15, alsoOn: [{ store: 'hexium', url: PAGE }, { store: 'nexus', url: PAGE }] }, i),
-      ),
     ];
-    for (const locale of ['en', 'ru'] as const) {
-      for (const events of inputs) {
-        for (const detailed of [false, true]) {
-          const plan = planDigest(events, { detailed: () => detailed, now: NOW, storeEmojis, locale });
-          expect(countItems(plan.messages)).toBe(events.length);
-          for (const msg of plan.messages) {
-            expect(assertWithinLimits(msg)).toEqual([]);
-            expect(endsWithProjectField(msg)).toBe(true);
-            expect(projectFields(msg)).toBe(1);
-          }
-        }
+    const newInput = Array.from({ length: 120 }, (_, i) =>
+      makeEvent({ kind: 'new', name: huge, owner: huge, description: huge, changelog: huge, changelogUrl: `https://x.io/${'a'.repeat(400)}`, categories: [huge, huge], downloads: 1e15, likes: 1e15, alsoOn: [{ store: 'hexium', url: PAGE }, { store: 'nexus', url: PAGE }] }, i),
+    );
+    const check = (events: ModEvent[], detailed: boolean, locale: 'en' | 'ru'): void => {
+      const plan = planDigest(events, { detailed: () => detailed, now: NOW, storeEmojis, locale });
+      expect(countItems(plan.messages)).toBe(events.length);
+      for (const msg of plan.messages) {
+        expect(assertWithinLimits(msg)).toEqual([]);
+        expect(endsWithProjectField(msg)).toBe(true);
+        expect(projectFields(msg)).toBe(1);
       }
+    };
+    for (const locale of ['en', 'ru'] as const) {
+      for (const events of updateInputs) for (const detailed of [false, true]) check(events, detailed, locale);
+      check(newInput, true, locale); // kind: 'new' is always detailed regardless of the flag — no point re-running with false
     }
   });
 
@@ -234,7 +234,7 @@ describe('detailed embed layout (digest)', () => {
 
   it('omits the changelog field without an excerpt, even with a changelog link', () => {
     for (const changelog of [null, '', '   \n ']) {
-      const names = (embedOf({ kind: 'new', changelog, changelogUrl: 'https://x.io/c' }).fields ?? []).map((f) => f.name);
+      const names = (embedOf({ changelog, changelogUrl: 'https://x.io/c' }).fields ?? []).map((f) => f.name);
       expect(names).not.toContain('Changelog');
     }
   });
@@ -396,7 +396,7 @@ describe('cost', () => {
   const storeEmojis = { thunderstore: TS_EMOJI, hexium: HX_EMOJI };
 
   it('renders an immediate message with buttons and emoji far below the CPU budget', () => {
-    const event = makeEvent({ kind: 'new', description: 'A description', changelog: '- a\n- b', changelogUrl: 'https://x.io/c', downloadUrl: 'https://x.io/d.zip', websiteUrl: 'https://x.io/w', categories: ['Tools'], likes: 3, downloads: 9 });
+    const event = makeEvent({ description: 'A description', changelog: '- a\n- b', changelogUrl: 'https://x.io/c', downloadUrl: 'https://x.io/d.zip', websiteUrl: 'https://x.io/w', categories: ['Tools'], likes: 3, downloads: 9 });
     expect(bestOf(20, () => renderImmediate(event, { now: NOW, storeEmojis }))).toBeLessThan(2);
   });
 
@@ -411,20 +411,20 @@ describe('cost in every language', () => {
   const links = Array.from({ length: 12 }, (_, i) => `- fixed [issue ${i}](https://github.com/x/y/issues/${i}) and [docs](https://example.com/d/${i})`).join('\n');
   const events = (n: number) =>
     Array.from({ length: n }, (_, i) =>
-      makeEvent({ kind: 'new', description: 'Some description text. '.repeat(20), changelog: `${links}\n[Full changelog](https://thunderstore.io/x/${i}/changelog/)`, changelogUrl: `https://thunderstore.io/x/${i}/changelog/`, categories: ['Tools', 'Misc'], downloads: 1234, likes: 4 }, i),
+      makeEvent({ description: 'Some description text. '.repeat(20), changelog: `${links}\n[Full changelog](https://thunderstore.io/x/${i}/changelog/)`, changelogUrl: `https://thunderstore.io/x/${i}/changelog/`, categories: ['Tools', 'Misc'], downloads: 1234, likes: 4 }, i),
     );
 
+  // MAX_DETAILED_PER_DIGEST is the real worst case: drain.ts never hands renderDigest more detailed, changelog-bearing
+  // entries than that in one call, however large the backlog (see cappedDetailed in src/core/drain.ts).
   it('renders link-heavy detailed digests in russian about as fast as in english', () => {
-    for (const n of [150, 400]) {
-      const list = events(n);
-      const [en, ru] = bestOfPaired(
-        12,
-        () => renderDigest(list, { ...allDetail, locale: 'en' }),
-        () => renderDigest(list, { ...allDetail, locale: 'ru' }),
-      );
-      expect(ru, `${n}: en ${en.toFixed(2)} ms, ru ${ru.toFixed(2)} ms`).toBeLessThan(en * 1.8 + 0.5);
-      expect(ru).toBeLessThan(n === 400 ? 30 : 15);
-    }
+    const list = events(MAX_DETAILED_PER_DIGEST);
+    const [en, ru] = bestOfPaired(
+      12,
+      () => renderDigest(list, { ...allDetail, locale: 'en' }),
+      () => renderDigest(list, { ...allDetail, locale: 'ru' }),
+    );
+    expect(ru, `en ${en.toFixed(2)} ms, ru ${ru.toFixed(2)} ms`).toBeLessThan(en * 1.8 + 0.5);
+    expect(ru).toBeLessThan(5);
   });
 
   it('renders an immediate message in russian far below the CPU budget', () => {

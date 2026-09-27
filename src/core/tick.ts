@@ -310,8 +310,12 @@ async function fetchChangelogs(deps: TickDeps, budget: SubrequestBudget, jobs: C
         try {
           const { excerpt, url, websiteUrl } = await adapter.fetchChangelog({ ...ctx, fetch: changelogFetch }, event.pkg, event.versionTo);
           const website = websiteUrl ?? null;
-          if (excerpt !== null || url !== null || website !== null) {
-            await deps.store.setEventDetails(event.id, { changelog: excerpt, changelogUrl: url, websiteUrl: website });
+          // A new package has no prior version to change from: keep the website this call may have found, but never its changelog.
+          const isNew = event.kind === 'new';
+          const changelog = isNew ? null : excerpt;
+          const changelogUrl = isNew ? null : url;
+          if (changelog !== null || changelogUrl !== null || website !== null) {
+            await deps.store.setEventDetails(event.id, { changelog, changelogUrl, websiteUrl: website });
           }
         } catch {
           // Ignored: missing details never block delivery.

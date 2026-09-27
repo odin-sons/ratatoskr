@@ -10,7 +10,7 @@ import {
 } from '../testing/fakes.ts';
 import { makeHarness, type Harness } from '../testing/harness.ts';
 import { SubrequestBudget } from './budget.ts';
-import { DIGEST_FIT_ATTEMPTS, DISCORD, OUTBOX_BACKOFF, OUTBOX_MAX_ATTEMPTS, POISON_ISOLATION_MAX_ITEMS, TICK_BUDGET } from './constants.ts';
+import { DIGEST_FIT_ATTEMPTS, DISCORD, MAX_DETAILED_PER_DIGEST, OUTBOX_BACKOFF, OUTBOX_MAX_ATTEMPTS, POISON_ISOLATION_MAX_ITEMS, PROJECT, TICK_BUDGET } from './constants.ts';
 import { backoffSeconds, collapseEquivalent, drainOutbox, scheduleFailure } from './drain.ts';
 import { outboxId } from './ids.ts';
 import { renderDigest, renderImmediate } from '../render/index.ts';
@@ -125,6 +125,31 @@ describe('drainOutbox', () => {
     await enqueue(h, makeSubscription({ mode: 'digest', filter: { watchlist: ['star'] } }), [fresh, hit, plain]);
     await drain(h);
     expect(h.renderer.digestCalls[0]!.detailed).toEqual([true, true, false]);
+  });
+
+  it('details only the first MAX_DETAILED_PER_DIGEST watchlist hits, oldest first, and falls back to compact beyond the cap', async () => {
+    const h = makeHarness();
+    const total = MAX_DETAILED_PER_DIGEST + 5;
+    const owners = Array.from({ length: total }, (_, i) => `Star${i}`);
+    const hits = owners.map((owner) => makeEvent({ kind: 'update', versionFrom: '0.1', pkg: { packageId: `${owner}-Mod`, owner, name: 'Mod' } }));
+    await enqueue(h, makeSubscription({ mode: 'digest', filter: { watchlist: owners } }), hits);
+    await drain(h);
+    const [detailed] = h.renderer.digestCalls.map((c) => c.detailed);
+    expect(detailed).toHaveLength(total);
+    expect(detailed!.slice(0, MAX_DETAILED_PER_DIGEST)).toEqual(Array(MAX_DETAILED_PER_DIGEST).fill(true));
+    expect(detailed!.slice(MAX_DETAILED_PER_DIGEST)).toEqual(Array(5).fill(false));
+  });
+
+  it('never caps a new package: it stays detailed however many watchlist hits already filled the cap', async () => {
+    const h = makeHarness();
+    const owners = Array.from({ length: MAX_DETAILED_PER_DIGEST }, (_, i) => `Star${i}`);
+    const hits = owners.map((owner) => makeEvent({ kind: 'update', versionFrom: '0.1', pkg: { packageId: `${owner}-Mod`, owner, name: 'Mod' } }));
+    const fresh = makeEvent({ pkg: { packageId: 'Fresh-Mod', owner: 'Fresh', name: 'Mod' } });
+    await enqueue(h, makeSubscription({ mode: 'digest', filter: { watchlist: owners } }), [...hits, fresh]);
+    await drain(h);
+    const [call] = h.renderer.digestCalls;
+    expect(call!.detailed.slice(0, MAX_DETAILED_PER_DIGEST)).toEqual(Array(MAX_DETAILED_PER_DIGEST).fill(true));
+    expect(call!.detailed.at(-1)).toBe(true);
   });
 
   it('hands the store emoji to every digest and immediate render', async () => {
@@ -314,7 +339,7 @@ describe('drainOutbox', () => {
         expect(JSON.stringify(payload)).toContain('Обновление от A');
       } else {
         expect(payload.embeds![0]!.description).toContain('1 обновление');
-        expect(payload.embeds!.at(-1)!.fields!.at(-1)!.value).toBe('-# [ratatoskr v1.0.2](https://github.com/odin-sons/ratatoskr)');
+        expect(payload.embeds!.at(-1)!.fields!.at(-1)!.value).toBe(`-# [ratatoskr v${PROJECT.version}](https://github.com/odin-sons/ratatoskr)`);
         expect(payload.components).toBeUndefined();
       }
     }

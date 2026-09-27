@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { SubrequestBudget } from './budget.ts';
-import { DISCORD, OUTBOX_BACKOFF, OUTBOX_MAX_ATTEMPTS, POISON_ISOLATION_MAX_ITEMS, TICK_BUDGET } from './constants.ts';
+import { DISCORD, MAX_DETAILED_PER_DIGEST, OUTBOX_BACKOFF, OUTBOX_MAX_ATTEMPTS, POISON_ISOLATION_MAX_ITEMS, TICK_BUDGET } from './constants.ts';
 import { fitDigestPrefix, type DigestFit } from './digest-fit.ts';
 import { compileFilter, type CompiledFilter } from './filter.ts';
 import { releaseKey } from './ids.ts';
@@ -287,6 +287,26 @@ function reducedMessage(drain: Drain, sub: Subscription, event: ModEvent, messag
   }
 }
 
+/**
+ * A new package is always detailed and never counted against the cap: it never carries a changelog (see
+ * `changelogExcerpt` in `src/render/detailed.ts`), so it stays cheap regardless of how many are backlogged. A
+ * watchlist hit is detailed only among the first `MAX_DETAILED_PER_DIGEST` of them, oldest first; the rest of the
+ * backlog still gets a message, just as a compact line instead of a full embed with changelog.
+ */
+function cappedDetailed(entries: readonly CollapsedDelivery[], isWatchlistHit: (event: ModEvent) => boolean): (event: ModEvent) => boolean {
+  const detailedIds = new Set<string>();
+  let capped = 0;
+  for (const { delivery } of entries) {
+    const event = delivery.event;
+    if (event.kind === 'new') detailedIds.add(event.id);
+    else if (isWatchlistHit(event) && capped < MAX_DETAILED_PER_DIGEST) {
+      detailedIds.add(event.id);
+      capped += 1;
+    }
+  }
+  return (event: ModEvent): boolean => detailedIds.has(event.id);
+}
+
 async function deliverDigest(drain: Drain, sub: Subscription, kept: CollapsedDelivery[], filter: CompiledFilter): Promise<void> {
   const { renderer, now } = drain.deps;
   const context = renderContext(drain.deps, sub);
@@ -297,7 +317,7 @@ async function deliverDigest(drain: Drain, sub: Subscription, kept: CollapsedDel
     return;
   }
 
-  const detailed = (event: ModEvent): boolean => event.kind === 'new' || filter.isWatchlistHit(event);
+  const detailed = cappedDetailed(kept, (event) => filter.isWatchlistHit(event));
   const renderEntries = (entries: readonly CollapsedDelivery[]): DiscordMessage[] =>
     renderer.renderDigest(entries.map((k) => k.delivery.event), { detailed, now, ...context });
 

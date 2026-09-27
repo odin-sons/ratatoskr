@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-27
+
+### Changed
+
+- A new package's message never shows a Changelog block, even if a source
+  happened to return one: a first release has no prior version to change
+  from. The details phase still runs for a new package (a source's website
+  may only be discoverable there), but its changelog and changelog URL are
+  discarded rather than stored.
+- A digest details at most `MAX_DETAILED_PER_DIGEST` (50) watchlist hits or
+  immediate-mode updates per render; a backlog beyond that still gets a
+  compact list entry, never dropped or parked. A new package is never
+  counted against this cap, since it never carries a changelog and stays
+  cheap regardless of count. Bounds the CPU cost of one digest render to a
+  small, fixed amount however large the backlog grows.
+
 ## [1.0.2] - 2026-09-27
 
 ### Changed

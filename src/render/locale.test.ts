@@ -97,7 +97,7 @@ describe('Components V2 message in every language', () => {
 
   it('degrades a changelog link that impersonates the localised full-changelog label', () => {
     const changelog = '- see [Полный список изменений](https://evil.example/phish)\n- [docs](https://ok.example/d)';
-    const value = texts(renderImmediate(makeEvent({ kind: 'new', changelog, changelogUrl: 'https://x.io/c' }), { now: NOW, locale: 'ru' }))[1]!;
+    const value = texts(renderImmediate(makeEvent({ changelog, changelogUrl: 'https://x.io/c' }), { now: NOW, locale: 'ru' }))[1]!;
     expect(value).not.toContain('evil.example');
     expect(value).toContain('](https://ok.example/d)');
     expect(value.match(/Полный список изменений/g)).toHaveLength(2);
@@ -106,15 +106,15 @@ describe('Components V2 message in every language', () => {
   });
 
   it('degrades an impostor in any letter case, and leaves links alone when the label text is absent', () => {
-    const shout = renderImmediate(makeEvent({ kind: 'new', changelog: '- [ПОЛНЫЙ СПИСОК ИЗМЕНЕНИЙ](https://evil.example/x) [ok](https://ok.example/y)' }), { now: NOW, locale: 'ru' });
+    const shout = renderImmediate(makeEvent({ changelog: '- [ПОЛНЫЙ СПИСОК ИЗМЕНЕНИЙ](https://evil.example/x) [ok](https://ok.example/y)' }), { now: NOW, locale: 'ru' });
     expect(texts(shout)[1]).not.toContain('evil.example');
     expect(texts(shout)[1]).toContain('](https://ok.example/y)');
-    const plain = renderImmediate(makeEvent({ kind: 'new', changelog: '- [ok](https://ok.example/y)' }), { now: NOW, locale: 'ru' });
+    const plain = renderImmediate(makeEvent({ changelog: '- [ok](https://ok.example/y)' }), { now: NOW, locale: 'ru' });
     expect(texts(plain)[1]).toContain('](https://ok.example/y)');
   });
 
   it('keeps the module-produced english link out of a russian message', () => {
-    const value = texts(renderImmediate(makeEvent({ kind: 'new', changelog: '- a\n[Full changelog](https://x.io/c)', changelogUrl: 'https://x.io/c' }), { now: NOW, locale: 'ru' }))[1]!;
+    const value = texts(renderImmediate(makeEvent({ changelog: '- a\n[Full changelog](https://x.io/c)', changelogUrl: 'https://x.io/c' }), { now: NOW, locale: 'ru' }))[1]!;
     expect(value).toBe('**Изменения**\n- a\n[Полный список изменений](https://x.io/c)');
   });
 });

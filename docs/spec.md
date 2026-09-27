@@ -372,13 +372,14 @@ At this volume, one message per mod is unusable: 800 notifications a day is one
 every two minutes. Default output is therefore a digest.
 
 - New packages: full embeds with icon and description. There are only tens per
-  day and they deserve the space.
+  day and they deserve the space. Never a changelog: a first release has no
+  prior version to change from.
 - Updates: a compact list, one embed per store with its own colour and a heading
   line carrying the store and the count.
 - Digest interval per subscription, default 30 minutes.
-- Changelog excerpts only for packages shown in detail: new packages, watchlist
-  hits, and every event delivered to an `immediate` subscription (see "Detailed
-  events and changelogs").
+- Changelog excerpts only for updates shown in detail: watchlist hits and every
+  update delivered to an `immediate` subscription (see "Detailed events and
+  changelogs").
 
 ### Message layout
 
@@ -515,14 +516,27 @@ report stay English.
 
 ### Detailed events and changelogs
 
-An event is fetched with a changelog when at least one subscription receiving it
-shows it in detail: it is a new package, or a watchlist hit of a digest
-subscription, or the subscription is `immediate` (every immediate message is a
-detailed message). The per-tick caps are unchanged: at most
-`maxChangelogFetches` fetches, always leaving the send reserve of the shared
-subrequest budget unspent; the remainder is rendered without a changelog and counted
-in `changelogSkipped`. Many mods ship no `CHANGELOG.md`; their field is simply
+The details phase still runs for every new package too (a source's package
+listing often carries its website only there), but a new package's changelog
+is never kept: it has no prior version to change from, so the render layer
+drops it unconditionally (`kind: 'new'` short-circuits `changelogExcerpt`)
+regardless of what a source returned. An update's changelog is fetched and
+kept when at least one subscription receiving it shows it in detail: it is a
+watchlist hit of a digest subscription, or the subscription is `immediate`
+(every immediate message is a detailed message). The per-tick caps are
+unchanged: at most `maxChangelogFetches` fetches, always leaving the send
+reserve of the shared subrequest budget unspent; the remainder is rendered
+without a changelog and counted in `changelogSkipped`. Many mods ship no
+`CHANGELOG.md`; their field is simply
 omitted.
+
+At render time, a digest details at most `MAX_DETAILED_PER_DIGEST` (50)
+watchlist hits and immediate-mode updates in one call, oldest first; a
+backlog beyond that still gets a compact list entry, never dropped or
+parked (`cappedDetailed` in `src/core/drain.ts`). A new package is never
+counted against this cap, since it never carries a changelog and stays
+cheap however many are backlogged. This bounds the cost of one digest
+render to a small, fixed amount regardless of how large the backlog grows.
 
 ### Progressive delivery
 
@@ -569,7 +583,11 @@ Cost per digest:
 O(rows) plus at most `1 + 3 + log2(n)` renders, each smaller than the last;
 measured (Node, 400 events, real renderer) about 1.5 ms for 50 detailed events,
 4.4 ms for 400 compact updates in one message and 4.6 ms for a mixed 20 % new
-backlog (two renders, 250 then 177 entries).
+backlog (two renders, 250 then 177 entries). `MAX_DETAILED_PER_DIGEST` now
+makes "50 detailed events" the actual worst case for one render, not just an
+example: however large the backlog, at most 50 of its watchlist hits and
+immediate-mode updates are ever detailed at once (see "Detailed events and
+changelogs").
 
 ### Discord limits
 

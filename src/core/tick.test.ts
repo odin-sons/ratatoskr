@@ -292,10 +292,13 @@ describe('runTick: budgets', () => {
 
   it('caps changelog fetches at maxChangelogFetches and reports the remainder as skipped, not deferred', async () => {
     const adapter = new FakeAdapter({ id: TS });
-    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription({ mode: 'digest' })] });
-    bootstrap(h, TS, {});
     const total = TICK_BUDGET.maxChangelogFetches + 3;
-    adapter.enqueue(okPoll(Array.from({ length: total }, (_, i) => snap(`A${i}-Mod`))));
+    // A watchlist hit, not a new package: a new package never keeps a changelog, which would make this test about
+    // that instead of the fetch cap.
+    const owners = Array.from({ length: total }, (_, i) => `A${i}`);
+    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription({ mode: 'digest', filter: { watchlist: owners } })] });
+    bootstrap(h, TS, {});
+    adapter.enqueue(okPoll(Array.from({ length: total }, (_, i) => snap(`A${i}-Mod`, '2.0.0', { previousVersion: '1.0.0' }))));
     const report = await runTick(h.deps, scheduled);
     expect(report.changelogFetches).toBe(TICK_BUDGET.maxChangelogFetches);
     expect(adapter.changelogCalls).toHaveLength(TICK_BUDGET.maxChangelogFetches);
@@ -363,7 +366,9 @@ describe('runTick: budgets', () => {
       adapter.changelog = (pkg, _version) => ({ excerpt: 'notes', url: `${pkg.url}changelog/`, websiteUrl: SITE });
       const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription({ mode: 'immediate' })] });
       bootstrap(h, TS, {});
-      adapter.enqueue(okPoll([snap('A-One')]));
+      // An update, not a new package: a new package never keeps a changelog, which would make this test about that
+      // instead of the website.
+      adapter.enqueue(okPoll([snap('A-One', '2.0.0', { previousVersion: '1.0.0' })]));
       const report = await runTick(h.deps, scheduled);
       expect(report.changelogFetches).toBe(1);
       expect([...h.store.packages.values()].map((p) => p.websiteUrl)).toEqual([SITE]);
@@ -476,6 +481,19 @@ describe('runTick: first-seen update of a pre-existing mod', () => {
     const report = await runTick(h.deps, scheduled);
     expect(h.store.events.get(eventId(TS, 'Fresh-Mod', '1.0.0'))).toMatchObject({ kind: 'new', versionFrom: null });
     expect(report.changelogFetches).toBe(1);
+  });
+
+  it('a new package never keeps a changelog, even when the source returns one, but still keeps its website', async () => {
+    const site = 'https://site.example/mod';
+    const adapter = new FakeAdapter({ id: TS });
+    adapter.changelog = (pkg, version) => ({ excerpt: `changelog ${pkg.packageId} ${version}`, url: 'https://x.io/c', websiteUrl: site });
+    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription({ mode: 'digest' })] });
+    bootstrap(h, TS, {});
+    adapter.enqueue(okPoll([snap('Fresh-Mod', '1.0.0')]));
+    const report = await runTick(h.deps, scheduled);
+    expect(report.changelogFetches).toBe(1);
+    expect(h.store.events.get(eventId(TS, 'Fresh-Mod', '1.0.0'))).toMatchObject({ changelog: null, changelogUrl: null });
+    expect(h.store.packages.get(`${TS}|Fresh-Mod`)?.websiteUrl).toBe(site);
   });
 });
 

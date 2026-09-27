@@ -93,6 +93,19 @@ export const DIGEST_FIT_ATTEMPTS = 3;
 /** Events rendered (summed over probes) while isolating unrenderable events of one digest; bounds CPU on the failure path. */
 export const POISON_ISOLATION_MAX_ITEMS = TICK_BUDGET.maxOutboxRows;
 
+/**
+ * Most watchlist-hit or immediate-mode updates rendered in full detail (with a changelog excerpt) in one digest;
+ * a backlog beyond this many falls back to the compact list instead, never dropped. A new package is never
+ * capped here: it never carries a changelog (see "Detailed events and changelogs" in docs/spec.md), so it is cheap
+ * regardless of count.
+ *
+ * Measured (Node, `buildDetailed`, worst-case input: every field at its cap): about 0.038 ms per detailed event,
+ * so 50 of them costs about 1.9 ms — a small, fixed slice of the 10 ms Cloudflare Workers CPU budget for the whole
+ * invocation (polling, diffing and D1 writes still need most of it). Without this cap, the cost of one digest render
+ * scaled with the backlog, up to `maxOutboxRows`.
+ */
+export const MAX_DETAILED_PER_DIGEST = 50;
+
 /** Outbox rows whose attempts reach this are parked, not retried. */
 export const OUTBOX_MAX_ATTEMPTS = 8;
 
@@ -126,7 +139,7 @@ export const MAX_SCAN_BYTES = 6 * 1024 * 1024;
 
 export const PROJECT = {
   name: 'ratatoskr',
-  version: '1.0.2',
+  version: '1.1.0',
   repoUrl: 'https://github.com/odin-sons/ratatoskr',
   license: 'AGPL-3.0-or-later',
 } as const;

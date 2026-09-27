@@ -292,7 +292,8 @@ describe('injection', () => {
   });
 
   it('neutralises detailed embeds too', () => {
-    const event = makeEvent({ kind: 'new', name: evil, description: evil, changelog: `${evil}\n- @everyone`, changelogUrl: 'https://x.io/c' });
+    // kind: 'new' forces the detailed layout regardless of the `detailed` predicate below.
+    const event = makeEvent({ kind: 'new', name: evil, owner: evil, description: evil });
     const messages = renderDigest([event], noDetail);
     const text = allText(messages);
     expect(text).not.toMatch(/@(everyone|here)/i);
@@ -361,13 +362,13 @@ describe('splitting', () => {
   it('keeps full embeds first and compact lists after them', () => {
     const events = [
       ...realisticUpdates(30, 'hexium'),
-      makeEvent({ kind: 'new', name: 'Brand New', versionFrom: null, description: 'Does things', changelog: '## 1.0\n- first', changelogUrl: 'https://x.io/changelog' }, 900),
+      makeEvent({ kind: 'new', name: 'Brand New', versionFrom: null, description: 'Does things', categories: ['Tools'] }, 900),
     ];
     const plan = planDigest(events, noDetail);
     expect(plan.messages).toHaveLength(1);
     const [first, second] = plan.messages[0]!.embeds!;
     expect(first!.description!.split('\n')[0]).toBe('## [Brand New](https://thunderstore.io/c/valheim/p/Author0/Mod900/)');
-    expect(first!.fields![0]!.value).toContain('[Full changelog](https://x.io/changelog)');
+    expect(first!.fields![0]!.value).toBe('Tools');
     expect(second!.description!.startsWith('## ')).toBe(false);
     expect(countItems(plan.messages)).toBe(31);
   });
@@ -391,29 +392,29 @@ describe('changelog field', () => {
     const markdown = '## 1.0.0\n### Added\n- **bold** item with `code`\n```\nconst a = 1;\n```\n- [docs](https://example.com/d)';
     const excerpt = extractChangelog(markdown, '1.0.0', { fullUrl: URL_ });
     expect(excerpt).toBe('**Added**\n- **bold** item with \\`code\\`\n\\`\\`\\`\nconst a = 1;\n\\`\\`\\`\n- [docs](https://example.com/d)\n[Full changelog](https://x.io/changelog)');
-    expect(field(makeEvent({ kind: 'new', changelog: excerpt, changelogUrl: URL_ }))).toBe(excerpt);
-    expect(display(makeEvent({ kind: 'new', changelog: excerpt, changelogUrl: URL_ }))).toBe(excerpt);
+    expect(field(makeEvent({ changelog: excerpt, changelogUrl: URL_ }))).toBe(excerpt);
+    expect(display(makeEvent({ changelog: excerpt, changelogUrl: URL_ }))).toBe(excerpt);
   });
 
   it('shows exactly one full-changelog link when the excerpt already ends with it', () => {
     const excerpt = extractChangelog('## 1.0.0\n- a', '1.0.0', { fullUrl: URL_ })!;
-    const value = field(makeEvent({ kind: 'new', changelog: excerpt, changelogUrl: URL_ }))!;
+    const value = field(makeEvent({ changelog: excerpt, changelogUrl: URL_ }))!;
     expect(count(value, '[Full changelog](')).toBe(1);
   });
 
   it('adds the link itself when the excerpt carries none, and omits the field without an excerpt', () => {
-    expect(field(makeEvent({ kind: 'new', changelog: '- a\n- b', changelogUrl: URL_ }))).toBe(`- a\n- b\n[Full changelog](${URL_})`);
-    expect(field(makeEvent({ kind: 'new', changelog: null, changelogUrl: URL_ }))).toBeUndefined();
-    expect(field(makeEvent({ kind: 'new', changelog: null, changelogUrl: null }))).toBeUndefined();
+    expect(field(makeEvent({ changelog: '- a\n- b', changelogUrl: URL_ }))).toBe(`- a\n- b\n[Full changelog](${URL_})`);
+    expect(field(makeEvent({ changelog: null, changelogUrl: URL_ }))).toBeUndefined();
+    expect(field(makeEvent({ changelog: null, changelogUrl: null }))).toBeUndefined();
   });
 
   it('does not escape Markdown that is already final', () => {
-    const value = field(makeEvent({ kind: 'new', changelog: '- **x**\n> quote\n1. one\n# head', changelogUrl: null }))!;
+    const value = field(makeEvent({ changelog: '- **x**\n> quote\n1. one\n# head', changelogUrl: null }))!;
     expect(value).toBe('- **x**\n> quote\n1. one\n# head');
   });
 
   it('neutralises mentions and caps an oversized excerpt defensively', () => {
-    const value = field(makeEvent({ kind: 'new', changelog: `@everyone <@123>\n${'x'.repeat(5000)}`, changelogUrl: URL_ }))!;
+    const value = field(makeEvent({ changelog: `@everyone <@123>\n${'x'.repeat(5000)}`, changelogUrl: URL_ }))!;
     expect(value).not.toMatch(/@(everyone|here)/);
     expect(value).not.toMatch(/<@\d+>/);
     expect(value.length).toBeLessThanOrEqual(CHANGELOG_DISPLAY_MAX);
@@ -433,8 +434,8 @@ describe('changelog field', () => {
       '- text ||spoiler|| and [x](https://ok.example/p_(q))',
     ].join('\n');
     const excerpt = extractChangelog(hostile, '1.0.0', { fullUrl: URL_ });
-    const messages = renderDigest([makeEvent({ kind: 'new', name: 'Hostile', changelog: excerpt, changelogUrl: URL_ })], noDetail);
-    expect(display(makeEvent({ kind: 'new', name: 'Hostile', changelog: excerpt, changelogUrl: URL_ }))).toBe(messages[0]!.embeds![0]!.fields![0]!.value);
+    const messages = renderDigest([makeEvent({ name: 'Hostile', changelog: excerpt, changelogUrl: URL_ })], allDetail);
+    expect(display(makeEvent({ name: 'Hostile', changelog: excerpt, changelogUrl: URL_ }))).toBe(messages[0]!.embeds![0]!.fields![0]!.value);
     const value = messages[0]!.embeds![0]!.fields![0]!.value;
     expect(count(value, '[Full changelog](')).toBe(1);
     expect(value.endsWith(`[Full changelog](${URL_})`)).toBe(true);
@@ -454,7 +455,7 @@ describe('changelog field', () => {
     fc.assert(
       fc.property(fc.array(piece, { maxLength: 60 }), fc.boolean(), (parts, withUrl) => {
         const excerpt = extractChangelog(parts.join(''), '1.0.0', { fullUrl: withUrl ? URL_ : null });
-        const value = field(makeEvent({ kind: 'new', changelog: excerpt, changelogUrl: withUrl ? URL_ : null }));
+        const value = field(makeEvent({ changelog: excerpt, changelogUrl: withUrl ? URL_ : null }));
         if (value !== undefined) {
           expect(value.length).toBeLessThanOrEqual(CHANGELOG_DISPLAY_MAX);
           expect(count(value, '[Full changelog](')).toBeLessThanOrEqual(1);

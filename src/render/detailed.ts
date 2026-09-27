@@ -111,9 +111,12 @@ function mentionsLabel(body: string, label: string): boolean {
  * The excerpt is final Markdown from the changelog module. Here it is stripped of invisible characters, mention-neutralised,
  * cut to `CHANGELOG_DISPLAY_MAX` on a line or word boundary (never inside a link) and closed by one full-changelog link in the
  * catalog language that stays inside the budget. A link in the body that impersonates that label is degraded to text.
+ *
+ * A new package has no prior version to change from, so it never carries a changelog: `event.changelog` is ignored
+ * for `kind: 'new'` even if a source ever populated it.
  */
 function changelogExcerpt(event: ModEvent, ctx: Ctx): string | null {
-  if (!ctx.includeChangelog) return null;
+  if (!ctx.includeChangelog || event.kind === 'new') return null;
   const label = ctx.messages.fullChangelog;
   const cleaned = neutralizeMentions(stripUnsafeChars(head(event.changelog ?? '', CHANGELOG_DISPLAY_MAX * 4)));
   const split = splitFullLink(cleaned.trimEnd());
