@@ -162,6 +162,13 @@ Until then, use the manual steps below.
    Use `pnpm run wrangler` for any other `wrangler` command that needs the real
    one.
 
+   Pushing a `vX.Y.Z` tag also deploys, via `.github/workflows/release.yml`,
+   after cutting the GitHub Release: gated on approving the `production`
+   environment (`Settings → Environments`, a required reviewer — not
+   automatic). Needs `CLOUDFLARE_API_TOKEN` and `D1_DATABASE_ID` (same value as
+   your `.env`) as repository secrets, plus the optional presentation ones
+   below if you want a tag-triggered deploy to carry them too.
+
 ## Configuration
 
 ### `ratatoskr.config.json`

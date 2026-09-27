@@ -32,3 +32,22 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --notes-file release-notes.md
+
+  deploy:
+    needs: release
+    runs-on: ubuntu-24.04
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: pnpm run deploy
+        env:
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          RATATOSKR_LANGUAGE: ${{ secrets.RATATOSKR_LANGUAGE }}
+          RATATOSKR_EMOJI: ${{ secrets.RATATOSKR_EMOJI }}
+          STORE_EMOJI_THUNDERSTORE: ${{ secrets.STORE_EMOJI_THUNDERSTORE }}
+          STORE_EMOJI_HEXIUM: ${{ secrets.STORE_EMOJI_HEXIUM }}
+          STORE_EMOJI_NEXUS: ${{ secrets.STORE_EMOJI_NEXUS }}

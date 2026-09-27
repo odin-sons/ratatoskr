@@ -70,7 +70,9 @@ These are not preferences. Violating them breaks the deployment target.
   that commit lands on `main`, tag it (`git tag -s vx.y.z -m 'vx.y.z'`,
   `git push origin vx.y.z`); pushing the tag triggers
   `.github/workflows/release.yml`, which cuts a GitHub Release from that
-  same `CHANGELOG.md` section.
+  same `CHANGELOG.md` section, then deploys to production — gated on
+  approving the `production` environment (a required reviewer, not
+  automatic).
 
 ## Commands
 
