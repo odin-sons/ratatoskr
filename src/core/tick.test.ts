@@ -360,7 +360,7 @@ describe('runTick: budgets', () => {
 
     it('stores the website on the package and hands it to the renderer with the event', async () => {
       const adapter = new FakeAdapter({ id: TS });
-      adapter.changelog = (pkg, version) => ({ excerpt: 'notes', url: `${pkg.url}changelog/`, websiteUrl: SITE });
+      adapter.changelog = (pkg, _version) => ({ excerpt: 'notes', url: `${pkg.url}changelog/`, websiteUrl: SITE });
       const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription({ mode: 'immediate' })] });
       bootstrap(h, TS, {});
       adapter.enqueue(okPoll([snap('A-One')]));

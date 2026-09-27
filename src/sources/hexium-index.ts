@@ -9,6 +9,7 @@ const CR = 13;
  * characters. Sticky, bounded quantifiers over disjoint classes: no backtracking, and no match spans a newline.
  */
 const LINE_HEAD =
+  // eslint-disable-next-line no-control-regex -- version_number rejects raw control bytes
   /\{"namespace":"([A-Za-z0-9_-][A-Za-z0-9_.-]{0,127})","name":"([A-Za-z0-9_-][A-Za-z0-9_.-]{0,127})","version_number":"([^"\\\u0000-\u001f]{1,64})"(?:,"file_format":"[A-Za-z0-9._-]{1,16}","file_size":([0-9]{1,15})(?=[,}]))?/y;
 
 export interface IndexEntry {

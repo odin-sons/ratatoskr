@@ -47,6 +47,7 @@ export const INVISIBLE_CODE_POINTS: Array<[string, number]> = [
 ];
 
 export const INVISIBLE_PATTERN = new RegExp(
+  // eslint-disable-next-line no-misleading-character-class -- combined ranges detect invisible/steganographic characters
   '[\\p{Cc}\\p{Bidi_Control}\\u00AD\\u034F\\u115F\\u1160\\u180B-\\u180E\\u200B-\\u200F\\u2028\\u2029\\u2060-\\u206F\\u2800\\u3164\\uFE00-\\uFE0F\\uFEFF\\uFFA0\\uFFF9-\\uFFFB\\uFFFE\\uFFFF\\u{E0000}-\\u{E007F}\\u{E0100}-\\u{E01EF}]',
   'u',
 );

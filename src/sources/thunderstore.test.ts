@@ -415,7 +415,10 @@ describe('ThunderstoreAdapter.poll — backlog larger than the page cap', () => 
     const { emitted } = await drain(s, stamp(2000), {
       between: (poll) => {
         if (poll >= 2 && poll < 6) {
-          for (let i = 0; i < 3; i += 1) s.state.rows.push({ name: `Late${arrived}`, updated: stamp(500 - arrived) }), (arrived += 1);
+          for (let i = 0; i < 3; i += 1) {
+            s.state.rows.push({ name: `Late${arrived}`, updated: stamp(500 - arrived) });
+            arrived += 1;
+          }
         }
       },
     });

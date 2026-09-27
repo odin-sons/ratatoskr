@@ -5,5 +5,7 @@ export default defineConfig({
   test: {
     include: ['src/**/*.test.ts', 'test/**/*.test.ts', 'scripts/**/*.test.ts'],
     environment: 'node',
+    pool: 'threads',
+    isolate: false,
   },
 });

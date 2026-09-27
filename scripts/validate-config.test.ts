@@ -165,6 +165,7 @@ describe('validateSubscription', () => {
 
   it('rejects non-numeric guild ids', () => {
     expect(subErrors(subscription({ guildId: 'guild' })).join('\n')).toMatch(/guildId/);
+    // eslint-disable-next-line no-loss-of-precision -- type check only, exact digits don't matter
     expect(subErrors(subscription({ guildId: 123456789012345678 })).join('\n')).toMatch(/guildId/);
   });
 

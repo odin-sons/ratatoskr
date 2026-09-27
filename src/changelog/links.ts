@@ -10,7 +10,6 @@ const CLOSE_BRACKET = 93;
 const OPEN_PAREN = 40;
 const CLOSE_PAREN = 41;
 const HTTP_URL = /^https?:\/\/\S/i;
-const HTTP_TARGET_AT = /\s*<?https?:\/\/\S/iy;
 const TARGET_END = /[\s]/;
 
 /** Percent-encodes the characters that would end or break a Markdown link target; null unless http(s). */

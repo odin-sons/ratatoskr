@@ -66,7 +66,11 @@ These are not preferences. Violating them breaks the deployment target.
   `src/core/constants.ts` (the latter is user-visible, in every Discord
   message and in the User-Agent sent to all three upstream APIs). Move
   `CHANGELOG.md`'s `[Unreleased]` section to a new `[x.y.z] - YYYY-MM-DD`
-  heading in the same commit, leaving `[Unreleased]` empty above it.
+  heading in the same commit, leaving `[Unreleased]` empty above it. After
+  that commit lands on `main`, tag it (`git tag -s vx.y.z -m 'vx.y.z'`,
+  `git push origin vx.y.z`); pushing the tag triggers
+  `.github/workflows/release.yml`, which cuts a GitHub Release from that
+  same `CHANGELOG.md` section.
 
 ## Commands
 

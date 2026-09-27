@@ -48,6 +48,7 @@ export function escapeInlineTokens(text: string): string {
 }
 
 const UNSAFE_CHARS = new RegExp(
+  // eslint-disable-next-line no-misleading-character-class -- combined ranges detect invisible/steganographic characters
   '[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F-\\u009F\\u00AD\\u034F\\u061C\\u115F\\u1160\\u17B4\\u17B5\\u180B-\\u180F\\u200B\\u200C\\u200E\\u200F\\u2028-\\u202E\\u2060-\\u206F\\u2800\\u3164\\uFE00-\\uFE0F\\uFEFF\\uFFA0\\uFFF0-\\uFFFB\\uFFFE\\uFFFF]' +
     '|[\\uDB40-\\uDB43][\\uDC00-\\uDFFF]|\\uD82F[\\uDCA0-\\uDCA3]|\\uD834[\\uDD73-\\uDD7A]' +
     '|[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF])|(?<![\\uD800-\\uDBFF])[\\uDC00-\\uDFFF]',

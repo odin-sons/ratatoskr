@@ -19,6 +19,7 @@ const DELIVERY_MODES: readonly DeliveryMode[] = ['immediate', 'digest'];
 const COMMUNITY_RE = /^[a-z0-9][a-z0-9_-]*$/;
 /** Subscription ids end up in SQL and shell commands, so they stay in a plain-token alphabet. */
 export const SUBSCRIPTION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+// eslint-disable-next-line no-control-regex -- rejects raw control bytes in a package-list entry
 const PACKAGE_ENTRY_RE = /^[^\s\x00-\x1f\x7f][^\x00-\x1f\x7f]{0,127}$/;
 const SNOWFLAKE_RE = /^\d{17,20}$/;
 /** Discord webhook URL shape: https://discord.com/api/webhooks/<id>/<token>. */
