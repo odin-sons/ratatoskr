@@ -107,11 +107,13 @@ function checkRow(at: string, row: DiscordActionRow, over: (label: string, actua
 }
 
 function checkV2(msg: DiscordMessage, over: (label: string, actual: number, max: number) => void, errors: string[]): void {
-  over('components (total)', componentCount(msg), DISCORD.componentsV2ComponentsMax);
-  over('text displays', componentText(msg), DISCORD.componentsV2TextMax);
+  let count = 0;
+  let textLength = 0;
   walk(msg.components ?? [], (component) => {
+    count += 1;
     switch (component.type) {
       case 10:
+        textLength += component.content.length;
         if (component.content.trim().length === 0) errors.push('a text display is empty');
         over('text display', component.content.length, DISCORD.componentsV2TextMax);
         break;
@@ -131,4 +133,6 @@ function checkV2(msg: DiscordMessage, over: (label: string, actual: number, max:
         break;
     }
   });
+  over('components (total)', count, DISCORD.componentsV2ComponentsMax);
+  over('text displays', textLength, DISCORD.componentsV2TextMax);
 }

@@ -109,32 +109,36 @@ const seedArb: fc.Arbitrary<EventSeed> = fc.record({
   createdAt: fc.oneof(fc.constant('2026-09-19T11:30:00Z'), trickyText),
 });
 
-const seedListArb = fc.oneof(
-  fc.array(seedArb, { maxLength: 25 }),
-  fc.array(seedArb, { minLength: 100, maxLength: 600, size: 'max' }),
-);
+const smallSeedListArb = fc.array(seedArb, { maxLength: 25 });
+const largeSeedListArb = fc.array(seedArb, { minLength: 100, maxLength: 600, size: 'max' });
+
+/** Shared invariant body for both digest-invariant property tests below. */
+function checkDigestInvariants(seeds: EventSeed[], detailEvery: number, withEmoji: boolean): void {
+  const events = seeds.map((seed, i) => makeEvent(seed, i));
+  const plan = planDigest(events, {
+    detailed: (e) => detailEvery > 0 && e.pkg.packageId.length % detailEvery === 0,
+    now: NOW,
+    ...(withEmoji ? { storeEmojis: WORST_EMOJIS } : {}),
+  });
+  expect(countItems(plan.messages)).toBe(events.length);
+  for (const msg of plan.messages) {
+    expect(assertWithinLimits(msg)).toEqual([]);
+    expect(msg.allowed_mentions).toEqual({ parse: [] });
+    expect(msg.components).toBeUndefined();
+    expectEndsWithProjectLine(msg);
+  }
+  if (events.length === 0) expect(plan.messages).toEqual([]);
+}
 
 describe('digest invariants', () => {
-  it('never drops a mod and always satisfies Discord limits (property)', () => {
-    fc.assert(
-      fc.property(seedListArb, fc.integer({ min: 0, max: 6 }), fc.boolean(), (seeds, detailEvery, withEmoji) => {
-        const events = seeds.map((seed, i) => makeEvent(seed, i));
-        const plan = planDigest(events, {
-          detailed: (e) => detailEvery > 0 && e.pkg.packageId.length % detailEvery === 0,
-          now: NOW,
-          ...(withEmoji ? { storeEmojis: WORST_EMOJIS } : {}),
-        });
-        expect(countItems(plan.messages)).toBe(events.length);
-        for (const msg of plan.messages) {
-          expect(assertWithinLimits(msg)).toEqual([]);
-          expect(msg.allowed_mentions).toEqual({ parse: [] });
-          expect(msg.components).toBeUndefined();
-          expectEndsWithProjectLine(msg);
-        }
-        if (events.length === 0) expect(plan.messages).toEqual([]);
-      }),
-      { numRuns: 60 },
-    );
+  // Split by scale: a large-digest run does ~18x the work of a small one (measured), so it needs far fewer
+  // samples for equivalent input-space coverage, and a failure now names which regime broke.
+  it('never drops a mod and always satisfies Discord limits, small digests (property)', () => {
+    fc.assert(fc.property(smallSeedListArb, fc.integer({ min: 0, max: 6 }), fc.boolean(), checkDigestInvariants), { numRuns: 60 });
+  });
+
+  it('never drops a mod and always satisfies Discord limits, large digests (property)', () => {
+    fc.assert(fc.property(largeSeedListArb, fc.integer({ min: 0, max: 6 }), fc.boolean(), checkDigestInvariants), { numRuns: 20 });
   }, 30_000);
 
   it('renders a single mod with a pathologically long name', () => {
