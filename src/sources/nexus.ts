@@ -195,7 +195,8 @@ export class NexusAdapter implements SourceAdapter {
       if (res.status !== 'ok' || quotaLow(res.headers)) return { excerpt: null, url: null };
       const body = parseJson(res.text);
       if (!isRecord(body)) return { excerpt: null, url: null };
-      return { excerpt: extractNexusChangelog(body, version, { fullUrl }), url: fullUrl };
+      const excerpt = extractNexusChangelog(body, version, { fullUrl });
+      return excerpt === null ? { excerpt: null, url: null } : { excerpt, url: fullUrl };
     } catch (err) {
       console.warn(`[${this.config.id}] changelog fetch failed: ${describeError(err)}`);
       return { excerpt: null, url: null };

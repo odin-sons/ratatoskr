@@ -12,11 +12,17 @@ export const SOURCE_BUDGET = {
   nexusMetadataLookups: 5,
 } as const;
 
-/** Hexium package index bodies above this size are refused (the live index is about 390 bytes per package). */
-export const HEXIUM_INDEX_MAX_BYTES = 1.5 * 1024 * 1024;
+/** An index with more lines than this is refused; see docs/api-notes.md for the measured CPU cost. */
+export const HEXIUM_INDEX_MAX_LINES = 3500;
 
-/** An index with more lines than this is refused; an index tick costs about 4 ms CPU at 1318 lines and 7 ms at 3000. */
-export const HEXIUM_INDEX_MAX_LINES = 3000;
+/** Byte allowance per index line: about 1.3x the live average of 390 bytes per package. */
+export const HEXIUM_INDEX_BYTES_PER_LINE = 512;
+
+/** Hexium package index bodies above this size are refused, derived from the line cap. */
+export const HEXIUM_INDEX_MAX_BYTES = HEXIUM_INDEX_MAX_LINES * HEXIUM_INDEX_BYTES_PER_LINE;
+
+/** Lines visited per scan, blank ones included: an index padded with blank lines cannot dodge the line cap. */
+export const HEXIUM_INDEX_MAX_ITERATIONS = 2 * HEXIUM_INDEX_MAX_LINES;
 
 /** An index line longer than this is unreadable (the longest real line is about 5 KB). */
 export const HEXIUM_INDEX_MAX_LINE_BYTES = 32 * 1024;

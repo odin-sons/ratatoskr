@@ -9,13 +9,43 @@ import {
   HEXIUM_LOOKUP_MAX_BYTES,
   SOURCE_BUDGET,
 } from './budget.ts';
-import { UnexpectedShapeError, isRecord, parseJson, safeSlug, str, type Json } from './guards.ts';
+import { UnexpectedShapeError, count, isRecord, parseJson, safeSlug, str, type Json } from './guards.ts';
 import { ResponseTooLargeError, UpstreamError, conditionalGet, describeError, skipOnError } from './http.ts';
 import { scanPackageIndex, seedSliceOf, type IndexEntry, type IndexScan } from './hexium-index.ts';
 import { normalizeIso } from './iso.ts';
 
 const SEED_PREFIX = 'seed:';
 const TOO_MANY_REQUESTS = 429;
+const SEED_UNREADABLE_LINES_FLOOR = 3;
+const SEED_UNREADABLE_LINES_SHARE = 0.01;
+
+const HEXIUM_HOST = 'hexium.gg';
+const DOWNLOAD_URL_MAX_CHARS = 512;
+
+/** An https URL on hexium.gg or a subdomain, without credentials, at most 512 characters; anything else is null. */
+function hexiumDownloadUrl(raw: unknown): string | null {
+  const text = str(raw);
+  if (text === null || text.length > DOWNLOAD_URL_MAX_CHARS) return null;
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return null;
+  }
+  const onHexium = url.hostname === HEXIUM_HOST || url.hostname.endsWith(`.${HEXIUM_HOST}`);
+  const plain = url.protocol === 'https:' && url.username === '' && url.password === '';
+  return onHexium && plain && url.href.length <= DOWNLOAD_URL_MAX_CHARS ? url.href : null;
+}
+
+const WARN_INDEX_OVER_CAP = 'package-index above cap: updates of existing packages are not detected';
+const WARN_INDEX_UNAVAILABLE = 'package-index unavailable or unreadable: updates of existing packages are not detected';
+
+class IndexOverCapError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = 'IndexOverCapError';
+  }
+}
 
 type LookupOutcome = { snapshot: PackageSnapshot } | { failure: 'failed' | 'unreadable'; rateLimited: boolean };
 
@@ -23,14 +53,21 @@ interface Skipped {
   indexLines: number;
   lookupsFailed: number;
   lookupsUnreadable: number;
+  listingItems: number;
 }
+
+const noSkipped = (): Skipped => ({ indexLines: 0, lookupsFailed: 0, lookupsUnreadable: 0, listingItems: 0 });
+const withWarnings = (warnings: string[]): { warnings?: string[] } => (warnings.length === 0 ? {} : { warnings });
 
 interface LookupPass {
   packages: PackageSnapshot[];
   /** Every candidate was looked up and read. */
   complete: boolean;
   requested: number;
+  candidates: number;
+  picked: number;
   skipped: Skipped;
+  warnings: string[];
 }
 
 /** Slice to seed next: `seed:<n>` resumes at n; anything else (legacy marks, out of range, junk) starts over. */
@@ -81,44 +118,62 @@ export class HexiumAdapter implements SourceAdapter {
 
     const listing = await this.readListing(ctx);
     const scanDue = ctx.tickIndex % CADENCE.hexiumIndexEveryNthTick === 0;
+    const listingSkipped = listing === 'not-modified' ? 0 : listing.skipped;
     if (!scanDue) {
       if (listing === 'not-modified') return { status: 'not-modified', etag: state.etag };
-      return { status: 'ok', packages: listing.packages, cursor: state.cursor, etag: listing.etag, complete: true };
+      const warnings = this.reportSkipped({ ...noSkipped(), listingItems: listingSkipped });
+      return { status: 'ok', packages: listing.packages, cursor: state.cursor, etag: listing.etag, complete: true, ...withWarnings(warnings) };
     }
 
     const delivered = listing === 'not-modified' ? [] : listing.packages;
-    let lookups: LookupPass = { packages: [], complete: false, requested: 0, skipped: { indexLines: 0, lookupsFailed: 0, lookupsUnreadable: 0 } };
+    let packages: PackageSnapshot[] = [];
+    let complete = false;
+    let warnings: string[];
     try {
-      lookups = await this.scanForChanges(ctx, delivered);
+      const lookups = await this.scanForChanges(ctx, delivered, listingSkipped);
+      packages = lookups.packages;
+      complete = lookups.complete;
+      warnings = lookups.warnings;
     } catch (err) {
       console.warn(`[${this.config.id}] index scan failed, listing only: ${describeError(err)}`);
+      warnings = [
+        ...this.reportSkipped({ ...noSkipped(), listingItems: listingSkipped }),
+        err instanceof IndexOverCapError ? WARN_INDEX_OVER_CAP : WARN_INDEX_UNAVAILABLE,
+      ];
     }
     return {
       status: 'ok',
-      packages: delivered.concat(lookups.packages),
+      packages: delivered.concat(packages),
       cursor: state.cursor,
       etag: listing === 'not-modified' ? state.etag : listing.etag,
-      complete: lookups.complete,
+      complete,
+      ...withWarnings(warnings),
     };
   }
 
   private async fetchIndex(ctx: PollContext): Promise<string> {
-    const res = await conditionalGet(ctx, `${this.origin}/api/experimental/package-index/`, { validator: null, maxBytes: HEXIUM_INDEX_MAX_BYTES });
-    if (res.status !== 'ok') throw new UnexpectedShapeError('package index returned no body');
-    return res.text;
+    try {
+      const res = await conditionalGet(ctx, `${this.origin}/api/experimental/package-index/`, { validator: null, maxBytes: HEXIUM_INDEX_MAX_BYTES });
+      if (res.status !== 'ok') throw new UnexpectedShapeError('package index returned no body');
+      return res.text;
+    } catch (err) {
+      if (err instanceof ResponseTooLargeError) throw new IndexOverCapError('package index body is too large');
+      throw err;
+    }
   }
 
   private assertUsable(scan: IndexScan, bytes: number): void {
-    if (scan.truncated) throw new UnexpectedShapeError('package index has too many lines');
+    if (scan.truncated) throw new IndexOverCapError('package index has too many lines');
     if (scan.lines === 0 && bytes > 2) throw new UnexpectedShapeError('package index has no lines');
     if (scan.lines > 0 && scan.failed === scan.lines) throw new UnexpectedShapeError('no package index line is readable');
   }
 
-  private warnSkipped(skipped: Skipped): void {
-    if (skipped.indexLines + skipped.lookupsFailed + skipped.lookupsUnreadable === 0) return;
-    console.warn(
-      `[${this.config.id}] skipped: index lines ${skipped.indexLines}, lookups failed ${skipped.lookupsFailed}, lookups unreadable ${skipped.lookupsUnreadable}`,
-    );
+  /** Logs the counts in one line and returns that line as a run-log warning; nothing when nothing was skipped. */
+  private reportSkipped(skipped: Skipped): string[] {
+    if (skipped.indexLines + skipped.lookupsFailed + skipped.lookupsUnreadable + skipped.listingItems === 0) return [];
+    const line = `skipped: index lines ${skipped.indexLines}, lookups failed ${skipped.lookupsFailed}, lookups unreadable ${skipped.lookupsUnreadable}, listing items ${skipped.listingItems}`;
+    console.warn(`[${this.config.id}] ${line}`);
+    return [line];
   }
 
   /** One slice of the index as lean snapshots; the source is bootstrapped after the last slice. */
@@ -132,21 +187,29 @@ export class HexiumAdapter implements SourceAdapter {
       if (seedSliceOf(entry.namespace, entry.name, count) === index) packages.push(this.leanSnapshot(entry, seededAt));
     });
     this.assertUsable(scan, text.length);
-    this.warnSkipped({ indexLines: scan.failed, lookupsFailed: 0, lookupsUnreadable: 0 });
+    const warnings = this.reportSkipped({ ...noSkipped(), indexLines: scan.failed });
+
+    if (scan.failed > Math.max(SEED_UNREADABLE_LINES_FLOOR, Math.floor(scan.lines * SEED_UNREADABLE_LINES_SHARE))) {
+      const paused = `seeding paused: ${scan.failed} unreadable index lines, will retry`;
+      console.warn(`[${this.config.id}] ${paused}`);
+      return { status: 'ok', packages: [], cursor: ctx.state?.cursor ?? null, etag: null, complete: false, warnings: [...warnings, paused] };
+    }
 
     const last = index >= count - 1;
-    return { status: 'ok', packages, cursor: last ? null : `${SEED_PREFIX}${index + 1}`, etag: null, complete: last };
+    return { status: 'ok', packages, cursor: last ? null : `${SEED_PREFIX}${index + 1}`, etag: null, complete: last, ...withWarnings(warnings) };
   }
 
   /** Packages whose indexed version differs from the store's, or that the store lacks; each gets a lookup. */
-  private async scanForChanges(ctx: PollContext, delivered: PackageSnapshot[]): Promise<LookupPass> {
+  private async scanForChanges(ctx: PollContext, delivered: PackageSnapshot[], listingSkipped: number): Promise<LookupPass> {
     const [text, known] = await Promise.all([this.fetchIndex(ctx), this.store.getAllKnownVersions(this.config.id)]);
     const deliveredVersions = new Map(delivered.map((p) => [p.packageId, p.version]));
     const { candidates, scan } = this.candidates(text, known, deliveredVersions);
     const rotation = Math.floor(ctx.tickIndex / CADENCE.hexiumIndexEveryNthTick);
     const pass = await this.lookUp(ctx, candidates, SOURCE_BUDGET.hexiumLookupsPerPoll, rotation);
     pass.skipped.indexLines = scan.failed;
-    this.warnSkipped(pass.skipped);
+    pass.skipped.listingItems = listingSkipped;
+    pass.warnings = this.reportSkipped(pass.skipped);
+    if (pass.picked < pass.candidates) pass.warnings.push(`lookups capped: ${pass.picked} of ${pass.candidates} candidates`);
     return pass;
   }
 
@@ -171,7 +234,7 @@ export class HexiumAdapter implements SourceAdapter {
   private async lookUp(ctx: PollContext, candidates: IndexEntry[], cap: number, rotation: number): Promise<LookupPass> {
     const picked = pickWindow(candidates, cap, rotation);
     const packages: PackageSnapshot[] = [];
-    const skipped: Skipped = { indexLines: 0, lookupsFailed: 0, lookupsUnreadable: 0 };
+    const skipped = noSkipped();
     let requested = 0;
     let rateLimited = false;
 
@@ -189,7 +252,7 @@ export class HexiumAdapter implements SourceAdapter {
       }
     }
     const complete = picked.length === candidates.length && packages.length === candidates.length;
-    return { packages, complete, requested, skipped };
+    return { packages, complete, requested, candidates: candidates.length, picked: picked.length, skipped, warnings: [] };
   }
 
   private async lookUpOne(ctx: PollContext, entry: IndexEntry): Promise<LookupOutcome> {
@@ -236,6 +299,8 @@ export class HexiumAdapter implements SourceAdapter {
       isDeprecated: body.is_deprecated,
       updatedAt,
       sizeBytes: entry.sizeBytes,
+      downloadUrl: hexiumDownloadUrl(body.latest.download_url),
+      downloads: count(body.total_downloads),
     };
   }
 
@@ -256,17 +321,20 @@ export class HexiumAdapter implements SourceAdapter {
       isDeprecated: false,
       updatedAt: seededAt,
       sizeBytes: entry.sizeBytes,
+      downloadUrl: null,
+      downloads: null,
     };
   }
 
   /** Creation-ordered page 1: new packages, with flags. */
-  private async readListing(ctx: PollContext): Promise<'not-modified' | { packages: PackageSnapshot[]; etag: string | null }> {
+  private async readListing(ctx: PollContext): Promise<'not-modified' | { packages: PackageSnapshot[]; etag: string | null; skipped: number }> {
     const listing = await conditionalGet(ctx, `${this.origin}/api/experimental/frontend/packages/?page=1`);
     if (listing.status === 'not-modified') return 'not-modified';
-    return { packages: this.parseListing(listing.text), etag: listing.etag };
+    const { packages, skipped } = this.parseListing(listing.text);
+    return { packages, etag: listing.etag, skipped };
   }
 
-  private parseListing(text: string): PackageSnapshot[] {
+  private parseListing(text: string): { packages: PackageSnapshot[]; skipped: number } {
     const body = parseJson(text);
     if (!isRecord(body) || !Array.isArray(body.packages)) throw new UnexpectedShapeError('listing has no packages[]');
     const out: PackageSnapshot[] = [];
@@ -275,7 +343,7 @@ export class HexiumAdapter implements SourceAdapter {
       if (snapshot) out.push(snapshot);
     }
     if (body.packages.length > 0 && out.length === 0) throw new UnexpectedShapeError('no listing item is usable');
-    return out;
+    return { packages: out, skipped: body.packages.length - out.length };
   }
 
   private listingItem(item: unknown): PackageSnapshot | null {
@@ -284,7 +352,7 @@ export class HexiumAdapter implements SourceAdapter {
     const name = str(item.name);
     const version = str(item.version_number);
     const updatedAt = typeof item.date_updated === 'string' ? normalizeIso(item.date_updated) : null;
-    if (!namespace || !name || !version || !updatedAt) return null;
+    if (!namespace || !name || !version || !updatedAt || typeof item.is_deprecated !== 'boolean') return null;
     return {
       source: this.config.id,
       store: 'hexium',
@@ -297,9 +365,11 @@ export class HexiumAdapter implements SourceAdapter {
       description: str(item.description),
       categories: Array.isArray(item.categories) ? item.categories.filter((c): c is string => typeof c === 'string') : [],
       isNsfw: item.has_nsfw_content !== false,
-      isDeprecated: item.is_deprecated === true,
+      isDeprecated: item.is_deprecated,
       updatedAt,
       sizeBytes: null,
+      downloadUrl: null,
+      downloads: count(item.download_count),
     };
   }
 
@@ -313,7 +383,7 @@ export class HexiumAdapter implements SourceAdapter {
     const { candidates, scan } = this.candidates(text, known, new Map());
     const pass = await this.lookUp(ctx, candidates, SOURCE_BUDGET.hexiumLookupsPerReconcile, ctx.sliceHint ?? 0);
     pass.skipped.indexLines = scan.failed;
-    this.warnSkipped(pass.skipped);
+    this.reportSkipped(pass.skipped);
     if (pass.requested > 0 && pass.packages.length === 0) throw new UnexpectedShapeError('no package lookup succeeded');
     return pass.packages;
   }
@@ -329,7 +399,8 @@ export class HexiumAdapter implements SourceAdapter {
       if (res.status !== 'ok') return { excerpt: null, url: null };
       const body = parseJson(res.text);
       const markdown = isRecord(body) && typeof body.markdown === 'string' ? body.markdown : null;
-      return { excerpt: extractChangelog(markdown, version, { fullUrl: pkg.url }), url: pkg.url };
+      const excerpt = extractChangelog(markdown, version, { fullUrl: pkg.url });
+      return excerpt === null ? { excerpt: null, url: null } : { excerpt, url: pkg.url };
     } catch (err) {
       console.warn(`[${this.config.id}] changelog fetch failed: ${describeError(err)}`);
       return { excerpt: null, url: null };

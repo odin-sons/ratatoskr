@@ -14,6 +14,11 @@ export function num(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+/** A non-negative safe integer (a download count), else null. */
+export function count(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
 export function safeSlug(value: string): boolean {
   return /^[a-z0-9][a-z0-9_-]*$/i.test(value);
 }

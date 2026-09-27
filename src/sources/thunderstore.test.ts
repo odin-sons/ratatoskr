@@ -27,6 +27,7 @@ interface Item {
   updated: string;
   pinned?: boolean;
   nsfw?: boolean;
+  downloads?: unknown;
 }
 
 function listingBody(items: Item[], next = false): unknown {
@@ -45,6 +46,7 @@ function listingBody(items: Item[], next = false): unknown {
       description: 'd',
       icon_url: `https://cdn.test/${i.name}.png`,
       size: 1234,
+      ...(i.downloads === undefined ? {} : { download_count: i.downloads }),
     })),
   };
 }
@@ -104,6 +106,8 @@ describe('ThunderstoreAdapter.poll', () => {
       isDeprecated: false,
       updatedAt: '2026-09-18T23:58:52.651200Z',
       sizeBytes: 788022,
+      downloadUrl: 'https://thunderstore.io/package/download/Cartur/Carturs_Map_Pins/1.3.6/',
+      downloads: 8120,
     });
     expect(pin?.categories.every((c) => typeof c === 'string')).toBe(true);
   });
@@ -341,7 +345,7 @@ describe('ThunderstoreAdapter.fetchChangelog', () => {
 
     const empty = createFakeFetch([['/changelog/', () => json({ markdown: null })]]);
     const out = await adapter.fetchChangelog(makeCtx(empty), pkg, '1.3.6');
-    expect(out.excerpt).toBeNull();
+    expect(out).toEqual({ excerpt: null, url: null });
   });
 });
 
@@ -654,5 +658,55 @@ describe('ThunderstoreAdapter.fetchChangelog — size cap', () => {
     const parse = vi.spyOn(JSON, 'parse');
     expect(await adapter.fetchChangelog(makeCtx(fake), pkg, '1.0.0')).toEqual({ excerpt: null, url: null });
     expect(parse).not.toHaveBeenCalled();
+  });
+});
+
+describe('ThunderstoreAdapter snapshot download fields', () => {
+  const pollOne = async (item: Partial<Item> & { ns?: string; name?: string }, version = '1.0.0') => {
+    const fake = createFakeFetch([
+      [LISTING, () => json(listingBody([{ ns: 'Owner', name: 'Mod', updated: stamp(10), ...item }]))],
+      ['/versions/', () => json(versionsBody(version, stamp(10)))],
+    ]);
+    return okResult(await adapter.poll(makeCtx(fake, { state: makeState({ cursor: stamp(60) }) }))).packages[0]!;
+  };
+
+  it('builds the download url from namespace, name and version and takes the count from download_count', async () => {
+    expect(await pollOne({ downloads: 12345 }, '2.3.4')).toMatchObject({ downloadUrl: 'https://thunderstore.io/package/download/Owner/Mod/2.3.4/', downloads: 12345 });
+  });
+
+  it('keeps a count of zero and reads the real fixture counts', async () => {
+    expect((await pollOne({ downloads: 0 })).downloads).toBe(0);
+    const fake = createFakeFetch([
+      [LISTING, () => text(listingFixture)],
+      ['/versions/', () => json(versionsBody('1.0.0', '2026-09-19T00:00:10.000000Z'))],
+    ]);
+    const res = okResult(await adapter.poll(makeCtx(fake, { state: makeState({ cursor: '2026-09-18T23:56:00.000000Z' }) })));
+    expect(res.packages.map((p) => [p.name, p.downloads]).sort()).toEqual([['Carturs_Compass_and_Clock', 4921], ['Carturs_Map_Pins', 8120], ['QuickPing', 0]]);
+  });
+
+  it.each([['a string', '12'], ['negative', -1], ['fractional', 1.5], ['huge', 1e30], ['null', null], ['boolean', true], ['object', {}], ['array', [1]]])(
+    'drops a download_count that is %s',
+    async (_label, raw) => {
+      expect((await pollOne({ downloads: raw })).downloads).toBeNull();
+    },
+  );
+
+  it('has no count when the listing omits it', async () => {
+    expect((await pollOne({})).downloads).toBeNull();
+  });
+
+  it('percent-encodes every path segment so hostile parts cannot add segments or traverse', async () => {
+    const snapshot = await pollOne({ ns: 'a b/c?d#e', name: 'x/y%z' }, '1.0/../9');
+    const path = new URL(snapshot.downloadUrl!).pathname.split('/');
+    expect(path).toHaveLength(7);
+    expect(path.slice(0, 3)).toEqual(['', 'package', 'download']);
+    expect(new URL(snapshot.downloadUrl!).origin).toBe('https://thunderstore.io');
+    expect(snapshot.downloadUrl).not.toMatch(/[?#]/);
+  });
+
+  it('gives no download url when a segment is a dot segment', async () => {
+    expect((await pollOne({ ns: '..' })).downloadUrl).toBeNull();
+    expect((await pollOne({ name: '.' })).downloadUrl).toBeNull();
+    expect((await pollOne({}, '..')).downloadUrl).toBeNull();
   });
 });

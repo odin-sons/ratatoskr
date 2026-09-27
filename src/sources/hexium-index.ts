@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { HEXIUM_INDEX_MAX_LINES, HEXIUM_INDEX_MAX_LINE_BYTES } from './budget.ts';
+import { HEXIUM_INDEX_MAX_ITERATIONS, HEXIUM_INDEX_MAX_LINES, HEXIUM_INDEX_MAX_LINE_BYTES } from './budget.ts';
 
 const CR = 13;
 
@@ -23,7 +23,7 @@ export interface IndexScan {
   lines: number;
   /** Lines that could not be read; they are skipped, never emitted. */
   failed: number;
-  /** The scan stopped at `HEXIUM_INDEX_MAX_LINES`. */
+  /** The scan stopped at `HEXIUM_INDEX_MAX_LINES` lines or `HEXIUM_INDEX_MAX_ITERATIONS` visited lines. */
   truncated: boolean;
 }
 
@@ -41,7 +41,11 @@ function parseLine(text: string, start: number, stop: number): IndexEntry | null
  */
 export function scanPackageIndex(text: string, visit: (entry: IndexEntry) => void): IndexScan {
   const scan: IndexScan = { lines: 0, failed: 0, truncated: false };
-  for (let start = 0; start < text.length; ) {
+  for (let start = 0, visited = 0; start < text.length; visited += 1) {
+    if (visited >= HEXIUM_INDEX_MAX_ITERATIONS) {
+      scan.truncated = true;
+      break;
+    }
     let end = text.indexOf('\n', start);
     if (end === -1) end = text.length;
     const next = end + 1;

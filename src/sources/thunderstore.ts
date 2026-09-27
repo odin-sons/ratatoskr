@@ -3,7 +3,7 @@ import type { PackageSnapshot, SourceConfig } from '../core/types.ts';
 import type { PollContext, PollResult, SourceAdapter } from '../core/ports.ts';
 import { extractChangelog } from '../changelog/extract.ts';
 import { CHANGELOG_MAX_BYTES, SOURCE_BUDGET, STALE_CACHE_WINDOW_MS, VERSIONS_MAX_BYTES } from './budget.ts';
-import { UnexpectedShapeError, isRecord, num, parseJson, safeSlug, str, type Json } from './guards.ts';
+import { UnexpectedShapeError, count, isRecord, num, parseJson, safeSlug, str, type Json } from './guards.ts';
 import { ResponseTooLargeError, UpstreamError, conditionalGet, describeError, skipOnError } from './http.ts';
 import { clampToNow, maxIso, normalizeIso } from './iso.ts';
 
@@ -18,6 +18,12 @@ interface Entry {
 
 function packageUrl(community: string, namespace: string, name: string): string {
   return `${THUNDERSTORE_ORIGIN}/c/${encodeURIComponent(community)}/p/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/`;
+}
+
+/** Direct download link; null when a segment could traverse (`.`, `..`). Thunderstore answers it with a redirect to its CDN. */
+function downloadUrl(namespace: string, name: string, version: string): string | null {
+  if ([namespace, name, version].some((segment) => segment === '.' || segment === '..')) return null;
+  return `${THUNDERSTORE_ORIGIN}/package/download/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/${encodeURIComponent(version)}/`;
 }
 
 function categoryNames(value: unknown): string[] {
@@ -278,6 +284,8 @@ export class ThunderstoreAdapter implements SourceAdapter {
       isDeprecated: r.is_deprecated === true,
       updatedAt: entry.updated,
       sizeBytes: num(r.size),
+      downloadUrl: downloadUrl(entry.namespace, entry.name, version),
+      downloads: count(r.download_count),
     };
   }
 
@@ -293,7 +301,8 @@ export class ThunderstoreAdapter implements SourceAdapter {
       if (res.status !== 'ok') return { excerpt: null, url: null };
       const body = parseJson(res.text);
       const markdown = isRecord(body) && typeof body.markdown === 'string' ? body.markdown : null;
-      return { excerpt: extractChangelog(markdown, version, { fullUrl }), url: fullUrl };
+      const excerpt = extractChangelog(markdown, version, { fullUrl });
+      return excerpt === null ? { excerpt: null, url: null } : { excerpt, url: fullUrl };
     } catch (err) {
       console.warn(`[${this.config.id}] changelog fetch failed: ${describeError(err)}`);
       return { excerpt: null, url: null };

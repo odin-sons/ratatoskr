@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { bestOf } from '../testing/timing.ts';
 import { indexLine, syntheticIndex } from './__fixtures__/index-gen.ts';
 import { fixture } from './__fixtures__/fake-fetch.ts';
-import { HEXIUM_INDEX_MAX_LINES, HEXIUM_INDEX_MAX_LINE_BYTES } from './budget.ts';
+import { HEXIUM_INDEX_MAX_BYTES, HEXIUM_INDEX_MAX_ITERATIONS, HEXIUM_INDEX_MAX_LINES, HEXIUM_INDEX_MAX_LINE_BYTES } from './budget.ts';
 import { scanPackageIndex, seedSliceOf, type IndexEntry } from './hexium-index.ts';
 
 const real = fixture('hexium-package-index.ndjson');
@@ -123,6 +123,31 @@ describe('scanPackageIndex — hostile input fails soft', () => {
 
   it('does not truncate an index of exactly the line limit', () => {
     expect(scan(syntheticIndex(HEXIUM_INDEX_MAX_LINES))).toMatchObject({ lines: HEXIUM_INDEX_MAX_LINES, truncated: false });
+  });
+
+  it.each([
+    ['newlines', '\n'],
+    ['CRLF pairs', '\r\n'],
+    ['blank-looking lines with a space', ' \n'],
+  ])('refuses a maximum-size body of %s in a few milliseconds', (_label, unit) => {
+    const body = unit.repeat(Math.floor(HEXIUM_INDEX_MAX_BYTES / unit.length));
+    expect(scan(body).truncated).toBe(true);
+    expect(bestOf(5, () => scan(body))).toBeLessThan(5);
+  });
+
+  it('accepts a full-size index with a blank line between every line', () => {
+    const body = syntheticIndex(HEXIUM_INDEX_MAX_LINES).split('\n').join('\n\n');
+    expect(scan(body)).toMatchObject({ lines: HEXIUM_INDEX_MAX_LINES, truncated: false });
+  });
+
+  it('bounds the total number of lines it visits, blank or not', () => {
+    const blanks = '\n'.repeat(HEXIUM_INDEX_MAX_ITERATIONS + 10);
+    expect(scan(`${indexLine(1)}\n${blanks}${indexLine(2)}`)).toMatchObject({ truncated: true });
+  });
+
+  it('keeps every index the line cap accepts inside the byte cap, at the live average line size', () => {
+    expect(HEXIUM_INDEX_MAX_LINES * 400).toBeLessThan(HEXIUM_INDEX_MAX_BYTES);
+    expect(syntheticIndex(HEXIUM_INDEX_MAX_LINES).length).toBeLessThan(HEXIUM_INDEX_MAX_BYTES);
   });
 
   it('stays linear on many unreadable lines that share a long unterminated prefix', () => {

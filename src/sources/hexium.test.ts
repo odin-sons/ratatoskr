@@ -191,8 +191,25 @@ describe('HexiumAdapter.poll — listing item flags fail closed', () => {
     expect(res.packages[1]?.isNsfw).toBe(false);
   });
 
-  it('treats a non-boolean deprecated flag as not deprecated', async () => {
-    expect((await listing((item) => void (item.is_deprecated = 'yes'))).packages[0]?.isDeprecated).toBe(false);
+  it('quarantines an item whose deprecated flag is not a boolean and counts it in one warning', async () => {
+    for (const bad of ['yes', 'false', null, 0, undefined]) {
+      vi.mocked(console.warn).mockClear();
+      const res = await listing((item) => void (item.is_deprecated = bad));
+      expect(res.packages.map((p) => p.packageId), String(bad)).not.toContain('GenesisMods-zzzGenesisItemStacks');
+      expect(res.packages, String(bad)).toHaveLength(3);
+      const lines = warnings().filter((l) => l.includes('skipped: index lines'));
+      expect(lines, String(bad)).toHaveLength(1);
+      expect(lines[0]).toMatch(/listing items 1/);
+      expect(lines[0]).not.toContain('GenesisMods');
+      expect(res.warnings?.some((w) => /listing items 1/.test(w))).toBe(true);
+    }
+  });
+
+  it('keeps an item with a boolean deprecated flag and warns about nothing', async () => {
+    const res = await listing((item) => void (item.is_deprecated = true));
+    expect(res.packages[0]).toMatchObject({ packageId: 'GenesisMods-zzzGenesisItemStacks', isDeprecated: true });
+    expect(warnings()).toEqual([]);
+    expect(res.warnings).toBeUndefined();
   });
 
   it('leaves previousVersion unknown for listing items', async () => {
@@ -251,6 +268,8 @@ describe('HexiumAdapter.poll — index scan finds version changes', () => {
       isDeprecated: false,
       updatedAt: '2026-09-26T22:42:31.000000Z',
       sizeBytes: 216262,
+      downloadUrl: 'https://cdn.hexium.gg/upload/1686/1.0.1.zip',
+      downloads: 109,
     });
     expect('previousVersion' in snapshot!).toBe(false);
   });
@@ -598,6 +617,87 @@ describe('HexiumAdapter.poll — hostile or reformatted index', () => {
   });
 });
 
+describe('HexiumAdapter.poll — degradation is reported', () => {
+  const state = makeState({ cursor: null });
+  const OVER_CAP = 'package-index above cap: updates of existing packages are not detected';
+  const UNAVAILABLE = 'package-index unavailable or unreadable: updates of existing packages are not detected';
+  const known = allVersions(6);
+
+  async function pollIndex(index: string | (() => Response), over: Partial<PollContext> = {}) {
+    return ok(await adapterWith(known).poll(makeCtx(routes({ index, lookup: answerAll() }), { tickIndex: indexTick(1), state, ...over })));
+  }
+
+  it('has no warnings on a healthy scan or on a listing-only tick', async () => {
+    expect((await pollIndex(syntheticIndex(6))).warnings).toBeUndefined();
+    const listingOnly = ok(await adapterWith(known).poll(makeCtx(routes(), { tickIndex: LISTING_TICK, state })));
+    expect(listingOnly.warnings).toBeUndefined();
+  });
+
+  it('warns when the index has more lines than the cap, and still returns the listing', async () => {
+    const res = await pollIndex(syntheticIndex(HEXIUM_INDEX_MAX_LINES + 5));
+    expect(res.warnings).toEqual([OVER_CAP]);
+    expect(res.packages).toHaveLength(4);
+    expect(res.complete).toBe(false);
+  });
+
+  it('warns when the index body is above the byte cap', async () => {
+    expect((await pollIndex(`${syntheticIndex(6)}\n${' '.repeat(HEXIUM_INDEX_MAX_BYTES)}`)).warnings).toEqual([OVER_CAP]);
+  });
+
+  it.each([
+    ['whitespace only', '\n'.repeat(HEXIUM_INDEX_MAX_BYTES - 10)],
+    ['CRLF only', '\r\n'.repeat(HEXIUM_INDEX_MAX_BYTES / 4)],
+  ])('warns about the cap for a body of %s', async (_label, body) => {
+    expect((await pollIndex(body)).warnings).toEqual([OVER_CAP]);
+  });
+
+  it.each([
+    ['an html page', '<html>maintenance</html>'],
+    ['a JSON array', JSON.stringify([{ namespace: 'a', name: 'b', version_number: '1.0.0' }])],
+    ['a 500', () => new Response('', { status: 500 })],
+    ['a network error', () => Promise.reject(new TypeError('down')) as unknown as Response],
+  ])('warns that updates are not detected when the index is %s', async (_label, body) => {
+    const res = await pollIndex(body);
+    expect(res.warnings).toEqual([UNAVAILABLE]);
+    expect(res.packages).toHaveLength(4);
+  });
+
+  it('warns on an index tick whose listing answered 304', async () => {
+    const fake = createFakeFetch([[LISTING, () => new Response(null, { status: 304 })], [INDEX, () => text('<html>maintenance</html>')]]);
+    const res = ok(await adapterWith(known).poll(makeCtx(fake, { tickIndex: indexTick(1), state: makeState({ cursor: null, etag: '"h1"' }) })));
+    expect(res.warnings).toEqual([UNAVAILABLE]);
+  });
+
+  it('warns about failed and unreadable lookups without naming packages or hosts', async () => {
+    const lookup: LookupResponder = (ns, name) =>
+      ns === 'Owner1' ? new Response('', { status: 500 }) : ns === 'Owner2' ? json({}) : json(lookupBody(ns, name, '2.0.0'));
+    const fake = routes({ index: syntheticIndex(6, () => '2.0.0'), lookup });
+    const res = ok(await adapterWith(known).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    expect(res.warnings).toHaveLength(1);
+    expect(res.warnings![0]).toMatch(/lookups failed 1/);
+    expect(res.warnings![0]).toMatch(/lookups unreadable 1/);
+    expect(res.warnings![0]).not.toMatch(/Owner|Package|https?:/);
+  });
+
+  it('warns when more candidates changed than the per-poll lookup cap', async () => {
+    const total = SOURCE_BUDGET.hexiumLookupsPerPoll + 7;
+    const fake = routes({ index: syntheticIndex(total, () => '2.0.0'), lookup: answerAll() });
+    const res = ok(await adapterWith(allVersions(total)).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    expect(res.warnings).toEqual([`lookups capped: ${SOURCE_BUDGET.hexiumLookupsPerPoll} of ${total} candidates`]);
+  });
+
+  it('reads a full-size index at the live line size without any warning', async () => {
+    const line = (n: number, version: string): string => `${indexLine(n, version).slice(0, -1)},"pad":"${'x'.repeat(130)}"}`;
+    const lines = Array.from({ length: HEXIUM_INDEX_MAX_LINES }, (_, i) => line(i + 1, i === 1 || i === 2 ? '2.0.0' : '1.0.0'));
+    const body = lines.join('\n');
+    expect(body.length / HEXIUM_INDEX_MAX_LINES).toBeGreaterThan(380);
+    const fake = routes({ index: body, lookup: answerAll() });
+    const res = ok(await adapterWith(allVersions(HEXIUM_INDEX_MAX_LINES)).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    expect(lookupCalls(fake)).toHaveLength(2);
+    expect(res.warnings).toBeUndefined();
+  });
+});
+
 describe('HexiumAdapter.poll — subrequest budget', () => {
   const state = makeState({ cursor: null });
 
@@ -746,6 +846,53 @@ describe('HexiumAdapter.poll — cold start seeding', () => {
     const res = ok(await adapterWith().poll(makeCtx(routes({ index: [index, 'garbage', 'more garbage'].join('\n') }), { state: null })));
     expect(res.packages.length).toBeGreaterThan(0);
     expect(warnings().filter((l) => l.includes('skipped: index lines 2'))).toHaveLength(1);
+    expect(res.warnings?.some((w) => w.includes('index lines 2'))).toBe(true);
+  });
+
+  describe('a glitchy index does not leave holes', () => {
+    const garbage = (n: number): string[] => Array.from({ length: n }, (_, i) => `garbage ${i}`);
+    const seedWith = async (source: string, bad: number, cursor: string | null) =>
+      ok(await adapterWith().poll(makeCtx(routes({ index: [source, ...garbage(bad)].join('\n') }), { state: cursor === null ? null : makeState({ cursor, bootstrapped: false }) })));
+    const small = syntheticIndex(20);
+
+    it('seeds the slice while the unreadable lines stay at the small-index threshold of 3', async () => {
+      const res = await seedWith(small, 3, 'seed:3');
+      expect(ids(res.packages)).toEqual(sliceIds(3, small));
+      expect(res.packages.length).toBeGreaterThan(0);
+      expect(res.cursor).toBe('seed:4');
+    });
+
+    it('skips the poll above the threshold: nothing committed, cursor unchanged, warning raised', async () => {
+      for (const cursor of ['seed:3', 'seed:7', null]) {
+        const res = await seedWith(small, 4, cursor);
+        expect(res.packages, String(cursor)).toEqual([]);
+        expect(res.cursor, String(cursor)).toBe(cursor);
+        expect(res.complete, String(cursor)).toBe(false);
+        expect(res.warnings?.join(' '), String(cursor)).toMatch(/seeding paused/);
+      }
+    });
+
+    it('scales the threshold to 1% of a large index', async () => {
+      const large = syntheticIndex(1000);
+      expect(ids((await seedWith(large, 10, 'seed:1')).packages)).toEqual(sliceIds(1, large));
+      const paused = await seedWith(large, 11, 'seed:1');
+      expect(paused.packages).toEqual([]);
+      expect(paused.cursor).toBe('seed:1');
+    });
+
+    it('resumes at the same slice once the index is clean again', async () => {
+      const paused = await seedWith(small, 10, 'seed:3');
+      const resumed = ok(await adapterWith().poll(makeCtx(routes({ index: small }), { state: makeState({ cursor: paused.cursor, bootstrapped: false }) })));
+      expect(ids(resumed.packages)).toEqual(sliceIds(3, small));
+      expect(resumed.packages.length).toBeGreaterThan(0);
+      expect(resumed.cursor).toBe('seed:4');
+    });
+
+    it('never completes seeding on a glitchy index', async () => {
+      const res = await seedWith(small, 10, `seed:${count - 1}`);
+      expect(res.complete).toBe(false);
+      expect(res.cursor).toBe(`seed:${count - 1}`);
+    });
   });
 });
 
@@ -850,6 +997,11 @@ describe('HexiumAdapter.fetchChangelog', () => {
     expect(await adapterWith().fetchChangelog(makeCtx(fake), pkg, '5.4.2350')).toEqual({ excerpt: null, url: null });
   });
 
+  it('returns no link when the package ships no changelog', async () => {
+    const fake = createFakeFetch([['/changelog/', () => json({ markdown: null })]]);
+    expect(await adapterWith().fetchChangelog(makeCtx(fake), pkg, '5.4.2350')).toEqual({ excerpt: null, url: null });
+  });
+
   it('refuses a changelog body above the changelog cap without parsing it', async () => {
     const huge = JSON.stringify({ markdown: `## 5.4.2350\n${'- entry\n'.repeat(60_000)}` });
     expect(huge.length).toBeGreaterThan(300_000);
@@ -863,5 +1015,90 @@ describe('HexiumAdapter.fetchChangelog', () => {
     const body = JSON.stringify({ markdown: `## 5.4.2350\n- fixed a thing\n${'x'.repeat(100_000)}` });
     const fake = createFakeFetch([['/changelog/', () => text(body)]]);
     expect((await adapterWith().fetchChangelog(makeCtx(fake), pkg, '5.4.2350')).excerpt).toContain('fixed a thing');
+  });
+});
+
+describe('HexiumAdapter — download url and download count', () => {
+  const state = makeState({ cursor: null, etag: null });
+
+  async function lookedUp(mutate: (body: Lookup) => void): Promise<import('../core/types.ts').PackageSnapshot> {
+    const fake = routes({ index: syntheticIndex(1), lookup: answerAll('2.0.0', mutate) });
+    const res = ok(await adapterWith(allVersions(1, '0.9.0')).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    return res.packages.find((p) => p.packageId === 'Owner1-Package1')!;
+  }
+  const withUrl = (value: unknown) => (body: Lookup) => void ((body.latest as Record<string, unknown>).download_url = value);
+  const withTotal = (value: unknown) => (body: Lookup) => void (body.total_downloads = value);
+
+  it('takes the download url from latest.download_url and the count from total_downloads of a lookup', async () => {
+    const snapshot = await lookedUp((body) => {
+      withUrl('https://cdn.hexium.gg/upload/9/2.0.0.zip')(body);
+      withTotal(4242)(body);
+    });
+    expect(snapshot).toMatchObject({ downloadUrl: 'https://cdn.hexium.gg/upload/9/2.0.0.zip', downloads: 4242 });
+  });
+
+  it.each([
+    ['the bare host', 'https://hexium.gg/dl/a.zip', 'https://hexium.gg/dl/a.zip'],
+    ['a subdomain', 'https://valheim.hexium.gg/dl/a.zip', 'https://valheim.hexium.gg/dl/a.zip'],
+    ['upper case', 'HTTPS://CDN.HEXIUM.GG/A.zip', 'https://cdn.hexium.gg/A.zip'],
+    ['a query string', 'https://cdn.hexium.gg/a.zip?x=1', 'https://cdn.hexium.gg/a.zip?x=1'],
+  ])('accepts a download url on %s', async (_label, raw, expected) => {
+    expect((await lookedUp(withUrl(raw))).downloadUrl).toBe(expected);
+  });
+
+  it.each([
+    ['plain http', 'http://cdn.hexium.gg/a.zip'],
+    ['another host', 'https://evil.example/a.zip'],
+    ['a look-alike suffix', 'https://evilhexium.gg/a.zip'],
+    ['a host that only starts with hexium.gg', 'https://hexium.gg.evil.example/a.zip'],
+    ['credentials before the host', 'https://user:pw@cdn.hexium.gg/a.zip'],
+    ['a user that names the host', 'https://cdn.hexium.gg@evil.example/a.zip'],
+    ['a trailing dot host', 'https://cdn.hexium.gg./a.zip'],
+    ['a script url', 'javascript:alert(1)'],
+    ['a protocol-relative url', '//cdn.hexium.gg/a.zip'],
+    ['a relative path', '/upload/1/a.zip'],
+    ['garbage', 'not a url'],
+    ['an empty string', ''],
+    ['a number', 42],
+    ['null', null],
+    ['an object', { url: 'https://cdn.hexium.gg/a.zip' }],
+    ['over 512 characters', `https://cdn.hexium.gg/${'a'.repeat(600)}`],
+  ])('drops a download url that is %s', async (_label, raw) => {
+    expect((await lookedUp(withUrl(raw))).downloadUrl).toBeNull();
+  });
+
+  it('has no download url when the lookup omits it', async () => {
+    expect((await lookedUp((body) => void delete (body.latest as Record<string, unknown>).download_url)).downloadUrl).toBeNull();
+  });
+
+  it('accepts zero downloads and drops counts that are not non-negative integers', async () => {
+    expect((await lookedUp(withTotal(0))).downloads).toBe(0);
+    for (const bad of ['5', -3, 2.5, 1e30, null, true, [], {}, undefined]) {
+      expect((await lookedUp(withTotal(bad))).downloads, String(bad)).toBeNull();
+    }
+  });
+
+  it('maps the listing download_count and leaves the download url empty', async () => {
+    const res = ok(await adapterWith().poll(makeCtx(routes(), { tickIndex: LISTING_TICK, state })));
+    expect(res.packages.map((p) => p.downloads)).toEqual([3, 3, 1, 1]);
+    for (const p of res.packages) expect(p.downloadUrl).toBeNull();
+  });
+
+  it('drops a listing download_count that is not a non-negative integer', async () => {
+    const body = JSON.parse(listingFixture) as { packages: Record<string, unknown>[] };
+    const bad: unknown[] = ['3', -1, 1.5, 1e30];
+    body.packages.forEach((item, i) => void (item.download_count = bad[i]));
+    delete body.packages[3]!.download_count;
+    const res = ok(await adapterWith().poll(makeCtx(routes({ listing: JSON.stringify(body) }), { tickIndex: LISTING_TICK, state })));
+    expect(res.packages.map((p) => p.downloads)).toEqual([null, null, null, null]);
+  });
+
+  it('gives lean seed rows neither a download url nor a count', async () => {
+    const res = ok(await adapterWith().poll(makeCtx(routes({ index: syntheticIndex(40) }), { state: null })));
+    expect(res.packages.length).toBeGreaterThan(0);
+    for (const p of res.packages) {
+      expect(p.downloadUrl).toBeNull();
+      expect(p.downloads).toBeNull();
+    }
   });
 });

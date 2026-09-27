@@ -163,6 +163,11 @@ categories[], icon_url, description, uuid4
 Note this **does** carry `version_number` and `date_updated` — no second
 request needed to diff.
 
+An item without owner, name, version or a parsable date, or whose `is_deprecated` is not a
+boolean, is quarantined like a lookup with the same defect: skipped, counted in the
+one-line warning (`listing items N`) and reported as a run-log warning. A missing or
+non-boolean `has_nsfw_content` still fails closed to NSFW.
+
 **Critical: the default order is package creation descending, not last
 updated.** Established two ways: the embedded sequential id in `uuid4`
 (`00000547-…-000000000547`) decreases monotonically down the page, and the
@@ -222,17 +227,73 @@ Reading rules (`src/sources/hexium-index.ts`):
   (`,"file_format":"…","file_size":<int>`), otherwise the size is unknown (null).
   A line that does not match, or is longer than `HEXIUM_INDEX_MAX_LINE_BYTES`
   (32 KiB), is unreadable: skipped and counted in the one-line warning, never used.
-- The body is refused above `HEXIUM_INDEX_MAX_BYTES` (1.5 MiB, checked while
-  streaming) and above `HEXIUM_INDEX_MAX_LINES` (3000); a body in which no line is
-  readable (HTML, a JSON array, a changed layout) is unusable. All of these fail
-  soft: the poll keeps its listing result and logs one line; reconcile throws.
+- The body is refused above `HEXIUM_INDEX_MAX_BYTES` (checked while streaming) and
+  above `HEXIUM_INDEX_MAX_LINES` (3500); the byte cap is the line cap times 512 bytes
+  (1.75 MiB, 1.3x the live 390 bytes per line). Every line visited counts, blank ones
+  included, against `HEXIUM_INDEX_MAX_ITERATIONS` (twice the line cap), so a body of
+  newlines, CRLF pairs or spaces stops after 7000 visits (about 1 ms cold for
+  1.75 MiB; before the visit cap 1.5 MiB of newlines cost 11.8 ms). A body in which no
+  line is readable (HTML, a JSON array, a changed layout) is unusable. All of these
+  fail soft: the poll keeps its listing result, logs one line and reports a warning
+  (below); reconcile throws.
+- **Degradation is visible.** The poll result carries `warnings`, the core copies
+  them into the source report and the run log line (redacted, at most 5 per source,
+  200 characters each). Hexium warns when the index is above the cap ("updates of
+  existing packages are not detected"), when it is unavailable or unreadable, when
+  lookups failed or were unreadable, when candidates exceeded the per-poll lookup
+  cap, and when listing items or index lines were skipped. Before this, an index
+  above the cap silently reduced the source to new-package detection while the
+  report said `ok`.
+- Unreadable lines while **seeding**: a poll whose scan has more unreadable lines than
+  `max(3, 1% of the lines)` commits nothing, keeps the cursor and reports "seeding
+  paused"; the next tick retries the same slice. Unreadable lines cannot be
+  attributed to a slice, so each slice poll sees all of them; committing anyway would
+  leave holes that later drip out as spurious `new` events. A permanent defect above
+  the threshold keeps seeding paused, loudly, until it is fixed.
 - Duplicate lines of one package cause one lookup.
 
-Cost, measured cold (fresh Node process per figure, real 1318-line index, network
-excluded): decode 0.2 ms; scan 0.8 ms; scan plus comparison with the stored versions
-1.5 ms; scan plus seed-slice selection 1.2 ms. At 5000 synthetic lines: scan 1.7 ms.
-A whole index tick (listing, index read, comparison, no changes) is ~4 ms and ~6 ms
-with 15 lookups, ~7 ms at 3000 lines; the line cap is set there.
+Cost, measured cold (fresh Node process per figure, network excluded, 390-byte
+synthetic lines, median of 25 runs; the live 1318-line index measures 1.9-2.7 ms for
+the scan with comparison): the index tick's own CPU is TextDecoder decode plus
+rebuilding the stored-version map plus the scan with comparison.
+
+| lines | decode | version map | scan + comparison | total (nothing changed) | total (every package changed) |
+|---|---|---|---|---|---|
+| 1318 | 0.2 | 0.3 | 2.0 | 2.5 | |
+| 3000 | 0.3 | 0.5 | 2.5 | 3.3 | |
+| 3500 | 0.4 | 0.6 | 3.3 | 4.3 | 4.8 |
+| 4000 | 0.4 | 0.7 | 3.7 | 4.8 | 5.5 |
+| 5000 | 0.4 | 1.6 | 3.9 | 6.0 | 6.6 |
+| 6000 | 0.5 | 2.2 | 8.1 | 10.8 | |
+
+The 10 ms invocation budget is shared with Thunderstore, D1 writes and Discord, and the
+listing parse and 15 lookups add about 2 ms on top, so the line cap is 3500: about
+4.3-4.9 ms steady state (two measurement sessions) and 4.8 ms after a store wipe. 5000 and 6000 lines measured
+above 5 ms and were rejected; 4000 was rejected as too close to the limit. The scan
+itself is bound by per-line work, not bytes: the `indexOf` walk is 0.15 ms per 4000
+lines, the sticky regex 0.9, and the remaining ~1.5 ms is the `Map` lookup of the
+freshly built `namespace-name` id.
+
+**Growth.** The package count rose from 1113 (2026-09-20) to 1318 (2026-09-26): about
+34 packages per day. The 3500-line cap is reached in about 64 days from 2026-09-26
+(around 2026-11-29); the warning above appears the first day the index exceeds it.
+Past that point the CPU budget no longer allows a full scan per tick; the durable fix
+is a server-side sorted or filtered listing (worth asking Hexium for, see Listing) or
+an incremental design that does not read the whole index every scan.
+
+**Known limitations** (accepted, not fixed):
+
+- A package whose per-package lookup lags behind the index (index lists a newer version
+  than the lookup returns) is looked up again on every scan, one subrequest and one of
+  the 15 window slots per scan, and produces no event until the lookup catches up. Seen
+  live on 2026-09-27.
+- Any differing version is announced as `update` by the core diff, including an older
+  one served by a stale listing or lookup.
+- Bursty scans (up to 15 lookups plus the listing and index reads) can leave few
+  subrequests for changelog fetches; the changelogs of that tick are skipped and not
+  retried.
+- Spurious `new` events are possible after a wiped store (every package is unseen) and
+  for a package created while seeding whose slice had already passed.
 
 **Per-package lookup** **[live]** (2026-09-27) `GET /api/experimental/package/{namespace}/{name}/`,
 ~1.1 KB JSON, 404 `{"detail":"Not found."}` for an unknown package:
@@ -343,6 +404,21 @@ epoch seconds; a value outside 1970-9999 (or non-numeric) makes that row
 unusable and it is skipped instead of failing the whole poll. Changelog
 responses are refused above 128 KB, and a `changelogs.json` entry that is not a
 list of strings is ignored line by line.
+
+---
+
+## Fields the messages use
+
+- **Download link** (`PackageSnapshot.downloadUrl`). Thunderstore:
+  `https://thunderstore.io/package/download/{namespace}/{name}/{version}/`, built by the
+  adapter (each segment percent-encoded; null for a `.`/`..` segment). **[live]** (2026-09)
+  it answers 302 to `ccdn.thunderstore.io`. Hexium: `latest.download_url` of the
+  per-package lookup, kept only when it is https on `hexium.gg` or a subdomain (for example
+  `cdn.hexium.gg`), without credentials and within 512 characters, else null. Hexium
+  listing items and lean seed rows carry none.
+- **Total downloads** (`PackageSnapshot.downloads`). Thunderstore listing `download_count`,
+  Hexium lookup `total_downloads`, Hexium listing item `download_count`; accepted only as a
+  non-negative safe integer, else null. Lean seed rows carry none.
 
 ---
 
