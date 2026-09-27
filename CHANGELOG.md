@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-09-28
+
+### Fixed
+
+- The tag-triggered deploy read `RATATOSKR_LANGUAGE`, `RATATOSKR_EMOJI` and
+  the `STORE_EMOJI_*` values as GitHub secrets; they aren't credentials, so
+  they now come from the `production` environment's variables instead. The
+  first real deploy after setting up the environment had reset the live
+  bot's language and store emoji to their defaults because those four were
+  entered as variables, not secrets, and the workflow only read secrets.
+
 ## [1.1.0] - 2026-09-27
 
 ### Changed
