@@ -4,6 +4,7 @@ import { FakeAdapter, FIXED_NOW_ISO, clientError, makeEvent, makeSnapshot, makeS
 import { makeHarness, type Harness } from '../testing/harness.ts';
 import { DISCORD, TICK_BUDGET } from './constants.ts';
 import { eventId, outboxId } from './ids.ts';
+import { renderDigest, renderImmediate } from '../render/index.ts';
 import { runTick } from './tick.ts';
 import type { PackageSnapshot } from './types.ts';
 
@@ -354,6 +355,70 @@ describe('runTick: budgets', () => {
     expect(report.sent).toBe(DISCORD.webhookRequestsPer2s);
   });
 
+  describe('package website from the details phase', () => {
+    const SITE = 'https://site.example/mod';
+
+    it('stores the website on the package and hands it to the renderer with the event', async () => {
+      const adapter = new FakeAdapter({ id: TS });
+      adapter.changelog = (pkg, version) => ({ excerpt: 'notes', url: `${pkg.url}changelog/`, websiteUrl: SITE });
+      const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription({ mode: 'immediate' })] });
+      bootstrap(h, TS, {});
+      adapter.enqueue(okPoll([snap('A-One')]));
+      const report = await runTick(h.deps, scheduled);
+      expect(report.changelogFetches).toBe(1);
+      expect([...h.store.packages.values()].map((p) => p.websiteUrl)).toEqual([SITE]);
+      expect(h.renderer.immediateCalls[0]!.pkg.websiteUrl).toBe(SITE);
+      expect(h.renderer.immediateCalls[0]!.changelog).toBe('notes');
+    });
+
+    it('stores a website found without any changelog', async () => {
+      const adapter = new FakeAdapter({ id: TS });
+      adapter.changelog = () => ({ excerpt: null, url: null, websiteUrl: SITE });
+      const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription({ mode: 'immediate' })] });
+      bootstrap(h, TS, {});
+      adapter.enqueue(okPoll([snap('A-One')]));
+      await runTick(h.deps, scheduled);
+      expect(h.renderer.immediateCalls[0]!.pkg.websiteUrl).toBe(SITE);
+      expect(h.renderer.immediateCalls[0]!.changelog).toBeNull();
+    });
+
+    it('writes nothing when the details phase found nothing', async () => {
+      const adapter = new FakeAdapter({ id: TS });
+      adapter.changelog = () => ({ excerpt: null, url: null });
+      const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription({ mode: 'immediate' })] });
+      const write = vi.spyOn(h.store, 'setEventDetails');
+      bootstrap(h, TS, {});
+      adapter.enqueue(okPoll([snap('A-One')]));
+      await runTick(h.deps, scheduled);
+      expect(write).not.toHaveBeenCalled();
+    });
+
+    it('keeps a website the package already has when the details phase finds none', async () => {
+      const adapter = new FakeAdapter({ id: TS });
+      adapter.changelog = () => ({ excerpt: 'notes', url: null });
+      const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription({ mode: 'immediate' })] });
+      bootstrap(h, TS, {});
+      adapter.enqueue(okPoll([snap('A-One', '1.0.0', { websiteUrl: 'https://listed.example/' })]));
+      await runTick(h.deps, scheduled);
+      expect(h.renderer.immediateCalls[0]!.pkg.websiteUrl).toBe('https://listed.example/');
+    });
+
+    it('renders events beyond the cap without a website and never asks for it again', async () => {
+      const adapter = new FakeAdapter({ id: TS });
+      adapter.changelog = () => ({ excerpt: null, url: null, websiteUrl: SITE });
+      const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription({ mode: 'digest' })] });
+      bootstrap(h, TS, {});
+      const total = TICK_BUDGET.maxChangelogFetches + 2;
+      adapter.enqueue(okPoll(Array.from({ length: total }, (_, i) => snap(`A${i}-Mod`))));
+      await runTick(h.deps, scheduled);
+      const withSite = [...h.store.packages.values()].filter((p) => p.websiteUrl === SITE);
+      expect(withSite).toHaveLength(TICK_BUDGET.maxChangelogFetches);
+      expect(adapter.changelogCalls).toHaveLength(TICK_BUDGET.maxChangelogFetches);
+      await runTick(h.deps, scheduled + 300_000);
+      expect(adapter.changelogCalls).toHaveLength(TICK_BUDGET.maxChangelogFetches);
+    });
+  });
+
   it('ignores changelog failures and still delivers', async () => {
     const adapter = new FakeAdapter({ id: TS });
     adapter.changelog = () => new Error('boom');
@@ -433,6 +498,27 @@ describe('runTick: store emoji', () => {
     await runTick(h.deps, scheduled + 23 * 60_000);
     expect(h.renderer.immediateEmojis).toEqual([storeEmojis]);
     expect(h.renderer.digestCalls.map((c) => c.storeEmojis)).toEqual([storeEmojis]);
+  });
+
+  it('hands the source-button emoji and the language to the renderer for immediate and digest deliveries', async () => {
+    const ratatoskrEmoji = '<:ratatoskr:123456789012345679>';
+    const adapter = new FakeAdapter({ id: TS });
+    const h = makeHarness({
+      adapters: [adapter],
+      subscriptions: [
+        makeSubscription({ id: 'imm', mode: 'immediate', webhookUrl: 'https://discord.invalid/api/webhooks/1/a' }),
+        makeSubscription({ id: 'dig', mode: 'digest', webhookUrl: 'https://discord.invalid/api/webhooks/2/b' }),
+      ],
+    });
+    h.deps.ratatoskrEmoji = ratatoskrEmoji;
+    h.deps.locale = 'ru';
+    bootstrap(h, TS, {});
+    adapter.enqueue(okPoll([snap('A-One')]));
+    await runTick(h.deps, scheduled);
+    h.clock.set('2026-09-19T12:30:00.000Z');
+    await runTick(h.deps, scheduled + 23 * 60_000);
+    expect(h.renderer.immediateSettings).toEqual([{ ratatoskrEmoji, locale: 'ru' }]);
+    expect(h.renderer.digestCalls.map((c) => [c.ratatoskrEmoji, c.locale])).toEqual([[ratatoskrEmoji, 'ru']]);
   });
 });
 
@@ -552,6 +638,7 @@ describe('runTick: report', () => {
       changelogSkipped: 0,
       deferred: 0,
       parked: 0,
+      degraded: 0,
       filtered: 0,
       purged: 0,
       subrequests: 0,
@@ -609,5 +696,23 @@ describe('runTick: report', () => {
     adapter.enqueue(okPoll([snap('A-One'), snap('B-Two')]));
     const report = await runTick(h.deps, scheduled);
     expect(report.subrequests).toBe(h.sender.calls.length);
+  });
+});
+
+describe('runTick: degraded immediate messages', () => {
+  it('reports a message Discord accepted only without its optional buttons', async () => {
+    const adapter = new FakeAdapter({ id: TS });
+    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription({ mode: 'immediate' })] });
+    h.deps.renderer = { renderDigest, renderImmediate };
+    h.sender.fallback = (call) => {
+      const container = call.payload.components?.[0] as { components: { type: number; components?: unknown[] }[] } | undefined;
+      const buttons = container?.components.at(-1)?.components?.length ?? 0;
+      return buttons > 2 ? clientError(400) : { ok: true };
+    };
+    bootstrap(h, TS, {});
+    adapter.enqueue(okPoll([snap('A-One', '1.0.0', { downloadUrl: 'https://thunderstore.io/package/download/A/One/1.0.0/', websiteUrl: 'https://example.com/one' })]));
+    const report = await runTick(h.deps, scheduled);
+    expect(h.sender.calls).toHaveLength(2);
+    expect(report).toMatchObject({ sent: 1, failed: 0, parked: 0, degraded: 1 });
   });
 });

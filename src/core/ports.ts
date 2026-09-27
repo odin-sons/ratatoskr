@@ -72,8 +72,18 @@ export interface Store {
   /** The subset of `eventIds` present in `events`. Events are never deleted, so this outlives the outbox retention. */
   existingEventIds(eventIds: string[]): Promise<Set<string>>;
 
-  /** Stores the extracted changelog (and its full-changelog URL) on an already-committed event. */
-  setEventChangelog(eventId: string, changelog: string | null, changelogUrl: string | null): Promise<void>;
+  /**
+   * Stores the extracted changelog (and its full-changelog URL) on an already-committed event and, when `websiteUrl`
+   * is not null, the package's website (latest non-null wins).
+   */
+  setEventDetails(eventId: string, details: EventDetails): Promise<void>;
+}
+
+/** What the per-event details phase learns about one event. */
+export interface EventDetails {
+  changelog: string | null;
+  changelogUrl: string | null;
+  websiteUrl: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -130,8 +140,20 @@ export interface SourceAdapter {
   poll(ctx: PollContext): Promise<PollResult>;
   /** Full sweep for daily reconciliation; absent when the store has no index. Returns every package. */
   reconcile?(ctx: PollContext): Promise<PackageSnapshot[]>;
-  /** Fetch and extract a changelog excerpt for one version. Null when unavailable. Counts as one subrequest. */
-  fetchChangelog(ctx: PollContext, pkg: PackageSnapshot, version: string): Promise<{ excerpt: string | null; url: string | null }>;
+  /**
+   * Requests the details phase spends per event at most (default 1): the changelog and, for stores whose listing lacks
+   * it, the package website. The tick uses it to keep the phase inside the subrequest budget.
+   */
+  readonly detailRequests?: number;
+  /**
+   * Fetch and extract a changelog excerpt for one version and, when the listing did not carry it, the package website.
+   * Nulls when unavailable; `websiteUrl` is absent unless one was found. Spends at most `detailRequests` subrequests.
+   */
+  fetchChangelog(
+    ctx: PollContext,
+    pkg: PackageSnapshot,
+    version: string,
+  ): Promise<{ excerpt: string | null; url: string | null; websiteUrl?: string | null }>;
 }
 
 export interface Clock {

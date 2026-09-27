@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { eventId } from '../core/ids.ts';
-import type { Renderer } from '../core/drain.ts';
+import type { Renderer, RenderContext } from '../core/drain.ts';
+import type { Language } from '../i18n/index.ts';
 import type { Clock, PollContext, PollResult, SendResult, Sender, SourceAdapter } from '../core/ports.ts';
 import type {
   AppConfig,
@@ -98,6 +99,7 @@ export type PollScript = PollResult | Error | ((ctx: PollContext) => PollResult)
 export interface ChangelogResult {
   excerpt: string | null;
   url: string | null;
+  websiteUrl?: string | null;
 }
 
 /** Scripted `SourceAdapter`. `poll` consumes one script entry per call and returns `skipped` once empty. */
@@ -106,6 +108,7 @@ export class FakeAdapter implements SourceAdapter {
   readonly pollCalls: PollContext[] = [];
   readonly reconcileCalls: PollContext[] = [];
   readonly changelogCalls: { pkg: PackageSnapshot; version: string }[] = [];
+  detailRequests?: number;
   private script: PollScript[] = [];
   reconcileResult: PackageSnapshot[] | Error | null = null;
   changelog: (pkg: PackageSnapshot, version: string) => ChangelogResult | Error = (pkg, version) => ({
@@ -167,14 +170,28 @@ export function okPoll(
 
 /** One message per digest (or per `perMessage` events); content lists event ids so tests can assert contents. */
 export class FakeRenderer implements Renderer {
-  readonly digestCalls: { events: ModEvent[]; detailed: boolean[]; storeEmojis: StoreEmojis | undefined }[] = [];
+  readonly digestCalls: {
+    events: ModEvent[];
+    detailed: boolean[];
+    storeEmojis: StoreEmojis | undefined;
+    ratatoskrEmoji: string | undefined;
+    locale: Language | undefined;
+  }[] = [];
   readonly immediateCalls: ModEvent[] = [];
   /** Emoji option received by each `renderImmediate` call, in call order. */
   readonly immediateEmojis: (StoreEmojis | undefined)[] = [];
+  /** Source-button emoji and language received by each `renderImmediate` call, in call order. */
+  readonly immediateSettings: { ratatoskrEmoji: string | undefined; locale: Language | undefined }[] = [];
   perMessage = Number.POSITIVE_INFINITY;
 
-  renderDigest(events: ModEvent[], opts: { detailed: (e: ModEvent) => boolean; now: Date; storeEmojis?: StoreEmojis }): DiscordMessage[] {
-    this.digestCalls.push({ events, detailed: events.map((e) => opts.detailed(e)), storeEmojis: opts.storeEmojis });
+  renderDigest(events: ModEvent[], opts: { detailed: (e: ModEvent) => boolean; now: Date } & RenderContext): DiscordMessage[] {
+    this.digestCalls.push({
+      events,
+      detailed: events.map((e) => opts.detailed(e)),
+      storeEmojis: opts.storeEmojis,
+      ratatoskrEmoji: opts.ratatoskrEmoji,
+      locale: opts.locale,
+    });
     const messages: DiscordMessage[] = [];
     const size = Math.max(1, Math.min(this.perMessage, events.length));
     for (let i = 0; i < events.length; i += size) {
@@ -186,9 +203,10 @@ export class FakeRenderer implements Renderer {
     return messages;
   }
 
-  renderImmediate(event: ModEvent, opts?: { now: Date; storeEmojis?: StoreEmojis }): DiscordMessage {
+  renderImmediate(event: ModEvent, opts?: { now: Date } & RenderContext): DiscordMessage {
     this.immediateCalls.push(event);
     this.immediateEmojis.push(opts?.storeEmojis);
+    this.immediateSettings.push({ ratatoskrEmoji: opts?.ratatoskrEmoji, locale: opts?.locale });
     return { content: `immediate:${event.id}`, allowed_mentions: { parse: [] } };
   }
 }

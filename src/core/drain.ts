@@ -6,11 +6,24 @@ import { compileFilter, type CompiledFilter } from './filter.ts';
 import { releaseKey } from './ids.ts';
 import type { SendResult, Sender, Store } from './ports.ts';
 import { sanitizeLogText } from './report.ts';
+import type { Language } from '../i18n/index.ts';
 import type { DiscordMessage, DueDelivery, ModEvent, OutboxRow, StoreEmojis, Subscription } from './types.ts';
 
+/** Presentation settings handed to every render call. */
+export interface RenderContext {
+  /** Custom emoji markup per store. */
+  storeEmojis?: StoreEmojis;
+  /** Custom emoji markup for the source button. */
+  ratatoskrEmoji?: string;
+  /** Message language. */
+  locale?: Language;
+  /** `false` renders an immediate message with only the mod page and source buttons. */
+  optionalButtons?: boolean;
+}
+
 export interface Renderer {
-  renderDigest(events: ModEvent[], opts: { detailed: (event: ModEvent) => boolean; now: Date; storeEmojis?: StoreEmojis }): DiscordMessage[];
-  renderImmediate(event: ModEvent, opts: { now: Date; storeEmojis?: StoreEmojis }): DiscordMessage;
+  renderDigest(events: ModEvent[], opts: { detailed: (event: ModEvent) => boolean; now: Date } & RenderContext): DiscordMessage[];
+  renderImmediate(event: ModEvent, opts: { now: Date } & RenderContext): DiscordMessage;
 }
 
 export interface DrainDeps {
@@ -20,6 +33,10 @@ export interface DrainDeps {
   now: Date;
   /** Custom emoji markup per store, handed to every render call. */
   storeEmojis?: StoreEmojis;
+  /** Custom emoji markup for the source button, handed to every render call. */
+  ratatoskrEmoji?: string;
+  /** Language of every rendered message. */
+  locale?: Language;
   /** Shared per-invocation subrequest pool; every Discord send spends one. */
   budget?: SubrequestBudget;
 }
@@ -33,6 +50,8 @@ export interface DrainReport {
   deferred: number;
   /** Outbox rows parked in this drain. */
   parked: number;
+  /** Immediate messages Discord rejected with 400 and accepted without their optional buttons. */
+  degraded: number;
   /** Due rows no longer matching their subscription's filter; marked delivered without sending. */
   filtered: number;
   error?: string;
@@ -132,7 +151,7 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainReport> {
   const { store, now } = deps;
   const drain: Drain = {
     deps,
-    report: { sent: 0, failed: 0, deferred: 0, parked: 0, filtered: 0 },
+    report: { sent: 0, failed: 0, deferred: 0, parked: 0, degraded: 0, filtered: 0 },
     sends: 0,
     perWebhook: new Map(),
     blocked: new Set(),
@@ -212,26 +231,62 @@ function allowance(drain: Drain, webhook: string): number {
   return Math.max(0, room);
 }
 
+function renderContext(deps: DrainDeps): RenderContext {
+  const context: RenderContext = {};
+  if (deps.storeEmojis !== undefined) context.storeEmojis = deps.storeEmojis;
+  if (deps.ratatoskrEmoji !== undefined) context.ratatoskrEmoji = deps.ratatoskrEmoji;
+  if (deps.locale !== undefined) context.locale = deps.locale;
+  return context;
+}
+
 async function deliverImmediate(drain: Drain, sub: Subscription, entry: CollapsedDelivery): Promise<void> {
-  const { renderer, now, storeEmojis } = drain.deps;
+  const { renderer, now } = drain.deps;
   if (allowance(drain, sub.webhookUrl) < 1) {
     drain.report.deferred += entry.rows.length;
     return;
   }
   let message: DiscordMessage;
   try {
-    message = renderer.renderImmediate(entry.delivery.event, { now, ...(storeEmojis === undefined ? {} : { storeEmojis }) });
+    message = renderer.renderImmediate(entry.delivery.event, { now, ...renderContext(drain.deps) });
   } catch {
     await parkUnrenderable(drain, [entry]);
     return;
   }
-  const failure = await sendAll(drain, sub.webhookUrl, [message]);
+  let failure = await sendAll(drain, sub.webhookUrl, [message]);
+  if (failure !== null) {
+    const reduced = reducedMessage(drain, sub.webhookUrl, entry.delivery.event, message, failure);
+    if (reduced !== null) {
+      drain.report.failed -= 1;
+      failure = await sendAll(drain, sub.webhookUrl, [reduced]);
+      if (failure === null) {
+        drain.report.degraded += 1;
+        console.warn(`outbox degraded immediate message event=${sanitizeLogText(entry.delivery.event.id)}: sent without optional buttons`);
+      }
+    }
+  }
   if (failure === null) await markDelivered(drain, entry.rows.map((r) => r.id));
   else await failRows(drain, entry.rows, failure, sub.webhookUrl);
 }
 
+/**
+ * After Discord answers 400 to a message with components (a button URL it refuses that we cannot predict), the same event
+ * rendered with only the mod page and source buttons; null when the failure is another one, no send is left, or the
+ * message has nothing more to drop.
+ */
+function reducedMessage(drain: Drain, webhook: string, event: ModEvent, message: DiscordMessage, failure: SendFailure): DiscordMessage | null {
+  const { result } = failure;
+  if (result.retryable || result.status !== 400 || message.components === undefined || allowance(drain, webhook) < 1) return null;
+  try {
+    const reduced = drain.deps.renderer.renderImmediate(event, { now: drain.deps.now, ...renderContext(drain.deps), optionalButtons: false });
+    return JSON.stringify(reduced) === JSON.stringify(message) ? null : reduced;
+  } catch {
+    return null;
+  }
+}
+
 async function deliverDigest(drain: Drain, sub: Subscription, kept: CollapsedDelivery[], filter: CompiledFilter): Promise<void> {
-  const { renderer, now, storeEmojis } = drain.deps;
+  const { renderer, now } = drain.deps;
+  const context = renderContext(drain.deps);
   const rowCount = (entries: readonly CollapsedDelivery[]): number => entries.reduce((sum, k) => sum + k.rows.length, 0);
   const room = allowance(drain, sub.webhookUrl);
   if (room < 1) {
@@ -241,7 +296,7 @@ async function deliverDigest(drain: Drain, sub: Subscription, kept: CollapsedDel
 
   const detailed = (event: ModEvent): boolean => event.kind === 'new' || filter.isWatchlistHit(event);
   const renderEntries = (entries: readonly CollapsedDelivery[]): DiscordMessage[] =>
-    renderer.renderDigest(entries.map((k) => k.delivery.event), { detailed, now, ...(storeEmojis === undefined ? {} : { storeEmojis }) });
+    renderer.renderDigest(entries.map((k) => k.delivery.event), { detailed, now, ...context });
 
   const found = fitOrIsolate(kept, room, detailed, renderEntries);
   if (found.poison.length > 0) await parkUnrenderable(drain, found.poison);

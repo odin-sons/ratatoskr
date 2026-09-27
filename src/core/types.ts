@@ -36,6 +36,10 @@ export interface PackageSnapshot {
   downloadUrl?: string | null;
   /** Total download count of the package; `undefined` or `null` when the source does not expose one. */
   downloads?: number | null;
+  /** Like/rating count (Thunderstore `rating_count`, Hexium `rating_score`); `undefined` or `null` when unknown. */
+  likes?: number | null;
+  /** The mod's own website (author-supplied); `undefined` or `null` when the source does not expose one or it is empty. */
+  websiteUrl?: string | null;
 }
 
 /** A package plus what changed. This is the unit that is stored, deduplicated and rendered. */
@@ -88,6 +92,10 @@ export interface SubscriptionFilter {
   allowNsfw?: boolean;
   /** Case-insensitive; match a full `Owner-Name` package id or a bare owner name. */
   watchlist?: string[];
+  /** Allowlist, same matching as `watchlist`: when non-empty only these packages or owners are delivered. */
+  packages?: string[];
+  /** Same matching as `watchlist`; wins over every other rule. */
+  excludePackages?: string[];
   includeCategories?: string[];
   excludeCategories?: string[];
   /** Collapse the same release seen on several stores into one item. Default true. */
@@ -138,12 +146,20 @@ export interface DiscordEmbed {
   thumbnail?: { url: string };
 }
 
-/** Link button: the only component type a non-application webhook may send. */
+/** Button emoji: a custom emoji has an `id`, a unicode one only a `name`. */
+export interface DiscordButtonEmoji {
+  id?: string;
+  name: string;
+  animated?: boolean;
+}
+
+/** Link button: the only interactive component a non-application webhook may send. */
 export interface DiscordLinkButton {
   type: 2;
   style: 5;
   label: string;
   url: string;
+  emoji?: DiscordButtonEmoji;
 }
 
 export interface DiscordActionRow {
@@ -151,14 +167,48 @@ export interface DiscordActionRow {
   components: DiscordLinkButton[];
 }
 
+/** Components V2 building blocks (message flag 1 << 15). */
+export interface DiscordTextDisplay {
+  type: 10;
+  content: string;
+}
+
+export interface DiscordThumbnail {
+  type: 11;
+  media: { url: string };
+}
+
+export interface DiscordSection {
+  type: 9;
+  components: DiscordTextDisplay[];
+  accessory: DiscordThumbnail;
+}
+
+export interface DiscordSeparator {
+  type: 14;
+  divider: boolean;
+  spacing: 1 | 2;
+}
+
+export interface DiscordContainer {
+  type: 17;
+  accent_color?: number;
+  components: (DiscordSection | DiscordTextDisplay | DiscordSeparator | DiscordActionRow)[];
+}
+
+/** What may sit at the top level of a message. */
+export type DiscordTopComponent = DiscordActionRow | DiscordContainer;
+
 /** Store id -> full Discord custom emoji markup, e.g. `<:name:123456789012345678>`. */
 export type StoreEmojis = Partial<Record<StoreKind, string>>;
 
 export interface DiscordMessage {
   content?: string;
   embeds?: DiscordEmbed[];
-  /** Link buttons; the sender adds `with_components=true` when present. */
-  components?: DiscordActionRow[];
+  /** The sender adds `with_components=true` when present. */
+  components?: DiscordTopComponent[];
+  /** `DISCORD.componentsV2Flag` for a Components V2 message, which has neither `content` nor `embeds`. */
+  flags?: number;
   username?: string;
   avatar_url?: string;
   /** Always `{ parse: [] }` — mod names are user-controlled and must never ping. */

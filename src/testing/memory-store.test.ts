@@ -103,7 +103,7 @@ describe('MemoryStore', () => {
     const store = new MemoryStore();
     const b = batch(store);
     await store.commit(b);
-    await store.setEventChangelog(b.events[0]!.id, 'notes', 'https://x.invalid/c');
+    await store.setEventDetails(b.events[0]!.id, { changelog: 'notes', changelogUrl: 'https://x.invalid/c', websiteUrl: null });
     const [due] = await store.takeDue(FIXED_NOW_ISO, 1);
     expect(due!.event).toMatchObject({ changelog: 'notes', changelogUrl: 'https://x.invalid/c' });
   });

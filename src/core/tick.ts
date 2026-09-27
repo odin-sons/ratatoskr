@@ -16,6 +16,7 @@ import { compileFilter } from './filter.ts';
 import { fanOut, type CompiledSubscription } from './fanout.ts';
 import type { Clock, PollContext, Sender, SourceAdapter, Store } from './ports.ts';
 import { sanitizeLogText } from './report.ts';
+import type { Language } from '../i18n/index.ts';
 import type { AppConfig, ModEvent, PackageSnapshot, SourceId, SourceState, StoreEmojis } from './types.ts';
 
 export type { Renderer } from './drain.ts';
@@ -32,6 +33,10 @@ export interface TickDeps {
   renderer?: Renderer;
   /** Custom emoji markup per store, used when rendering messages. */
   storeEmojis?: StoreEmojis;
+  /** Custom emoji markup for the source button, used when rendering messages. */
+  ratatoskrEmoji?: string;
+  /** Language of every rendered message. */
+  locale?: Language;
   /** Reconcile cron triggers per day; defaults to `CADENCE.reconcileRunsPerDay`. */
   reconcileRunsPerDay?: number;
 }
@@ -56,6 +61,8 @@ export interface TickReport {
   deferred: number;
   /** Outbox rows parked in this run. */
   parked: number;
+  /** Immediate messages delivered only after Discord rejected them with 400 and they were resent without their optional buttons. */
+  degraded: number;
   /** Due rows no longer matching their subscription's filter; marked delivered without sending. */
   filtered: number;
   /** Delivered outbox rows deleted by a reconcile run. */
@@ -150,6 +157,7 @@ function newReport(): TickReport {
     changelogSkipped: 0,
     deferred: 0,
     parked: 0,
+    degraded: 0,
     filtered: 0,
     purged: 0,
     subrequests: 0,
@@ -195,6 +203,8 @@ async function finish(deps: TickDeps, budget: SubrequestBudget, report: TickRepo
     sender: deps.sender,
     renderer: deps.renderer ?? defaultRenderer,
     ...(deps.storeEmojis === undefined ? {} : { storeEmojis: deps.storeEmojis }),
+    ...(deps.ratatoskrEmoji === undefined ? {} : { ratatoskrEmoji: deps.ratatoskrEmoji }),
+    ...(deps.locale === undefined ? {} : { locale: deps.locale }),
     now,
     budget,
   });
@@ -202,6 +212,7 @@ async function finish(deps: TickDeps, budget: SubrequestBudget, report: TickRepo
   report.failed += drained.failed;
   report.deferred += drained.deferred;
   report.parked += drained.parked;
+  report.degraded += drained.degraded;
   report.filtered += drained.filtered;
   report.subrequests = budget.used;
   if (drained.error !== undefined) report.drainError ??= drained.error;
@@ -289,8 +300,7 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
 }
 
 async function fetchChangelogs(deps: TickDeps, budget: SubrequestBudget, jobs: ChangelogJob[], report: TickReport): Promise<void> {
-  const allowed = Math.max(0, Math.min(TICK_BUDGET.maxChangelogFetches, budget.remaining - SUBREQUEST_SEND_RESERVE));
-  const selected = jobs.slice(0, allowed);
+  const selected = selectDetailJobs(jobs, budget.remaining - SUBREQUEST_SEND_RESERVE);
   report.changelogSkipped += jobs.length - selected.length;
   report.changelogFetches += selected.length;
   const changelogFetch = budget.wrapFetch(deps.fetch, SUBREQUEST_SEND_RESERVE);
@@ -298,14 +308,31 @@ async function fetchChangelogs(deps: TickDeps, budget: SubrequestBudget, jobs: C
     await Promise.all(
       selected.slice(i, i + CLOUDFLARE.simultaneousConnections).map(async ({ adapter, ctx, event }) => {
         try {
-          const { excerpt, url } = await adapter.fetchChangelog({ ...ctx, fetch: changelogFetch }, event.pkg, event.versionTo);
-          if (excerpt !== null || url !== null) await deps.store.setEventChangelog(event.id, excerpt, url);
+          const { excerpt, url, websiteUrl } = await adapter.fetchChangelog({ ...ctx, fetch: changelogFetch }, event.pkg, event.versionTo);
+          const website = websiteUrl ?? null;
+          if (excerpt !== null || url !== null || website !== null) {
+            await deps.store.setEventDetails(event.id, { changelog: excerpt, changelogUrl: url, websiteUrl: website });
+          }
         } catch {
-          // Ignored: a missing changelog never blocks delivery.
+          // Ignored: missing details never block delivery.
         }
       }),
     );
   }
+}
+
+/** In order, at most `maxChangelogFetches` jobs whose declared requests all fit in `spendable`; O(jobs). */
+function selectDetailJobs(jobs: ChangelogJob[], spendable: number): ChangelogJob[] {
+  const selected: ChangelogJob[] = [];
+  let left = spendable;
+  for (const job of jobs) {
+    if (selected.length >= TICK_BUDGET.maxChangelogFetches) break;
+    const cost = job.adapter.detailRequests ?? 1;
+    if (cost > left) continue;
+    left -= cost;
+    selected.push(job);
+  }
+  return selected;
 }
 
 function rotate<T>(items: T[], index: number): T[] {

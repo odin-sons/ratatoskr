@@ -23,6 +23,12 @@ export const DISCORD = {
   buttonsPerRow: 5,
   buttonLabelMax: 80,
   buttonUrlMax: 512,
+  /** Components V2 messages (message flag 1 << 15): no `content` or `embeds`, everything is components. Source: Discord developer docs, components reference. */
+  componentsV2Flag: 32768,
+  /** Components in one V2 message, counting nested ones. */
+  componentsV2ComponentsMax: 40,
+  /** Text across all text displays of one V2 message (each display is also capped by it). */
+  componentsV2TextMax: 4000,
   /** Relative viewer-local timestamp, `<t:UNIX:R>`. Source: Discord developer docs, message formatting. */
   timestampStyleRelative: 'R',
   /** Observed, not documented. Always prefer `retry_after` from a 429. */
@@ -64,6 +70,12 @@ export const SUBREQUEST_LIMIT = CLOUDFLARE.subrequestsPerInvocation - SUBREQUEST
 /** Changelog fetches leave this many subrequests unspent so Discord sends are never starved by them. */
 export const SUBREQUEST_SEND_RESERVE = TICK_BUDGET.maxDiscordSends;
 
+/**
+ * Most subrequests the details phase spends for one event: the changelog plus the package website (Thunderstore's
+ * listing carries no website). `maxChangelogFetches` events at this cost fill exactly `SUBREQUEST_LIMIT - SUBREQUEST_SEND_RESERVE`.
+ */
+export const MAX_DETAIL_REQUESTS_PER_EVENT = 2;
+
 /** Timeout for one Discord webhook request. */
 export const DISCORD_SEND_TIMEOUT_MS = 10_000;
 
@@ -102,6 +114,9 @@ export const DEFAULT_DIGEST_INTERVAL_MIN = 30;
 
 /** Changelog excerpt cap in characters. Source: docs/spec.md "Changelog extraction". */
 export const CHANGELOG_EXCERPT_MAX = 1000;
+
+/** Changelog excerpt cap in characters as shown in a message, trailing full-changelog link included. Source: docs/spec.md "Message layout". */
+export const CHANGELOG_DISPLAY_MAX = 500;
 
 /** Nexus: 2000 req/hour, 20000/day per personal key. Source: docs/api-notes.md. */
 export const NEXUS_RATE_LIMIT = { perHour: 2000, perDay: 20000 } as const;

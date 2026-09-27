@@ -14,7 +14,7 @@ import { DIGEST_FIT_ATTEMPTS, DISCORD, OUTBOX_BACKOFF, OUTBOX_MAX_ATTEMPTS, POIS
 import { backoffSeconds, collapseEquivalent, drainOutbox, scheduleFailure } from './drain.ts';
 import { outboxId } from './ids.ts';
 import { renderDigest, renderImmediate } from '../render/index.ts';
-import type { DueDelivery, ModEvent, Subscription } from './types.ts';
+import type { DiscordMessage, DueDelivery, ModEvent, Subscription } from './types.ts';
 
 const now = new Date(FIXED_NOW_ISO);
 
@@ -143,18 +143,180 @@ describe('drainOutbox', () => {
     expect(bare.renderer.immediateEmojis).toEqual([undefined]);
   });
 
-  it('delivers real messages with emoji, project field and, for immediate mode only, link buttons', async () => {
+  describe('a message Discord rejects with 400 is retried once with the core buttons only', () => {
+    const real = { renderDigest, renderImmediate };
+    const rich = () =>
+      makeEvent({
+        kind: 'update',
+        versionFrom: '0.9.0',
+        pkg: {
+          packageId: 'A-Mod',
+          owner: 'A',
+          name: 'Mod',
+          url: 'https://thunderstore.io/c/valheim/p/A/Mod/',
+          downloadUrl: 'https://thunderstore.io/package/download/A/Mod/1.0.0/',
+          websiteUrl: 'https://example.com/mod',
+        },
+      });
+    const labelsOf = (payload: DiscordMessage): string[] => {
+      const container = payload.components![0] as { components: { type: number; components?: { label: string }[] }[] };
+      return container.components.at(-1)!.components!.map((b) => b.label);
+    };
+    const rejectsOptionalButtons = (h: Harness): void => {
+      h.sender.fallback = (call) => (labelsOf(call.payload).length > 2 ? clientError(400) : { ok: true });
+    };
+
+    it('resends without Download and Website, delivers the row and counts it as degraded', async () => {
+      const h = makeHarness();
+      rejectsOptionalButtons(h);
+      await enqueue(h, makeSubscription({ mode: 'immediate' }), [rich()]);
+      const report = await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now });
+      expect(h.sender.calls.map((c) => labelsOf(c.payload))).toEqual([['Mod page', 'Download', 'Website', 'ratatoskr'], ['Mod page', 'ratatoskr']]);
+      expect(report).toMatchObject({ sent: 1, failed: 0, parked: 0, degraded: 1 });
+      expect(h.store.outboxRows()[0]).toMatchObject({ delivered: true, parked: false });
+    });
+
+    it('keeps the mod page and the source button and everything else in the message', async () => {
+      const h = makeHarness();
+      rejectsOptionalButtons(h);
+      await enqueue(h, makeSubscription({ mode: 'immediate' }), [rich()]);
+      await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now });
+      const [full, reduced] = h.sender.calls.map((c) => c.payload);
+      expect(reduced!.flags).toBe(full!.flags);
+      expect(JSON.stringify(reduced)).toContain('"label":"Mod page"');
+      expect(JSON.stringify(reduced)).not.toContain('example.com/mod');
+      expect(JSON.stringify(reduced)).not.toContain('package/download');
+      const first = (m: DiscordMessage) => (m.components![0] as { components: unknown[] }).components[0];
+      expect(first(reduced!)).toEqual(first(full!));
+    });
+
+    it('parks the row as before when the reduced message is rejected too, without counting it as degraded', async () => {
+      const h = makeHarness();
+      h.sender.fallback = () => clientError(400);
+      await enqueue(h, makeSubscription({ mode: 'immediate' }), [rich()]);
+      const report = await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now });
+      expect(h.sender.calls).toHaveLength(2);
+      expect(report).toMatchObject({ sent: 0, failed: 1, parked: 1, degraded: 0 });
+      expect(h.store.outboxRows()[0]).toMatchObject({ parked: true });
+    });
+
+    it('does not resend when the message has no optional buttons, and parks it at once', async () => {
+      const h = makeHarness();
+      h.sender.fallback = () => clientError(400);
+      const bare = makeEvent({ kind: 'update', versionFrom: '0.9.0', pkg: { packageId: 'A-Mod', owner: 'A', name: 'Mod', url: 'https://thunderstore.io/c/valheim/p/A/Mod/', downloadUrl: null, websiteUrl: null } });
+      await enqueue(h, makeSubscription({ mode: 'immediate' }), [bare]);
+      const report = await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now });
+      expect(h.sender.calls).toHaveLength(1);
+      expect(report).toMatchObject({ failed: 1, parked: 1, degraded: 0 });
+    });
+
+    it('does not resend a message a renderer cannot reduce', async () => {
+      const h = makeHarness();
+      h.sender.enqueue(clientError(400));
+      await enqueue(h, makeSubscription({ mode: 'immediate' }), evs(1));
+      const report = await drain(h);
+      expect(h.sender.calls).toHaveLength(1);
+      expect(report).toMatchObject({ failed: 1, parked: 1, degraded: 0 });
+    });
+
+    it('only reacts to 400: other client errors and server errors keep their handling', async () => {
+      for (const failure of [clientError(404), clientError(403), serverError(500), rateLimited(3)]) {
+        const h = makeHarness();
+        h.sender.enqueue(failure);
+        await enqueue(h, makeSubscription({ mode: 'immediate' }), [rich()]);
+        const report = await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now });
+        expect(h.sender.calls).toHaveLength(1);
+        expect(report.degraded).toBe(0);
+      }
+    });
+
+    it('does not resend without a send left in the budget, and leaves the row parked', async () => {
+      const h = makeHarness();
+      rejectsOptionalButtons(h);
+      await enqueue(h, makeSubscription({ mode: 'immediate' }), [rich()]);
+      const report = await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now, budget: new SubrequestBudget(1) });
+      expect(h.sender.calls).toHaveLength(1);
+      expect(report.degraded).toBe(0);
+      expect(h.store.outboxRows()[0]).toMatchObject({ parked: true });
+    });
+
+    it('never applies to digests', async () => {
+      const h = makeHarness();
+      h.sender.fallback = () => clientError(400);
+      await enqueue(h, makeSubscription({ mode: 'digest' }), [rich()]);
+      const report = await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now });
+      expect(h.sender.calls).toHaveLength(1);
+      expect(report.degraded).toBe(0);
+    });
+
+    it('logs one line without any url', async () => {
+      const h = makeHarness();
+      rejectsOptionalButtons(h);
+      const lines: string[] = [];
+      const spy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => void lines.push(args.map(String).join(' ')));
+      await enqueue(h, makeSubscription({ mode: 'immediate' }), [rich()]);
+      await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now });
+      spy.mockRestore();
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('degraded');
+      expect(lines[0]).not.toMatch(/https?:|example\.com|package\/download/);
+    });
+
+    it('several immediate rows are handled independently', async () => {
+      const h = makeHarness();
+      rejectsOptionalButtons(h);
+      const events = [rich(), makeEvent({ kind: 'update', versionFrom: '0.9.0', pkg: { packageId: 'B-Mod', owner: 'B', name: 'Mod', url: 'https://thunderstore.io/c/valheim/p/B/Mod/', downloadUrl: null, websiteUrl: null } })];
+      await enqueue(h, makeSubscription({ mode: 'immediate' }), events);
+      const report = await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now });
+      expect(report).toMatchObject({ sent: 2, failed: 0, parked: 0, degraded: 1 });
+      expect(h.sender.calls).toHaveLength(3);
+    });
+  });
+
+  it('hands the source-button emoji and the language to every digest and immediate render', async () => {
+    const settings = { storeEmojis: { thunderstore: '<:thunderstore:123456789012345678>' }, ratatoskrEmoji: '<:ratatoskr:123456789012345679>', locale: 'ru' as const };
+    for (const mode of ['digest', 'immediate'] as const) {
+      const h = makeHarness();
+      await enqueue(h, makeSubscription({ mode }), evs(2));
+      await drainOutbox({ store: h.store, sender: h.sender, renderer: h.renderer, now, ...settings });
+      if (mode === 'digest') {
+        expect(h.renderer.digestCalls.map((c) => [c.ratatoskrEmoji, c.locale])).toEqual([[settings.ratatoskrEmoji, 'ru']]);
+      } else {
+        expect(h.renderer.immediateSettings).toEqual([
+          { ratatoskrEmoji: settings.ratatoskrEmoji, locale: 'ru' },
+          { ratatoskrEmoji: settings.ratatoskrEmoji, locale: 'ru' },
+        ]);
+      }
+    }
+    const bare = makeHarness();
+    await enqueue(bare, makeSubscription({ mode: 'immediate' }), evs(1));
+    await drain(bare);
+    expect(bare.renderer.immediateSettings).toEqual([{ ratatoskrEmoji: undefined, locale: undefined }]);
+  });
+
+  it('delivers real messages: a Components V2 message with buttons for immediate mode, embeds with the project field for digests', async () => {
     const real = { renderDigest, renderImmediate };
     const storeEmojis = { thunderstore: '<:thunderstore:123456789012345678>' };
     const event = makeEvent({ kind: 'update', versionFrom: '0.9.0', pkg: { packageId: 'A-Mod', owner: 'A', name: 'Mod', url: 'https://thunderstore.io/c/valheim/p/A/Mod/', downloadUrl: 'https://thunderstore.io/package/download/A/Mod/1.0.0/' } });
     for (const mode of ['immediate', 'digest'] as const) {
       const h = makeHarness();
       await enqueue(h, makeSubscription({ mode }), [event]);
-      await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now, storeEmojis });
+      await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now, storeEmojis, locale: 'ru' });
       const payload = h.sender.calls[0]!.payload;
-      expect(payload.embeds![0]!.description).toContain('<:thunderstore:123456789012345678>');
-      expect(payload.embeds!.at(-1)!.fields!.at(-1)!.value).toBe('-# [ratatoskr v0.1.0](https://github.com/odin-sons/ratatoskr)');
-      expect(payload.components?.[0]?.components.map((b) => b.label)).toEqual(mode === 'immediate' ? ['Mod page', 'Download'] : undefined);
+      if (mode === 'immediate') {
+        expect(payload.flags).toBe(DISCORD.componentsV2Flag);
+        expect(payload.embeds).toBeUndefined();
+        expect(payload.content).toBeUndefined();
+        const container = payload.components![0] as { components: { type: number; components?: { label: string }[] }[] };
+        const row = container.components.at(-1)!;
+        expect(row.components!.map((b) => b.label)).toEqual(['Страница мода', 'Скачать', 'ratatoskr']);
+        expect(JSON.stringify(payload)).toContain('<:thunderstore:123456789012345678>');
+        expect(JSON.stringify(payload)).toContain('Обновление от A');
+      } else {
+        expect(payload.embeds![0]!.description).toContain('1 обновление');
+        expect(payload.embeds!.at(-1)!.fields!.at(-1)!.value).toBe('-# [ratatoskr v0.1.0](https://github.com/odin-sons/ratatoskr)');
+        expect(payload.components).toBeUndefined();
+      }
     }
   });
 

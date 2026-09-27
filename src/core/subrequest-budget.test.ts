@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { FIXED_NOW_ISO, makeSnapshot, makeSubscription, okPoll } from '../testing/fakes.ts';
 import { makeHarness, type Harness } from '../testing/harness.ts';
-import { SUBREQUEST_LIMIT, SUBREQUEST_SEND_RESERVE, TICK_BUDGET } from './constants.ts';
+import { MAX_DETAIL_REQUESTS_PER_EVENT, SUBREQUEST_LIMIT, SUBREQUEST_SEND_RESERVE, TICK_BUDGET } from './constants.ts';
 import type { PollContext, PollResult, SourceAdapter } from './ports.ts';
 import { runTick } from './tick.ts';
 import type { PackageSnapshot, SourceConfig } from './types.ts';
@@ -14,13 +14,19 @@ class BusyAdapter implements SourceAdapter {
   readonly config: SourceConfig;
   private results: PackageSnapshot[][] = [];
   changelogFetches = 0;
+  /** Details calls whose every request went out. */
+  completedDetails = 0;
+
+  readonly detailRequests?: number;
 
   constructor(
     id: string,
     private readonly pollFetches: number,
     private readonly changelogRequests = 1,
+    declaredDetailRequests?: number,
   ) {
     this.config = { id, store: 'thunderstore', community: 'valheim', enabled: true };
+    if (declaredDetailRequests !== undefined) this.detailRequests = declaredDetailRequests;
   }
 
   queue(packages: PackageSnapshot[]): this {
@@ -43,6 +49,7 @@ class BusyAdapter implements SourceAdapter {
   async fetchChangelog(ctx: PollContext): Promise<{ excerpt: string | null; url: string | null }> {
     this.changelogFetches += 1;
     for (let i = 0; i < this.changelogRequests; i++) await ctx.fetch(`https://changelog.invalid/${i}`);
+    this.completedDetails += 1;
     return { excerpt: 'notes', url: null };
   }
 }
@@ -120,5 +127,89 @@ describe('runTick: shared subrequest budget', () => {
     const { h, network } = setup([adapter]);
     await runTick(h.deps, scheduled);
     expect(network.count).toBe(SUBREQUEST_LIMIT);
+  });
+});
+
+describe('runTick: details phase with two requests per event', () => {
+  const details = (id: string, pollFetches: number, declared: number = MAX_DETAIL_REQUESTS_PER_EVENT): BusyAdapter =>
+    new BusyAdapter(id, pollFetches, declared, declared);
+
+  /**
+   * Worst case per tick = polls P + detail requests D + Discord sends S, with S <= 24 reserved and
+   * D <= min(events x 2, 48 - P - 24), so P + D + S <= 48 whatever P is. The cap of 12 events x 2 requests
+   * is exactly the 24 requests above the reserve.
+   */
+  it('keeps the event cap times the requests per event within the limit minus the send reserve', () => {
+    expect(TICK_BUDGET.maxChangelogFetches * MAX_DETAIL_REQUESTS_PER_EVENT).toBeLessThanOrEqual(SUBREQUEST_LIMIT - SUBREQUEST_SEND_RESERVE);
+    expect(SUBREQUEST_SEND_RESERVE).toBe(TICK_BUDGET.maxDiscordSends);
+  });
+
+  it('gives every selected event both requests when nothing else is spent', async () => {
+    const adapter = details('thunderstore:valheim', 0).queue(fresh(20));
+    const { h, network } = setup([adapter]);
+    bootstrap(h, 'thunderstore:valheim');
+    const report = await runTick(h.deps, scheduled);
+    expect(report.changelogFetches).toBe(TICK_BUDGET.maxChangelogFetches);
+    expect(report.changelogSkipped).toBe(20 - TICK_BUDGET.maxChangelogFetches);
+    expect(adapter.completedDetails).toBe(TICK_BUDGET.maxChangelogFetches);
+    expect(network.count).toBe(TICK_BUDGET.maxChangelogFetches * MAX_DETAIL_REQUESTS_PER_EVENT);
+    expect(report.subrequests).toBe(network.count + h.sender.calls.length);
+    expect(report.subrequests).toBeLessThanOrEqual(SUBREQUEST_LIMIT);
+  });
+
+  it('selects only the events whose requests all fit above the send reserve, never a half-served event', async () => {
+    const adapter = details('thunderstore:valheim', 21).queue(fresh(12));
+    const { h, network } = setup([adapter]);
+    bootstrap(h, 'thunderstore:valheim');
+    const report = await runTick(h.deps, scheduled);
+    const spendable = SUBREQUEST_LIMIT - SUBREQUEST_SEND_RESERVE - 21;
+    expect(spendable).toBe(3);
+    expect(report.changelogFetches).toBe(Math.floor(spendable / MAX_DETAIL_REQUESTS_PER_EVENT));
+    expect(report.changelogSkipped).toBe(12 - report.changelogFetches);
+    expect(adapter.completedDetails).toBe(report.changelogFetches);
+    expect(network.count).toBe(21 + report.changelogFetches * MAX_DETAIL_REQUESTS_PER_EVENT);
+    expect(report.subrequests).toBeLessThanOrEqual(SUBREQUEST_LIMIT);
+  });
+
+  it('spends no details request when the polls left only the send reserve', async () => {
+    const adapter = details('thunderstore:valheim', SUBREQUEST_LIMIT - SUBREQUEST_SEND_RESERVE).queue(fresh(12));
+    const { h, network } = setup([adapter]);
+    bootstrap(h, 'thunderstore:valheim');
+    const report = await runTick(h.deps, scheduled);
+    expect(report.changelogFetches).toBe(0);
+    expect(report.changelogSkipped).toBe(12);
+    expect(network.count).toBe(SUBREQUEST_LIMIT - SUBREQUEST_SEND_RESERVE);
+  });
+
+  it('lets a one-request adapter use the room a two-request event cannot', async () => {
+    const dear = details('thunderstore:valheim', 21).queue(fresh(1));
+    const cheap = details('hexium:valheim', 0, 1).queue(
+      Array.from({ length: 2 }, (_, i) => makeSnapshot({ store: 'hexium', source: 'hexium:valheim', packageId: `H${i}-Mod`, owner: `H${i}`, name: 'Mod' })),
+    );
+    const { h, network } = setup([dear, cheap]);
+    bootstrap(h, 'thunderstore:valheim');
+    bootstrap(h, 'hexium:valheim');
+    const report = await runTick(h.deps, scheduled);
+    expect(SUBREQUEST_LIMIT - SUBREQUEST_SEND_RESERVE - 21).toBe(3);
+    expect(dear.completedDetails).toBe(1);
+    expect(cheap.completedDetails).toBe(1);
+    expect(report.changelogFetches).toBe(2);
+    expect(report.changelogSkipped).toBe(1);
+    expect(network.count).toBeLessThanOrEqual(SUBREQUEST_LIMIT - SUBREQUEST_SEND_RESERVE);
+  });
+
+  it('never exceeds the limit at the worst realistic mix of polls, details and sends', async () => {
+    const adapters = ['a', 'b', 'c'].map((n) => details(`thunderstore:${n}`, 9).queue(fresh(6)));
+    const subs = Array.from({ length: 8 }, (_, i) =>
+      makeSubscription({ id: `s${i}`, webhookUrl: `https://discord.invalid/api/webhooks/${i}/t`, mode: 'immediate' }),
+    );
+    const { h, network } = setup(adapters, subs);
+    for (const a of adapters) bootstrap(h, a.config.id);
+    for (let tick = 0; tick < 6; tick++) {
+      const before = { network: network.count, sends: h.sender.calls.length };
+      const report = await runTick(h.deps, scheduled + tick * 300_000);
+      expect(network.count - before.network + (h.sender.calls.length - before.sends)).toBeLessThanOrEqual(SUBREQUEST_LIMIT);
+      expect(report.subrequests).toBeLessThanOrEqual(SUBREQUEST_LIMIT);
+    }
   });
 });

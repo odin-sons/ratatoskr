@@ -184,7 +184,7 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
         const { store } = await setup();
         const e = event(1);
         await store.commit(batch([e], [row(SUB, e)]));
-        await store.setEventChangelog(e.id, 'notes', 'https://cl.invalid/x');
+        await store.setEventDetails(e.id, { changelog: 'notes', changelogUrl: 'https://cl.invalid/x', websiteUrl: null });
         const [due] = await store.takeDue(NOW, 10);
         expect(due!.event).toMatchObject({ changelog: 'notes', changelogUrl: 'https://cl.invalid/x' });
       });
@@ -281,6 +281,140 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
         await store.commit(batch([e], []));
         const found = await store.recentEventsByReleaseKeys([releaseKey(e.pkg, e.versionTo)], T0);
         expect([...found.values()].flat().map((x) => x.pkg.downloads)).toEqual([77]);
+      });
+    });
+
+    describe('package likes', () => {
+      const release = (version: string, likes: number | null | undefined): ModEvent =>
+        makeEvent({ versionTo: version, pkg: { packageId: 'Owner-Mod', owner: 'Owner', name: 'Mod', ...(likes === undefined ? {} : { likes }) } });
+      const counts = async (store: Store): Promise<(number | null | undefined)[]> => (await store.takeDue(NOW, 10)).map((d) => d.event.pkg.likes);
+
+      it('stores the like count with the package, zero included, and returns it with the due event', async () => {
+        const { store } = await setup();
+        const zero = release('1.0.0', 0);
+        await store.commit(batch([zero], [row(SUB, zero)]));
+        expect(await counts(store)).toEqual([0]);
+      });
+
+      it('reads a package without a like count as null', async () => {
+        const { store } = await setup();
+        const [a, b] = [release('1.0.0', undefined), release('1.0.1', null)] as [ModEvent, ModEvent];
+        await store.commit(batch([a, b], [row(SUB, a), row(SUB, b)]));
+        expect(await counts(store)).toEqual([null, null]);
+      });
+
+      it('lets the latest non-null count win and keeps the stored one when a snapshot has none', async () => {
+        const { store } = await setup();
+        const first = release('1.0.0', 100);
+        await store.commit(batch([first], [row(SUB, first)]));
+        const second = release('1.1.0', null);
+        await store.commit(batch([second], [row(SUB, second)]));
+        expect(await counts(store)).toEqual([100, 100]);
+        const lower = release('2.0.0', 40);
+        await store.commit(batch([lower], [row(SUB, lower)]));
+        expect((await counts(store)).at(-1)).toBe(40);
+      });
+
+      it('returns the count with events found by release key', async () => {
+        const { store } = await setup();
+        const e = release('1.0.0', 77);
+        await store.commit(batch([e], []));
+        const found = await store.recentEventsByReleaseKeys([releaseKey(e.pkg, e.versionTo)], T0);
+        expect([...found.values()].flat().map((x) => x.pkg.likes)).toEqual([77]);
+      });
+    });
+
+    describe('package website', () => {
+      const SITE1 = 'https://github.com/owner/mod';
+      const SITE2 = 'https://discord.gg/abc';
+      const release = (version: string, websiteUrl: string | null | undefined): ModEvent =>
+        makeEvent({ versionTo: version, pkg: { packageId: 'Owner-Mod', owner: 'Owner', name: 'Mod', ...(websiteUrl === undefined ? {} : { websiteUrl }) } });
+      const sites = async (store: Store): Promise<(string | null | undefined)[]> => (await store.takeDue(NOW, 10)).map((d) => d.event.pkg.websiteUrl);
+
+      it('stores the website with the package and returns it with the due event', async () => {
+        const { store } = await setup();
+        const e = release('1.0.0', SITE1);
+        await store.commit(batch([e], [row(SUB, e)]));
+        expect(await sites(store)).toEqual([SITE1]);
+      });
+
+      it('reads a package without a website as null', async () => {
+        const { store } = await setup();
+        const [a, b] = [release('1.0.0', undefined), release('1.0.1', null)] as [ModEvent, ModEvent];
+        await store.commit(batch([a, b], [row(SUB, a), row(SUB, b)]));
+        expect(await sites(store)).toEqual([null, null]);
+      });
+
+      it('lets the latest non-null website win across versions and keeps it when a snapshot has none', async () => {
+        const { store } = await setup();
+        const first = release('1.0.0', SITE1);
+        await store.commit(batch([first], [row(SUB, first)]));
+        const second = release('1.1.0', null);
+        await store.commit(batch([second], [row(SUB, second)]));
+        expect(await sites(store)).toEqual([SITE1, SITE1]);
+        const third = release('2.0.0', SITE2);
+        await store.commit(batch([third], [row(SUB, third)]));
+        expect(await sites(store)).toEqual([SITE2, SITE2, SITE2]);
+      });
+
+      it('returns the website with events found by release key', async () => {
+        const { store } = await setup();
+        const e = release('1.0.0', SITE1);
+        await store.commit(batch([e], []));
+        const found = await store.recentEventsByReleaseKeys([releaseKey(e.pkg, e.versionTo)], T0);
+        expect([...found.values()].flat().map((x) => x.pkg.websiteUrl)).toEqual([SITE1]);
+      });
+    });
+
+    describe('setEventDetails', () => {
+      it('updates the event and the package website, which every event of the package then shows', async () => {
+        const { store } = await setup();
+        const [a, b] = [event(1, { versionTo: '1.0.0' }), event(1, { versionTo: '1.1.0' })] as [ModEvent, ModEvent];
+        await store.commit(batch([a, b], [row(SUB, a), row(SUB, b)]));
+        await store.setEventDetails(b.id, { changelog: 'notes', changelogUrl: 'https://cl.invalid/x', websiteUrl: 'https://site.invalid/m' });
+        const due = await store.takeDue(NOW, 10);
+        const byId = new Map(due.map((d) => [d.event.id, d.event]));
+        expect(byId.get(b.id)).toMatchObject({ changelog: 'notes', changelogUrl: 'https://cl.invalid/x' });
+        expect(byId.get(a.id)).toMatchObject({ changelog: null, changelogUrl: null });
+        expect([...byId.values()].map((e) => e.pkg.websiteUrl)).toEqual(['https://site.invalid/m', 'https://site.invalid/m']);
+      });
+
+      it('leaves the package website alone when the details carry none', async () => {
+        const { store } = await setup();
+        const e = event(1, { pkg: { packageId: 'Owner1-Mod1', owner: 'Owner1', name: 'Mod1', websiteUrl: 'https://kept.invalid/' } });
+        await store.commit(batch([e], [row(SUB, e)]));
+        await store.setEventDetails(e.id, { changelog: 'notes', changelogUrl: null, websiteUrl: null });
+        const [due] = await store.takeDue(NOW, 10);
+        expect(due!.event.pkg.websiteUrl).toBe('https://kept.invalid/');
+        expect(due!.event.changelog).toBe('notes');
+      });
+
+      it('replaces a stored website with a new one', async () => {
+        const { store } = await setup();
+        const e = event(1, { pkg: { packageId: 'Owner1-Mod1', owner: 'Owner1', name: 'Mod1', websiteUrl: 'https://old.invalid/' } });
+        await store.commit(batch([e], [row(SUB, e)]));
+        await store.setEventDetails(e.id, { changelog: null, changelogUrl: null, websiteUrl: 'https://new.invalid/' });
+        expect((await store.takeDue(NOW, 10))[0]!.event.pkg.websiteUrl).toBe('https://new.invalid/');
+      });
+
+      it('touches no other package and ignores an unknown event id', async () => {
+        const { store } = await setup();
+        const [a, b] = [event(1), event(2)] as [ModEvent, ModEvent];
+        await store.commit(batch([a, b], [row(SUB, a), row(SUB, b)]));
+        await store.setEventDetails('no-such-event', { changelog: 'x', changelogUrl: null, websiteUrl: 'https://x.invalid/' });
+        await store.setEventDetails(a.id, { changelog: null, changelogUrl: null, websiteUrl: 'https://a.invalid/' });
+        const sitesById = new Map((await store.takeDue(NOW, 10)).map((d) => [d.event.id, d.event.pkg.websiteUrl]));
+        expect(sitesById.get(a.id)).toBe('https://a.invalid/');
+        expect(sitesById.get(b.id)).toBeNull();
+      });
+
+      it('shows the stored website in events found by release key', async () => {
+        const { store } = await setup();
+        const e = event(1);
+        await store.commit(batch([e], []));
+        await store.setEventDetails(e.id, { changelog: null, changelogUrl: null, websiteUrl: 'https://found.invalid/' });
+        const found = await store.recentEventsByReleaseKeys([releaseKey(e.pkg, e.versionTo)], T0);
+        expect([...found.values()].flat().map((x) => x.pkg.websiteUrl)).toEqual(['https://found.invalid/']);
       });
     });
 

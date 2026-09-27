@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { OUTBOX_MAX_ATTEMPTS } from '../core/constants.ts';
 import { releaseKey } from '../core/ids.ts';
-import type { CommitBatch, Store } from '../core/ports.ts';
+import type { CommitBatch, EventDetails, Store } from '../core/ports.ts';
 import type {
   DueDelivery,
   ModEvent,
@@ -129,7 +129,7 @@ export class MemoryStore implements Store {
   /** Like the SQL join: the event with the package as currently stored (sticky fields included) at the event's version. */
   private joined(event: ModEvent): ModEvent {
     const current = this.packages.get(pkgKey(event.pkg.source, event.pkg.packageId));
-    return { ...event, pkg: { ...(current ?? event.pkg), version: event.versionTo, downloadUrl: (current ?? event.pkg).downloadUrl ?? null, downloads: (current ?? event.pkg).downloads ?? null } };
+    return { ...event, pkg: { ...(current ?? event.pkg), version: event.versionTo, downloadUrl: (current ?? event.pkg).downloadUrl ?? null, downloads: (current ?? event.pkg).downloads ?? null, likes: (current ?? event.pkg).likes ?? null, websiteUrl: (current ?? event.pkg).websiteUrl ?? null } };
   }
 
   async takeDue(nowIso: string, limit: number): Promise<DueDelivery[]> {
@@ -193,9 +193,14 @@ export class MemoryStore implements Store {
     return found;
   }
 
-  async setEventChangelog(eventId: string, changelog: string | null, changelogUrl: string | null): Promise<void> {
+  async setEventDetails(eventId: string, details: EventDetails): Promise<void> {
     const event = this.events.get(eventId);
-    if (event) this.events.set(eventId, { ...event, changelog, changelogUrl });
+    if (!event) return;
+    this.events.set(eventId, { ...event, changelog: details.changelog, changelogUrl: details.changelogUrl });
+    if (details.websiteUrl === null) return;
+    const key = pkgKey(event.pkg.source, event.pkg.packageId);
+    const current = this.packages.get(key);
+    if (current) this.packages.set(key, { ...current, websiteUrl: details.websiteUrl });
   }
 }
 
@@ -213,6 +218,8 @@ function stubPackage(source: SourceId, packageId: string, version: string): Pack
     iconUrl: null,
     downloadUrl: null,
     downloads: null,
+    likes: null,
+    websiteUrl: null,
     description: null,
     categories: [],
     isNsfw: false,
@@ -228,6 +235,8 @@ function mergePackage(prev: PackageSnapshot, next: PackageSnapshot): PackageSnap
     iconUrl: next.iconUrl ?? prev.iconUrl,
     downloadUrl: next.version !== prev.version ? (next.downloadUrl ?? null) : (next.downloadUrl ?? prev.downloadUrl ?? null),
     downloads: next.downloads ?? prev.downloads ?? null,
+    likes: next.likes ?? prev.likes ?? null,
+    websiteUrl: next.websiteUrl ?? prev.websiteUrl ?? null,
     description: next.description ?? prev.description,
     sizeBytes: next.sizeBytes ?? prev.sizeBytes,
     categories: next.categories.length > 0 ? next.categories : prev.categories,
