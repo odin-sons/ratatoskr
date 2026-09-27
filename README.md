@@ -162,7 +162,7 @@ in CI) and not bundled into the Worker.
 
 ```json
 {
-  "userAgent": "ratatoskr/0.1.0 (+https://github.com/odin-sons/ratatoskr; unofficial mod notifier)",
+  "userAgent": "ratatoskr/1.0.0 (+https://github.com/odin-sons/ratatoskr; unofficial mod notifier)",
   "sources": [
     { "id": "thunderstore:valheim", "store": "thunderstore", "community": "valheim", "enabled": true },
     { "id": "hexium:valheim", "store": "hexium", "community": "valheim", "enabled": true },

@@ -59,6 +59,14 @@ These are not preferences. Violating them breaks the deployment target.
   in one module with a comment naming the source. Never inline a magic number
   that came from someone else's documentation.
 - Conventional commits.
+- Semantic Versioning. Bump the version as part of the same change that
+  introduces it, not as an afterthought: patch for a fix with no behavior
+  change, minor for a backward-compatible feature, major for a breaking one.
+  Update in lockstep: `package.json`'s `version` and `PROJECT.version` in
+  `src/core/constants.ts` (the latter is user-visible, in every Discord
+  message and in the User-Agent sent to all three upstream APIs). Move
+  `CHANGELOG.md`'s `[Unreleased]` section to a new `[x.y.z] - YYYY-MM-DD`
+  heading in the same commit, leaving `[Unreleased]` empty above it.
 
 ## Commands
 
