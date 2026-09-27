@@ -16,7 +16,7 @@ import { compileFilter } from './filter.ts';
 import { fanOut, type CompiledSubscription } from './fanout.ts';
 import type { Clock, PollContext, Sender, SourceAdapter, Store } from './ports.ts';
 import { sanitizeLogText } from './report.ts';
-import type { AppConfig, ModEvent, PackageSnapshot, SourceId, SourceState } from './types.ts';
+import type { AppConfig, ModEvent, PackageSnapshot, SourceId, SourceState, StoreEmojis } from './types.ts';
 
 export type { Renderer } from './drain.ts';
 
@@ -30,6 +30,8 @@ export interface TickDeps {
   clock: Clock;
   /** Defaults to the real renderer; tests inject a stub. */
   renderer?: Renderer;
+  /** Custom emoji markup per store, used when rendering messages. */
+  storeEmojis?: StoreEmojis;
   /** Reconcile cron triggers per day; defaults to `CADENCE.reconcileRunsPerDay`. */
   reconcileRunsPerDay?: number;
 }
@@ -39,6 +41,8 @@ export interface SourceReport {
   status: string;
   events: number;
   error?: string;
+  /** Adapter-reported degradations of an otherwise successful poll. */
+  warnings?: string[];
 }
 
 export interface TickReport {
@@ -190,6 +194,7 @@ async function finish(deps: TickDeps, budget: SubrequestBudget, report: TickRepo
     store: deps.store,
     sender: deps.sender,
     renderer: deps.renderer ?? defaultRenderer,
+    ...(deps.storeEmojis === undefined ? {} : { storeEmojis: deps.storeEmojis }),
     now,
     budget,
   });
@@ -234,6 +239,7 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
   let cursor: string | null;
   let etag: string | null;
   let complete = true;
+  let warned: Pick<SourceReport, 'warnings'> = {};
   if (kind === 'tick') {
     const result = await adapter.poll(ctx);
     if (result.status === 'skipped') return { report: { status: 'skipped', events: 0 }, jobs: [], fetched: false };
@@ -245,6 +251,7 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
     cursor = result.cursor;
     etag = result.etag;
     complete = result.complete;
+    if (result.warnings !== undefined && result.warnings.length > 0) warned = { warnings: result.warnings };
   } else {
     snapshots = await adapter.reconcile!(ctx);
     cursor = state?.cursor ?? null;
@@ -262,7 +269,7 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
 
   if (coldStart) {
     await store.commit({ source: id, packages: dedupeSnapshots(snapshots), events: [], outbox: [], state: nextState });
-    return { report: { status: 'cold-start', events: 0 }, jobs: [], fetched: true };
+    return { report: { status: 'cold-start', events: 0, ...warned }, jobs: [], fetched: true };
   }
 
   const known =
@@ -278,7 +285,7 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
   await store.commit({ source: id, packages: detected.map((e) => e.pkg), events, outbox: rows, state: nextState });
 
   const jobs = events.filter((e) => detailedEventIds.has(e.id)).map((event) => ({ adapter, ctx, event }));
-  return { report: { status: 'ok', events: events.length }, jobs, fetched: true };
+  return { report: { status: 'ok', events: events.length, ...warned }, jobs, fetched: true };
 }
 
 async function fetchChangelogs(deps: TickDeps, budget: SubrequestBudget, jobs: ChangelogJob[], report: TickReport): Promise<void> {

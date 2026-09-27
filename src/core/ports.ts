@@ -118,6 +118,8 @@ export type PollResult =
       etag: string | null;
       /** False when the listing was truncated (e.g. a burst larger than one page) — reconciliation will catch the rest. */
       complete: boolean;
+      /** Degradations worth an operator's attention (one short line each, no ids or URLs); they end up in the run log. */
+      warnings?: string[];
     }
   /** Adapter chose not to poll this tick (e.g. Hexium index cadence, Nexus disabled). */
   | { status: 'skipped' };

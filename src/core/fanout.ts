@@ -12,7 +12,7 @@ export interface CompiledSubscription {
 
 export interface FanOutResult {
   rows: OutboxRow[];
-  /** Ids of events that at least one receiving subscription shows in detail. */
+  /** Ids of events that at least one receiving subscription shows in detail: every immediate message, digest new packages and watchlist hits. */
   detailedEventIds: Set<string>;
 }
 
@@ -64,7 +64,7 @@ export async function fanOut(
         attempts: 0,
         nextAttemptAt: sub.mode === 'digest' ? nextDigestBoundary(now, sub.digestIntervalMin) : nowIso,
       });
-      if (event.kind === 'new' || filter.isWatchlistHit(event)) detailedEventIds.add(event.id);
+      if (sub.mode === 'immediate' || event.kind === 'new' || filter.isWatchlistHit(event)) detailedEventIds.add(event.id);
     }
   }
   return { rows, detailedEventIds };

@@ -8,6 +8,7 @@ import type {
   ModEvent,
   PackageSnapshot,
   SourceConfig,
+  StoreEmojis,
   StoreKind,
   Subscription,
 } from '../core/types.ts';
@@ -148,9 +149,16 @@ export class FakeAdapter implements SourceAdapter {
 
 export function okPoll(
   packages: PackageSnapshot[],
-  extra: { cursor?: string | null; etag?: string | null; complete?: boolean } = {},
+  extra: { cursor?: string | null; etag?: string | null; complete?: boolean; warnings?: string[] } = {},
 ): PollResult {
-  return { status: 'ok', packages, cursor: extra.cursor ?? null, etag: extra.etag ?? null, complete: extra.complete ?? true };
+  return {
+    status: 'ok',
+    packages,
+    cursor: extra.cursor ?? null,
+    etag: extra.etag ?? null,
+    complete: extra.complete ?? true,
+    ...(extra.warnings === undefined ? {} : { warnings: extra.warnings }),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -159,12 +167,14 @@ export function okPoll(
 
 /** One message per digest (or per `perMessage` events); content lists event ids so tests can assert contents. */
 export class FakeRenderer implements Renderer {
-  readonly digestCalls: { events: ModEvent[]; detailed: boolean[] }[] = [];
+  readonly digestCalls: { events: ModEvent[]; detailed: boolean[]; storeEmojis: StoreEmojis | undefined }[] = [];
   readonly immediateCalls: ModEvent[] = [];
+  /** Emoji option received by each `renderImmediate` call, in call order. */
+  readonly immediateEmojis: (StoreEmojis | undefined)[] = [];
   perMessage = Number.POSITIVE_INFINITY;
 
-  renderDigest(events: ModEvent[], opts: { detailed: (e: ModEvent) => boolean; now: Date }): DiscordMessage[] {
-    this.digestCalls.push({ events, detailed: events.map((e) => opts.detailed(e)) });
+  renderDigest(events: ModEvent[], opts: { detailed: (e: ModEvent) => boolean; now: Date; storeEmojis?: StoreEmojis }): DiscordMessage[] {
+    this.digestCalls.push({ events, detailed: events.map((e) => opts.detailed(e)), storeEmojis: opts.storeEmojis });
     const messages: DiscordMessage[] = [];
     const size = Math.max(1, Math.min(this.perMessage, events.length));
     for (let i = 0; i < events.length; i += size) {
@@ -176,8 +186,9 @@ export class FakeRenderer implements Renderer {
     return messages;
   }
 
-  renderImmediate(event: ModEvent): DiscordMessage {
+  renderImmediate(event: ModEvent, opts?: { now: Date; storeEmojis?: StoreEmojis }): DiscordMessage {
     this.immediateCalls.push(event);
+    this.immediateEmojis.push(opts?.storeEmojis);
     return { content: `immediate:${event.id}`, allowed_mentions: { parse: [] } };
   }
 }

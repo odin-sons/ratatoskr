@@ -3,6 +3,9 @@ import type { TickReport } from './tick.ts';
 
 export const MAX_LOGGED_TEXT_CHARS = 200;
 
+/** Adapter warnings logged per source and run. */
+export const MAX_LOGGED_WARNINGS = 5;
+
 const SCHEME_URL_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi;
 const WEBHOOK_PATH_PATTERN = /\S*webhooks\/\S*/gi;
 const WEBHOOK_ID_TOKEN_PATTERN = /\b\d{17,20}\/[\w-]{20,}/g;
@@ -27,12 +30,16 @@ export interface RunLogInput {
 
 /** The single structured log line for one scheduled run. */
 export function formatRunLog({ cron, report, elapsedMs }: RunLogInput): string {
-  const sources: Record<string, { status: string; events: number; error?: string }> = {};
+  const sources: Record<string, { status: string; events: number; error?: string; warnings?: string[] }> = {};
   for (const [id, source] of Object.entries(report.sources)) {
-    sources[id] =
-      source.error === undefined
-        ? { status: source.status, events: source.events }
-        : { status: source.status, events: source.events, error: sanitizeLogText(source.error) };
+    sources[id] = {
+      status: source.status,
+      events: source.events,
+      ...(source.error === undefined ? {} : { error: sanitizeLogText(source.error) }),
+      ...(source.warnings === undefined || source.warnings.length === 0
+        ? {}
+        : { warnings: source.warnings.slice(0, MAX_LOGGED_WARNINGS).map(sanitizeLogText) }),
+    };
   }
   return JSON.stringify({
     event: 'run',

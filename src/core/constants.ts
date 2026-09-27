@@ -18,10 +18,20 @@ export const DISCORD = {
   embedAuthorNameMax: 256,
   /** Sum of all text across all embeds in one message. Binding limit. */
   embedTotalTextMax: 6000,
+  /** Link buttons (component type 2, style 5) in one action row. Source: Discord developer docs, message components. */
+  actionRowsPerMessage: 5,
+  buttonsPerRow: 5,
+  buttonLabelMax: 80,
+  buttonUrlMax: 512,
+  /** Relative viewer-local timestamp, `<t:UNIX:R>`. Source: Discord developer docs, message formatting. */
+  timestampStyleRelative: 'R',
   /** Observed, not documented. Always prefer `retry_after` from a 429. */
   webhookRequestsPer2s: 5,
   messagesPerChannelPerMinute: 30,
 } as const;
+
+/** Custom emoji markup, `<:name:id>` or `<a:name:id>`. Source: Discord developer docs, message formatting. */
+export const DISCORD_CUSTOM_EMOJI = /^<a?:[A-Za-z0-9_]{2,32}:\d{17,20}>$/;
 
 /** Cloudflare Workers free plan. Source: CLAUDE.md "Hard constraints". */
 export const CLOUDFLARE = {

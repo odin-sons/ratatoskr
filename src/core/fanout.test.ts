@@ -46,13 +46,38 @@ describe('fanOut', () => {
     expect(rows).toEqual([]);
   });
 
-  it('flags new events and watchlist hits as detailed, not other updates', async () => {
-    const sub = compiled(makeSubscription({ filter: { watchlist: ['Star-Mod'] } }));
+  it('flags new events and watchlist hits as detailed, not other updates, for a digest subscription', async () => {
+    const sub = compiled(makeSubscription({ mode: 'digest', filter: { watchlist: ['Star-Mod'] } }));
     const fresh = makeEvent({ pkg: { packageId: 'A-New' } });
     const hit = makeEvent({ kind: 'update', versionFrom: '0.1.0', pkg: { owner: 'Star', name: 'Mod', packageId: 'Star-Mod' } });
     const plain = makeEvent({ kind: 'update', versionFrom: '0.1.0', pkg: { packageId: 'A-Plain', name: 'Plain' } });
     const { detailedEventIds } = await fanOut([fresh, hit, plain], [sub], new MemoryStore(), now);
     expect([...detailedEventIds].sort()).toEqual([fresh.id, hit.id].sort());
+  });
+
+  it('flags every event an immediate subscription receives as detailed, updates included', async () => {
+    const sub = compiled(makeSubscription({ mode: 'immediate' }));
+    const fresh = makeEvent({ pkg: { packageId: 'A-New' } });
+    const plain = makeEvent({ kind: 'update', versionFrom: '0.1.0', pkg: { packageId: 'A-Plain', name: 'Plain' } });
+    const { detailedEventIds } = await fanOut([fresh, plain], [sub], new MemoryStore(), now);
+    expect([...detailedEventIds].sort()).toEqual([fresh.id, plain.id].sort());
+  });
+
+  it('flags an update as detailed when any receiving subscription is immediate, and not when only a digest receives it', async () => {
+    const digest = compiled(makeSubscription({ id: 'dig', mode: 'digest' }));
+    const immediate = compiled(makeSubscription({ id: 'imm', mode: 'immediate', filter: { sources: ['thunderstore:valheim'] } }));
+    const forBoth = makeEvent({ kind: 'update', versionFrom: '0.1.0', pkg: { packageId: 'A-Both', source: 'thunderstore:valheim' } });
+    const digestOnly = makeEvent({ kind: 'update', versionFrom: '0.1.0', pkg: { packageId: 'B-Digest', source: 'hexium:valheim', store: 'hexium' } });
+    const { detailedEventIds } = await fanOut([forBoth, digestOnly], [digest, immediate], new MemoryStore(), now);
+    expect([...detailedEventIds]).toEqual([forBoth.id]);
+  });
+
+  it('does not flag an event that no subscription receives', async () => {
+    const imm = compiled(makeSubscription({ mode: 'immediate', filter: { kinds: ['new'] } }));
+    const update = makeEvent({ kind: 'update', versionFrom: '0.1.0', pkg: { packageId: 'A-Upd' } });
+    const { detailedEventIds, rows } = await fanOut([update], [imm], new MemoryStore(), now);
+    expect(rows).toEqual([]);
+    expect(detailedEventIds.size).toBe(0);
   });
 
   describe('cross-store lookups', () => {

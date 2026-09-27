@@ -120,10 +120,16 @@ export class MemoryStore implements Store {
       const key = releaseKey(event.pkg, event.versionTo);
       if (!wanted.has(key)) continue;
       const list = out.get(key);
-      if (list === undefined) out.set(key, [{ ...event }]);
-      else list.push({ ...event });
+      if (list === undefined) out.set(key, [this.joined(event)]);
+      else list.push(this.joined(event));
     }
     return out;
+  }
+
+  /** Like the SQL join: the event with the package as currently stored (sticky fields included) at the event's version. */
+  private joined(event: ModEvent): ModEvent {
+    const current = this.packages.get(pkgKey(event.pkg.source, event.pkg.packageId));
+    return { ...event, pkg: { ...(current ?? event.pkg), version: event.versionTo, downloadUrl: (current ?? event.pkg).downloadUrl ?? null, downloads: (current ?? event.pkg).downloads ?? null } };
   }
 
   async takeDue(nowIso: string, limit: number): Promise<DueDelivery[]> {
@@ -136,7 +142,7 @@ export class MemoryStore implements Store {
       const event = this.events.get(stored.eventId);
       if (!subscription || !subscription.enabled || !event) continue;
       const { delivered: _d, deliveredAt: _da, parked: _p, seq: _s, ...row } = stored;
-      out.push({ row, subscription: { ...subscription }, event: { ...event } });
+      out.push({ row, subscription: { ...subscription }, event: this.joined(event) });
       if (out.length >= limit) break;
     }
     return out;
@@ -205,6 +211,8 @@ function stubPackage(source: SourceId, packageId: string, version: string): Pack
     version,
     url: `https://example.invalid/${packageId}`,
     iconUrl: null,
+    downloadUrl: null,
+    downloads: null,
     description: null,
     categories: [],
     isNsfw: false,
@@ -218,6 +226,8 @@ function mergePackage(prev: PackageSnapshot, next: PackageSnapshot): PackageSnap
   return {
     ...next,
     iconUrl: next.iconUrl ?? prev.iconUrl,
+    downloadUrl: next.version !== prev.version ? (next.downloadUrl ?? null) : (next.downloadUrl ?? prev.downloadUrl ?? null),
+    downloads: next.downloads ?? prev.downloads ?? null,
     description: next.description ?? prev.description,
     sizeBytes: next.sizeBytes ?? prev.sizeBytes,
     categories: next.categories.length > 0 ? next.categories : prev.categories,

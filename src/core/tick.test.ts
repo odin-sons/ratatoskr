@@ -324,6 +324,36 @@ describe('runTick: budgets', () => {
     expect(report.changelogFetches).toBe(2);
   });
 
+  it('fetches a changelog for every update delivered to an immediate subscription, but not for a digest one', async () => {
+    const adapter = new FakeAdapter({ id: TS });
+    const imm = makeSubscription({ id: 'imm', mode: 'immediate', webhookUrl: 'https://discord.invalid/api/webhooks/1/a', filter: { sources: [TS] } });
+    const h = makeHarness({ adapters: [adapter], subscriptions: [imm] });
+    bootstrap(h, TS, { 'Plain-Mod': '1.0.0' });
+    adapter.enqueue(okPoll([snap('Plain-Mod', '2.0.0')]));
+    const report = await runTick(h.deps, scheduled);
+    expect(report.changelogFetches).toBe(1);
+    expect(h.renderer.immediateCalls[0]!.changelog).toBe('changelog Plain-Mod 2.0.0');
+
+    const digestOnly = makeHarness({ adapters: [new FakeAdapter({ id: TS })], subscriptions: [makeSubscription({ mode: 'digest' })] });
+    bootstrap(digestOnly, TS, { 'Plain-Mod': '1.0.0' });
+    (digestOnly.adapters[0] as FakeAdapter).enqueue(okPoll([snap('Plain-Mod', '2.0.0')]));
+    expect((await runTick(digestOnly.deps, scheduled)).changelogFetches).toBe(0);
+  });
+
+  it('renders immediate updates beyond the per-tick changelog cap without a changelog', async () => {
+    const adapter = new FakeAdapter({ id: TS });
+    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription({ mode: 'immediate' })] });
+    const total = TICK_BUDGET.maxChangelogFetches + 3;
+    bootstrap(h, TS, Object.fromEntries(Array.from({ length: total }, (_, i) => [`A${i}-Mod`, '1.0.0'])));
+    adapter.enqueue(okPoll(Array.from({ length: total }, (_, i) => snap(`A${i}-Mod`, '2.0.0'))));
+    const report = await runTick(h.deps, scheduled);
+    expect(report.changelogFetches).toBe(TICK_BUDGET.maxChangelogFetches);
+    expect(report.changelogSkipped).toBe(3);
+    const withChangelog = [...h.store.events.values()].filter((e) => e.changelog !== null);
+    expect(withChangelog).toHaveLength(TICK_BUDGET.maxChangelogFetches);
+    expect(report.sent).toBe(DISCORD.webhookRequestsPer2s);
+  });
+
   it('ignores changelog failures and still delivers', async () => {
     const adapter = new FakeAdapter({ id: TS });
     adapter.changelog = () => new Error('boom');
@@ -381,6 +411,28 @@ describe('runTick: first-seen update of a pre-existing mod', () => {
     const report = await runTick(h.deps, scheduled);
     expect(h.store.events.get(eventId(TS, 'Fresh-Mod', '1.0.0'))).toMatchObject({ kind: 'new', versionFrom: null });
     expect(report.changelogFetches).toBe(1);
+  });
+});
+
+describe('runTick: store emoji', () => {
+  it('hands the configured emoji to the renderer for immediate and digest deliveries', async () => {
+    const storeEmojis = { thunderstore: '<:thunderstore:123456789012345678>' };
+    const adapter = new FakeAdapter({ id: TS });
+    const h = makeHarness({
+      adapters: [adapter],
+      subscriptions: [
+        makeSubscription({ id: 'imm', mode: 'immediate', webhookUrl: 'https://discord.invalid/api/webhooks/1/a' }),
+        makeSubscription({ id: 'dig', mode: 'digest', webhookUrl: 'https://discord.invalid/api/webhooks/2/b' }),
+      ],
+    });
+    h.deps.storeEmojis = storeEmojis;
+    bootstrap(h, TS, {});
+    adapter.enqueue(okPoll([snap('A-One')]));
+    await runTick(h.deps, scheduled);
+    h.clock.set('2026-09-19T12:30:00.000Z');
+    await runTick(h.deps, scheduled + 23 * 60_000);
+    expect(h.renderer.immediateEmojis).toEqual([storeEmojis]);
+    expect(h.renderer.digestCalls.map((c) => c.storeEmojis)).toEqual([storeEmojis]);
   });
 });
 
@@ -504,6 +556,28 @@ describe('runTick: report', () => {
       purged: 0,
       subrequests: 0,
     });
+  });
+
+  it('carries adapter warnings into the source report, on ok and on cold-start results', async () => {
+    const adapter = new FakeAdapter({ id: HX });
+    const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription()] });
+    adapter.enqueue(okPoll([snap('A-One')], { cursor: 'seed:1', complete: false, warnings: ['seed warning'] }));
+    const cold = await runTick(h.deps, scheduled);
+    expect(cold.sources[HX]).toEqual({ status: 'cold-start', events: 0, warnings: ['seed warning'] });
+
+    bootstrap(h, HX, { 'A-One': '1.0.0' });
+    adapter.enqueue(okPoll([snap('A-One', '1.1.0')], { warnings: ['index above cap', 'lookups failed 2'] }));
+    const ok = await runTick(h.deps, scheduled + 300_000);
+    expect(ok.sources[HX]).toEqual({ status: 'ok', events: 1, warnings: ['index above cap', 'lookups failed 2'] });
+  });
+
+  it('omits the warnings key when the adapter reports none, including an empty list', async () => {
+    const adapter = new FakeAdapter({ id: TS });
+    const h = makeHarness({ adapters: [adapter] });
+    bootstrap(h, TS, {});
+    adapter.enqueue(okPoll([], { warnings: [] }));
+    const report = await runTick(h.deps, scheduled);
+    expect(report.sources[TS]).not.toHaveProperty('warnings');
   });
 
   it('carries the parked count of the drain', async () => {

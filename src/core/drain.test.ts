@@ -127,6 +127,37 @@ describe('drainOutbox', () => {
     expect(h.renderer.digestCalls[0]!.detailed).toEqual([true, true, false]);
   });
 
+  it('hands the store emoji to every digest and immediate render', async () => {
+    const storeEmojis = { thunderstore: '<:thunderstore:123456789012345678>' };
+    const run = (mode: 'digest' | 'immediate') => async () => {
+      const h = makeHarness();
+      await enqueue(h, makeSubscription({ mode }), evs(2));
+      await drainOutbox({ store: h.store, sender: h.sender, renderer: h.renderer, now, storeEmojis });
+      return h;
+    };
+    expect((await run('digest')()).renderer.digestCalls.map((c) => c.storeEmojis)).toEqual([storeEmojis]);
+    expect((await run('immediate')()).renderer.immediateEmojis).toEqual([storeEmojis, storeEmojis]);
+    const bare = makeHarness();
+    await enqueue(bare, makeSubscription({ mode: 'immediate' }), evs(1));
+    await drain(bare);
+    expect(bare.renderer.immediateEmojis).toEqual([undefined]);
+  });
+
+  it('delivers real messages with emoji, project field and, for immediate mode only, link buttons', async () => {
+    const real = { renderDigest, renderImmediate };
+    const storeEmojis = { thunderstore: '<:thunderstore:123456789012345678>' };
+    const event = makeEvent({ kind: 'update', versionFrom: '0.9.0', pkg: { packageId: 'A-Mod', owner: 'A', name: 'Mod', url: 'https://thunderstore.io/c/valheim/p/A/Mod/', downloadUrl: 'https://thunderstore.io/package/download/A/Mod/1.0.0/' } });
+    for (const mode of ['immediate', 'digest'] as const) {
+      const h = makeHarness();
+      await enqueue(h, makeSubscription({ mode }), [event]);
+      await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now, storeEmojis });
+      const payload = h.sender.calls[0]!.payload;
+      expect(payload.embeds![0]!.description).toContain('<:thunderstore:123456789012345678>');
+      expect(payload.embeds!.at(-1)!.fields!.at(-1)!.value).toBe('-# [ratatoskr v0.1.0](https://github.com/odin-sons/ratatoskr)');
+      expect(payload.components?.[0]?.components.map((b) => b.label)).toEqual(mode === 'immediate' ? ['Mod page', 'Download'] : undefined);
+    }
+  });
+
   it('reschedules on 429 using retry_after and keeps the row', async () => {
     const h = makeHarness();
     const [ev] = evs(1);

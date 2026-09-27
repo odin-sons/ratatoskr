@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
 import { bestOf } from '../testing/timing.ts';
-import { MAX_LOGGED_TEXT_CHARS, formatRunLog, sanitizeLogText } from './report.ts';
+import { MAX_LOGGED_TEXT_CHARS, MAX_LOGGED_WARNINGS, formatRunLog, sanitizeLogText } from './report.ts';
 import type { TickReport } from './tick.ts';
 
 const report = (over: Partial<TickReport> = {}): TickReport => ({
@@ -88,6 +88,33 @@ describe('formatRunLog', () => {
   it('includes the drain error only when there is one', () => {
     expect(parse(formatRunLog({ cron: 'c', report: report(), elapsedMs: 1 }))).not.toHaveProperty('drainError');
     expect(parse(formatRunLog({ cron: 'c', report: report({ drainError: 'd1 down' }), elapsedMs: 1 }))).toMatchObject({ drainError: 'd1 down' });
+  });
+
+  it("lists a source's warnings, redacted and truncated, and omits them when there are none", () => {
+    const secret = 'https://discord.com/api/webhooks/123456789012345678/SuperSecretToken_abc';
+    const line = formatRunLog({
+      cron: 'c',
+      report: report({
+        sources: {
+          a: { status: 'ok', events: 0, warnings: ['package-index above cap: updates not detected', `saw ${secret} here`, 'x'.repeat(5000)] },
+          b: { status: 'ok', events: 1 },
+        },
+      }),
+      elapsedMs: 1,
+    });
+    const { sources } = parse(line) as { sources: Record<string, { warnings?: string[] }> };
+    expect(sources.a!.warnings![0]).toBe('package-index above cap: updates not detected');
+    expect(sources.a!.warnings![1]).toBe('saw [url] here');
+    expect(sources.a!.warnings![2]!.length).toBeLessThanOrEqual(MAX_LOGGED_TEXT_CHARS);
+    expect(sources.b).not.toHaveProperty('warnings');
+    expect(line).not.toContain('SuperSecretToken');
+  });
+
+  it('caps how many warnings of one source are logged', () => {
+    const warnings = Array.from({ length: MAX_LOGGED_WARNINGS + 10 }, (_, i) => `w${i}`);
+    const line = formatRunLog({ cron: 'c', report: report({ sources: { a: { status: 'ok', events: 0, warnings } } }), elapsedMs: 1 });
+    const { sources } = parse(line) as { sources: Record<string, { warnings: string[] }> };
+    expect(sources.a!.warnings).toEqual(warnings.slice(0, MAX_LOGGED_WARNINGS));
   });
 
   it('rounds the elapsed time to whole milliseconds', () => {

@@ -6,11 +6,11 @@ import { compileFilter, type CompiledFilter } from './filter.ts';
 import { releaseKey } from './ids.ts';
 import type { SendResult, Sender, Store } from './ports.ts';
 import { sanitizeLogText } from './report.ts';
-import type { DiscordMessage, DueDelivery, ModEvent, OutboxRow, Subscription } from './types.ts';
+import type { DiscordMessage, DueDelivery, ModEvent, OutboxRow, StoreEmojis, Subscription } from './types.ts';
 
 export interface Renderer {
-  renderDigest(events: ModEvent[], opts: { detailed: (event: ModEvent) => boolean; now: Date }): DiscordMessage[];
-  renderImmediate(event: ModEvent, opts: { now: Date }): DiscordMessage;
+  renderDigest(events: ModEvent[], opts: { detailed: (event: ModEvent) => boolean; now: Date; storeEmojis?: StoreEmojis }): DiscordMessage[];
+  renderImmediate(event: ModEvent, opts: { now: Date; storeEmojis?: StoreEmojis }): DiscordMessage;
 }
 
 export interface DrainDeps {
@@ -18,6 +18,8 @@ export interface DrainDeps {
   sender: Sender;
   renderer: Renderer;
   now: Date;
+  /** Custom emoji markup per store, handed to every render call. */
+  storeEmojis?: StoreEmojis;
   /** Shared per-invocation subrequest pool; every Discord send spends one. */
   budget?: SubrequestBudget;
 }
@@ -211,14 +213,14 @@ function allowance(drain: Drain, webhook: string): number {
 }
 
 async function deliverImmediate(drain: Drain, sub: Subscription, entry: CollapsedDelivery): Promise<void> {
-  const { renderer, now } = drain.deps;
+  const { renderer, now, storeEmojis } = drain.deps;
   if (allowance(drain, sub.webhookUrl) < 1) {
     drain.report.deferred += entry.rows.length;
     return;
   }
   let message: DiscordMessage;
   try {
-    message = renderer.renderImmediate(entry.delivery.event, { now });
+    message = renderer.renderImmediate(entry.delivery.event, { now, ...(storeEmojis === undefined ? {} : { storeEmojis }) });
   } catch {
     await parkUnrenderable(drain, [entry]);
     return;
@@ -229,7 +231,7 @@ async function deliverImmediate(drain: Drain, sub: Subscription, entry: Collapse
 }
 
 async function deliverDigest(drain: Drain, sub: Subscription, kept: CollapsedDelivery[], filter: CompiledFilter): Promise<void> {
-  const { renderer, now } = drain.deps;
+  const { renderer, now, storeEmojis } = drain.deps;
   const rowCount = (entries: readonly CollapsedDelivery[]): number => entries.reduce((sum, k) => sum + k.rows.length, 0);
   const room = allowance(drain, sub.webhookUrl);
   if (room < 1) {
@@ -239,7 +241,7 @@ async function deliverDigest(drain: Drain, sub: Subscription, kept: CollapsedDel
 
   const detailed = (event: ModEvent): boolean => event.kind === 'new' || filter.isWatchlistHit(event);
   const renderEntries = (entries: readonly CollapsedDelivery[]): DiscordMessage[] =>
-    renderer.renderDigest(entries.map((k) => k.delivery.event), { detailed, now });
+    renderer.renderDigest(entries.map((k) => k.delivery.event), { detailed, now, ...(storeEmojis === undefined ? {} : { storeEmojis }) });
 
   const found = fitOrIsolate(kept, room, detailed, renderEntries);
   if (found.poison.length > 0) await parkUnrenderable(drain, found.poison);

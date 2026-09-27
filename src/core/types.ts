@@ -32,6 +32,10 @@ export interface PackageSnapshot {
   updatedAt: string;
   /** Approximate size of the latest archive in bytes, when the listing exposes it. */
   sizeBytes: number | null;
+  /** Direct download URL of the latest archive; `undefined` or `null` when the source does not expose one. */
+  downloadUrl?: string | null;
+  /** Total download count of the package; `undefined` or `null` when the source does not expose one. */
+  downloads?: number | null;
 }
 
 /** A package plus what changed. This is the unit that is stored, deduplicated and rendered. */
@@ -132,12 +136,29 @@ export interface DiscordEmbed {
   footer?: { text: string; icon_url?: string };
   author?: { name: string; url?: string; icon_url?: string };
   thumbnail?: { url: string };
-  timestamp?: string;
 }
+
+/** Link button: the only component type a non-application webhook may send. */
+export interface DiscordLinkButton {
+  type: 2;
+  style: 5;
+  label: string;
+  url: string;
+}
+
+export interface DiscordActionRow {
+  type: 1;
+  components: DiscordLinkButton[];
+}
+
+/** Store id -> full Discord custom emoji markup, e.g. `<:name:123456789012345678>`. */
+export type StoreEmojis = Partial<Record<StoreKind, string>>;
 
 export interface DiscordMessage {
   content?: string;
   embeds?: DiscordEmbed[];
+  /** Link buttons; the sender adds `with_components=true` when present. */
+  components?: DiscordActionRow[];
   username?: string;
   avatar_url?: string;
   /** Always `{ parse: [] }` — mod names are user-controlled and must never ping. */
