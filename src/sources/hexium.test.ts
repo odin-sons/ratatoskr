@@ -1,38 +1,88 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CADENCE, CLOUDFLARE } from '../core/constants.ts';
+import { diffSnapshots } from '../core/diff.ts';
 import type { PollContext, PollResult } from '../core/ports.ts';
 import type { SourceConfig } from '../core/types.ts';
-import { dump, stampFor } from './__fixtures__/dump-gen.ts';
-import { createFakeFetch, fixture, json, makeCtx as baseCtx, makeState, text, type FakeFetch } from './__fixtures__/fake-fetch.ts';
-import { HexiumAdapter, parseCursor } from './hexium.ts';
+import { indexLine, syntheticIndex } from './__fixtures__/index-gen.ts';
+import { createFakeFetch, fixture, json, makeCtx as baseCtx, makeState, text, type FakeFetch, type RecordedCall } from './__fixtures__/fake-fetch.ts';
+import { HEXIUM_INDEX_MAX_BYTES, HEXIUM_INDEX_MAX_LINES, HEXIUM_LOOKUP_MAX_BYTES, SOURCE_BUDGET } from './budget.ts';
+import { HexiumAdapter } from './hexium.ts';
+import { scanPackageIndex, seedSliceOf } from './hexium-index.ts';
 
 const config: SourceConfig = { id: 'hexium:valheim', store: 'hexium', community: 'valheim', enabled: true };
 const ORIGIN = 'https://valheim.hexium.gg';
 const LISTING = `${ORIGIN}/api/experimental/frontend/packages/?page=1`;
-const DUMP = `${ORIGIN}/api/v1/package/`;
-const dumpFixture = fixture('hexium-v1-package.json');
+const INDEX = `${ORIGIN}/api/experimental/package-index/`;
+const LOOKUP_PREFIX = `${ORIGIN}/api/experimental/package/`;
 const listingFixture = fixture('hexium-listing.json');
+const realIndex = fixture('hexium-package-index.ndjson');
+const lookupFixtures = {
+  muji: fixture('hexium-package-muji-dynamicstorageforge.json'),
+  bepinex: fixture('hexium-package-denikson-bepinexpack.json'),
+  building: fixture('hexium-package-smoothbrain-building.json'),
+};
 
-interface Truth {
+const FIXTURE_NOW = new Date('2026-09-27T12:00:00Z');
+const EVERY = CADENCE.hexiumIndexEveryNthTick;
+const LISTING_TICK = 1;
+const indexTick = (scan = 0): number => scan * EVERY;
+
+interface Lookup {
+  namespace: string;
+  owner: string;
+  name: string;
   full_name: string;
-  uuid4: string;
+  package_url: string;
   date_updated: string;
-  has_nsfw_content: boolean;
-  is_deprecated: boolean;
+  is_deprecated: unknown;
+  latest: { version_number: string; description: unknown; icon: unknown };
+  community_listings: Record<string, unknown>[];
+  [key: string]: unknown;
 }
-const truth = JSON.parse(dumpFixture) as Truth[];
-const seq = (t: Truth): number => Number.parseInt(t.uuid4.slice(0, 8), 16);
-const ids = (r: { packageId: string }[]): string[] => r.map((p) => p.packageId).sort();
-const MAX_UPDATED = truth.map((t) => t.date_updated).sort().at(-1)!;
 
-const FIXTURE_NOW = new Date('2026-09-20T12:00:00Z');
+function lookupBody(namespace: string, name: string, version: string, mutate: (body: Lookup) => void = () => {}): Lookup {
+  const body = JSON.parse(lookupFixtures.muji) as Lookup;
+  body.namespace = namespace;
+  body.owner = namespace;
+  body.name = name;
+  body.full_name = `${namespace}-${name}`;
+  body.package_url = `${ORIGIN}/mods/${namespace}/${name}`;
+  body.latest.version_number = version;
+  mutate(body);
+  return body;
+}
+
+type LookupResponder = (namespace: string, name: string, call: RecordedCall) => Response | Promise<Response>;
+
+function routes(over: { index?: string | (() => Response | Promise<Response>); listing?: string; lookup?: LookupResponder } = {}): FakeFetch {
+  const index = over.index ?? realIndex;
+  return createFakeFetch([
+    [LISTING, () => text(over.listing ?? listingFixture)],
+    [INDEX, typeof index === 'string' ? () => text(index) : index],
+    [
+      LOOKUP_PREFIX,
+      (call) => {
+        const [namespace = '', name = ''] = new URL(call.url).pathname.split('/').slice(4).map(decodeURIComponent);
+        return over.lookup ? over.lookup(namespace, name, call) : new Response('{"detail":"Not found."}', { status: 404 });
+      },
+    ],
+  ]);
+}
+
+/** Answers every lookup with a full snapshot at `version` (default: the version the index lists). */
+const answerAll =
+  (version = '2.0.0', mutate: (body: Lookup) => void = () => {}): LookupResponder =>
+  (namespace, name) =>
+    json(lookupBody(namespace, name, version, mutate));
 
 function makeCtx(fake: FakeFetch, over: Partial<PollContext> = {}): PollContext {
   return baseCtx(fake, { now: FIXTURE_NOW, ...over });
 }
 
-function adapterWith(known: Record<string, string> = {}): HexiumAdapter {
-  return new HexiumAdapter(config, { getAllKnownVersions: async () => new Map(Object.entries(known)) });
+function adapterWith(known: Record<string, string> | Map<string, string> = {}): HexiumAdapter {
+  const map = known instanceof Map ? known : new Map(Object.entries(known));
+  return new HexiumAdapter(config, { getAllKnownVersions: async () => map });
 }
 
 function ok(r: PollResult): Extract<PollResult, { status: 'ok' }> {
@@ -40,141 +90,41 @@ function ok(r: PollResult): Extract<PollResult, { status: 'ok' }> {
   return r;
 }
 
-function routes(dump = dumpFixture): FakeFetch {
-  return createFakeFetch([
-    [LISTING, () => text(listingFixture)],
-    [DUMP, () => text(dump)],
-  ]);
-}
-
-function nextCtx(fake: FakeFetch, prev: Extract<PollResult, { status: 'ok' }>, over: Partial<PollContext> = {}): PollContext {
-  return makeCtx(fake, { state: makeState({ cursor: prev.cursor, bootstrapped: true }), ...over });
-}
+const ids = (packages: { packageId: string }[]): string[] => packages.map((p) => p.packageId).sort();
+const ownerIds = (from: number, to: number): string[] => Array.from({ length: to - from + 1 }, (_, i) => `Owner${from + i}-Package${from + i}`).sort();
+const allVersions = (count: number, version = '1.0.0'): Record<string, string> => Object.fromEntries(ownerIds(1, count).map((id) => [id, version]));
+const warnings = (): string[] => vi.mocked(console.warn).mock.calls.map((call) => String(call[0]));
+const lookupCalls = (fake: FakeFetch): RecordedCall[] => fake.callsTo(LOOKUP_PREFIX);
 
 beforeEach(() => {
   vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
 afterEach(() => vi.restoreAllMocks());
 
-describe('parseCursor', () => {
-  it('distinguishes seed progress, timestamps and junk', () => {
-    expect(parseCursor(null)).toBeNull();
-    expect(parseCursor('')).toBeNull();
-    expect(parseCursor('garbage')).toBeNull();
-    expect(parseCursor('2026-09-20T05:18:45Z')).toEqual({ kind: 'time', iso: '2026-09-20T05:18:45.000000Z' });
-    expect(parseCursor('seed:2:2026-09-20T05:18:45.000000Z')).toEqual({ kind: 'seed', next: 2, mark: '2026-09-20T05:18:45.000000Z' });
-    expect(parseCursor('seed:x:1')).toBeNull();
-    expect(parseCursor('seed:1:junk')).toEqual({ kind: 'seed', next: 1, mark: null });
-    expect(parseCursor('seed:1:')).toEqual({ kind: 'seed', next: 1, mark: null });
-  });
-});
+describe('HexiumAdapter.poll — listing (every tick)', () => {
+  const state = makeState({ cursor: null, etag: '"h1"' });
 
-describe('HexiumAdapter.poll — initial seed', () => {
-  it('seeds one slice per poll from the dump, carrying real flags, and never touches the listing', async () => {
-    const fake = routes();
-    const first = ok(await adapterWith().poll(makeCtx(fake, { state: null })));
-
-    expect(ids(first.packages)).toEqual(truth.filter((t) => seq(t) % 4 === 0).map((t) => t.full_name).sort());
-    expect(first.cursor).toBe(`seed:1:${MAX_UPDATED}`);
-    expect(first.complete).toBe(false);
-    expect(first.etag).toBeNull();
-    expect(fake.callsTo('frontend/packages')).toHaveLength(0);
-    for (const p of first.packages) {
-      const t = truth.find((x) => x.full_name === p.packageId)!;
-      expect(p).toMatchObject({ store: 'hexium', source: 'hexium:valheim', isNsfw: t.has_nsfw_content, isDeprecated: t.is_deprecated, updatedAt: t.date_updated });
-      expect(p.url).toBe(`${ORIGIN}/mods/${p.owner}/${p.name}`);
-    }
-  });
-
-  it('walks every slice, then hands over a plain timestamp cursor equal to the first slice mark', async () => {
-    const fake = routes();
-    const seen: string[] = [];
-    let prev = ok(await adapterWith().poll(makeCtx(fake, { state: null })));
-    seen.push(...ids(prev.packages));
-    for (let slice = 1; slice < 4; slice += 1) {
-      expect(prev.complete).toBe(false);
-      prev = ok(await adapterWith().poll(nextCtx(fake, prev, { state: makeState({ cursor: prev.cursor, bootstrapped: slice === 1 }) })));
-      seen.push(...ids(prev.packages));
-    }
-    expect(prev.complete).toBe(true);
-    expect(prev.cursor).toBe(MAX_UPDATED);
-    expect(seen.sort()).toEqual(truth.map((t) => t.full_name).sort());
-  });
-
-  it('keeps the first slice mark even when the dump moves on between slices', async () => {
-    const first = ok(await adapterWith().poll(makeCtx(routes(), { state: null })));
-    const bumped = dumpFixture.replace(truth[0]!.date_updated, '2030-01-01T00:00:00.000000Z');
-    const next = ok(await adapterWith().poll(nextCtx(routes(bumped), first)));
-    expect(next.cursor).toBe(`seed:2:${MAX_UPDATED}`);
-  });
-
-  it('flags NSFW packages in the seed', async () => {
-    const marker = '"has_nsfw_content":false';
-    const at = dumpFixture.indexOf(marker);
-    const flipped = dumpFixture.slice(0, at) + '"has_nsfw_content":true' + dumpFixture.slice(at + marker.length);
-    const target = truth[0]!;
-    const index = seq(target) % 4;
-    let res = ok(await adapterWith().poll(makeCtx(routes(flipped), { state: null })));
-    for (let i = 1; i <= index; i += 1) res = ok(await adapterWith().poll(nextCtx(routes(flipped), res)));
-    expect(res.packages.find((p) => p.packageId === target.full_name)?.isNsfw).toBe(true);
-  });
-
-  it('is skipped, not thrown, on an unusable dump or upstream errors', async () => {
-    for (const responder of [
-      () => text('<html>maintenance</html>'),
-      () => text(JSON.stringify(truth, null, 2)),
-      () => new Response('', { status: 502 }),
-      () => new Response('', { status: 429, headers: { 'retry-after': '60' } }),
-      () => Promise.reject(new TypeError('down')),
-      () => text(dumpFixture.replace(/,"has_nsfw_content":/g, ',"nsfw":')),
-    ]) {
-      const fake = createFakeFetch([[DUMP, responder]]);
-      await expect(adapterWith().poll(makeCtx(fake, { state: null }))).resolves.toEqual({ status: 'skipped' });
-    }
-  });
-
-  it('seeds when a bootstrapped source has no cursor', async () => {
-    const res = ok(await adapterWith().poll(makeCtx(routes(), { state: makeState({ cursor: null }) })));
-    expect(res.cursor?.startsWith('seed:1:')).toBe(true);
-  });
-});
-
-describe('HexiumAdapter.poll — steady state', () => {
-  const cursor = '2026-09-20T02:00:00.000000Z';
-  const state = makeState({ cursor, etag: '"h1"' });
-
-  it('scans the dump on ticks 0, 3 and 6 and returns only records at or after the cursor, with full detail', async () => {
-    for (const tickIndex of [0, 3, 6]) {
-      const fake = routes();
-      const res = ok(await adapterWith().poll(makeCtx(fake, { tickIndex, state })));
-      const expected = truth.filter((t) => t.date_updated >= cursor).map((t) => t.full_name).sort();
-      expect(ids(res.packages)).toEqual(expected);
-      expect(res.cursor).toBe(MAX_UPDATED);
-      expect(res.complete).toBe(true);
-      expect(res.etag).toBe('"h1"');
-      expect(fake.callsTo('frontend/packages')).toHaveLength(0);
-      expect(fake.callsTo('/api/v1/package/')).toHaveLength(1);
-      expect(res.packages.every((p) => p.description !== null && p.iconUrl !== null && p.sizeBytes !== null)).toBe(true);
-    }
-  });
-
-  it('polls only the listing on the other ticks and leaves the cursor untouched', async () => {
+  it('polls only the listing on ticks that are not index ticks and returns its packages', async () => {
     for (const tickIndex of [1, 2, 4, 5]) {
       const fake = routes();
       const res = ok(await adapterWith().poll(makeCtx(fake, { tickIndex, state })));
-      expect(fake.callsTo('/api/v1/package/')).toHaveLength(0);
-      expect(fake.callsTo('frontend/packages')).toHaveLength(1);
+      expect(fake.calls.map((c) => c.url)).toEqual([LISTING]);
       expect(res.packages).toHaveLength(4);
-      expect(res.cursor).toBe(cursor);
+      expect(res.complete).toBe(true);
     }
+  });
+
+  it('leaves the stored cursor untouched', async () => {
+    const stateWithCursor = makeState({ cursor: '2026-09-20T05:18:45.000000Z' });
+    const res = ok(await adapterWith().poll(makeCtx(routes(), { tickIndex: LISTING_TICK, state: stateWithCursor })));
+    expect(res.cursor).toBe('2026-09-20T05:18:45.000000Z');
   });
 
   it('maps listing NSFW and deprecated flags', async () => {
     const body = JSON.parse(listingFixture) as { packages: Record<string, unknown>[] };
     body.packages[0]!.has_nsfw_content = true;
     body.packages[1]!.is_deprecated = true;
-    const fake = createFakeFetch([[LISTING, () => json(body)]]);
-    const res = ok(await adapterWith().poll(makeCtx(fake, { tickIndex: 1, state })));
+    const res = ok(await adapterWith().poll(makeCtx(routes({ listing: JSON.stringify(body) }), { tickIndex: LISTING_TICK, state })));
     expect(res.packages[0]).toMatchObject({ packageId: 'GenesisMods-zzzGenesisItemStacks', isNsfw: true, url: 'https://valheim.hexium.gg/mods/GenesisMods/zzzGenesisItemStacks' });
     expect(res.packages[1]?.isDeprecated).toBe(true);
     expect(res.packages[2]?.isNsfw).toBe(false);
@@ -182,50 +132,26 @@ describe('HexiumAdapter.poll — steady state', () => {
 
   it('honours a 304 on listing ticks and stores a returned ETag', async () => {
     const notModified = createFakeFetch([[LISTING, () => new Response(null, { status: 304 })]]);
-    await expect(adapterWith().poll(makeCtx(notModified, { tickIndex: 1, state }))).resolves.toEqual({ status: 'not-modified', etag: '"h1"' });
+    await expect(adapterWith().poll(makeCtx(notModified, { tickIndex: LISTING_TICK, state }))).resolves.toEqual({ status: 'not-modified', etag: '"h1"' });
     expect(notModified.calls[0]?.headers['if-none-match']).toBe('"h1"');
 
     const fresh = createFakeFetch([[LISTING, () => text(listingFixture, { etag: '"h2"' })]]);
-    expect(ok(await adapterWith().poll(makeCtx(fresh, { tickIndex: 1, state }))).etag).toBe('"h2"');
+    expect(ok(await adapterWith().poll(makeCtx(fresh, { tickIndex: LISTING_TICK, state }))).etag).toBe('"h2"');
   });
 
-  it('never sends a conditional request for the dump', async () => {
-    const fake = routes();
-    await adapterWith().poll(makeCtx(fake, { tickIndex: 0, state }));
-    expect(fake.callsTo('/api/v1/package/')[0]?.headers['if-none-match']).toBeUndefined();
-  });
-
-  it('falls back to the listing when the dump fails or changes shape', async () => {
-    for (const responder of [() => new Response('', { status: 500 }), () => text(JSON.stringify(truth, null, 2))]) {
-      const fake = createFakeFetch([
-        [LISTING, () => text(listingFixture)],
-        [DUMP, responder],
-      ]);
-      const res = ok(await adapterWith().poll(makeCtx(fake, { tickIndex: 0, state })));
-      expect(res.packages).toHaveLength(4);
-      expect(res.cursor).toBe(cursor);
+  it('is skipped, not thrown, on a listing failure', async () => {
+    for (const responder of [() => json({ items: [] }), () => new Response('', { status: 502 }), () => Promise.reject(new TypeError('down'))]) {
+      const fake = createFakeFetch([[LISTING, responder]]);
+      await expect(adapterWith().poll(makeCtx(fake, { tickIndex: LISTING_TICK, state }))).resolves.toEqual({ status: 'skipped' });
     }
   });
 
-  it('skips an unreadable matched record and still advances the cursor', async () => {
-    const broken = dumpFixture.replace(',"has_nsfw_content":', ',"nsfw":');
-    const res = ok(await adapterWith().poll(makeCtx(routes(broken), { tickIndex: 0, state: makeState({ cursor: '2020-01-01T00:00:00.000000Z' }) })));
-    expect(res.complete).toBe(true);
-    expect(res.cursor).toBe(MAX_UPDATED);
-    expect(res.packages).toHaveLength(truth.length - 1);
-  });
-
-  it('returns skipped on a listing failure when no dump scan is due', async () => {
-    const fake = createFakeFetch([[LISTING, () => json({ items: [] })]]);
-    await expect(adapterWith().poll(makeCtx(fake, { tickIndex: 1, state }))).resolves.toEqual({ status: 'skipped' });
-  });
-
-  it('always sends a User-Agent and never credentials', async () => {
-    const fake = routes();
-    const ctx = makeCtx(fake, { tickIndex: 3, state, secrets: { NEXUS_API_KEY: 'SECRET' } });
-    await adapterWith().poll(ctx);
-    await adapterWith().poll({ ...ctx, tickIndex: 1 });
-    expect(fake.calls).toHaveLength(2);
+  it('always sends a User-Agent, never credentials, and only talks to the game host', async () => {
+    const fake = routes({ index: syntheticIndex(6, () => '2.0.0'), lookup: answerAll() });
+    const ctx = makeCtx(fake, { tickIndex: indexTick(1), state, secrets: { NEXUS_API_KEY: 'SECRET' } });
+    await adapterWith(allVersions(6)).poll(ctx);
+    await adapterWith().poll({ ...ctx, tickIndex: LISTING_TICK });
+    expect(fake.calls.length).toBeGreaterThan(2);
     for (const call of fake.calls) {
       expect(call.headers['user-agent']).toBe(ctx.userAgent);
       expect(call.headers.apikey).toBeUndefined();
@@ -236,58 +162,658 @@ describe('HexiumAdapter.poll — steady state', () => {
 
   it('rejects a hostile community slug without touching the network', async () => {
     const evil = new HexiumAdapter({ ...config, community: 'x.evil.test/' }, { getAllKnownVersions: async () => new Map() });
-    const fake = routes();
-    await expect(evil.poll(makeCtx(fake, { state }))).resolves.toEqual({ status: 'skipped' });
-    expect(fake.calls).toHaveLength(0);
+    for (const s of [state, null]) {
+      const fake = routes();
+      await expect(evil.poll(makeCtx(fake, { state: s }))).resolves.toEqual({ status: 'skipped' });
+      expect(fake.calls).toHaveLength(0);
+    }
+    await expect(evil.reconcile!(makeCtx(routes()))).rejects.toThrow();
+  });
+});
+
+describe('HexiumAdapter.poll — listing item flags fail closed', () => {
+  const state = makeState({ cursor: null });
+
+  async function listing(mutate: (item: Record<string, unknown>) => void) {
+    const body = JSON.parse(listingFixture) as { packages: Record<string, unknown>[] };
+    mutate(body.packages[0]!);
+    return ok(await adapterWith().poll(makeCtx(routes({ listing: JSON.stringify(body) }), { tickIndex: LISTING_TICK, state })));
+  }
+
+  it.each([
+    ['missing', (item: Record<string, unknown>) => void delete item.has_nsfw_content],
+    ['null', (item: Record<string, unknown>) => void (item.has_nsfw_content = null)],
+    ['a string', (item: Record<string, unknown>) => void (item.has_nsfw_content = 'false')],
+    ['a number', (item: Record<string, unknown>) => void (item.has_nsfw_content = 0)],
+  ])('marks an item NSFW when its flag is %s', async (_label, mutate) => {
+    const res = await listing(mutate);
+    expect(res.packages[0]?.isNsfw).toBe(true);
+    expect(res.packages[1]?.isNsfw).toBe(false);
+  });
+
+  it('treats a non-boolean deprecated flag as not deprecated', async () => {
+    expect((await listing((item) => void (item.is_deprecated = 'yes'))).packages[0]?.isDeprecated).toBe(false);
+  });
+
+  it('leaves previousVersion unknown for listing items', async () => {
+    expect((await listing(() => {})).packages.every((p) => p.previousVersion === undefined)).toBe(true);
+  });
+});
+
+describe('HexiumAdapter.poll — index scan finds version changes', () => {
+  const state = makeState({ cursor: null, etag: '"h1"' });
+
+  it('scans the index on ticks 0, N and 2N: one listing read, one index read, one lookup per changed package', async () => {
+    for (const tickIndex of [indexTick(0), indexTick(1), indexTick(2)]) {
+      const changed = new Set(['Owner3-Package3', 'Owner7-Package7']);
+      const index = syntheticIndex(10, (n) => (changed.has(`Owner${n}-Package${n}`) ? '2.0.0' : '1.0.0'));
+      const fake = routes({ index, lookup: answerAll('2.0.0') });
+      const res = ok(await adapterWith(allVersions(10)).poll(makeCtx(fake, { tickIndex, state })));
+
+      expect(fake.callsTo('frontend/packages')).toHaveLength(1);
+      expect(fake.callsTo('package-index')).toHaveLength(1);
+      expect(lookupCalls(fake).map((c) => new URL(c.url).pathname)).toEqual([
+        '/api/experimental/package/Owner3/Package3/',
+        '/api/experimental/package/Owner7/Package7/',
+      ]);
+      const fromLookups = res.packages.filter((p) => p.packageId.startsWith('Owner'));
+      expect(ids(fromLookups)).toEqual(['Owner3-Package3', 'Owner7-Package7']);
+      expect(res.packages).toHaveLength(4 + 2);
+      expect(res.complete).toBe(true);
+      expect(res.etag).toBeNull();
+    }
+  });
+
+  it('makes no lookup and emits only listing packages when every indexed version matches the store', async () => {
+    const fake = routes({ index: syntheticIndex(50), lookup: answerAll() });
+    const res = ok(await adapterWith(allVersions(50)).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    expect(lookupCalls(fake)).toHaveLength(0);
+    expect(res.packages).toHaveLength(4);
+    expect(res.complete).toBe(true);
+  });
+
+  it('emits a full snapshot from the lookup, not from the lean index line', async () => {
+    const fake = routes({ index: realIndex, lookup: (_ns, _name) => json(JSON.parse(lookupFixtures.muji)) });
+    const res = ok(await adapterWith({ 'Muji-DynamicStorageForge': '1.0.0' }).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    const snapshot = res.packages.find((p) => p.packageId === 'Muji-DynamicStorageForge');
+    expect(snapshot).toEqual({
+      source: 'hexium:valheim',
+      store: 'hexium',
+      packageId: 'Muji-DynamicStorageForge',
+      owner: 'Muji',
+      name: 'DynamicStorageForge',
+      version: '1.0.1',
+      url: 'https://valheim.hexium.gg/mods/Muji/DynamicStorageForge',
+      iconUrl: 'https://cdn.hexium.gg/upload/1686/icon.png?6470',
+      description: expect.stringContaining('Dynamic forge storage'),
+      categories: ['Client & Server'],
+      isNsfw: false,
+      isDeprecated: false,
+      updatedAt: '2026-09-26T22:42:31.000000Z',
+      sizeBytes: 216262,
+    });
+    expect('previousVersion' in snapshot!).toBe(false);
+  });
+
+  it('reads the live lookup shapes, including multi-category packages, for the configured community', async () => {
+    const bodies: Record<string, string> = { 'denikson/BepInExPack_Valheim': lookupFixtures.bepinex, 'Smoothbrain/Building': lookupFixtures.building };
+    const fake = routes({ lookup: (ns, name) => json(bodies[`${ns}/${name}`] ?? '{}') });
+    const known = { 'denikson-BepInExPack_Valheim': '5.4.2350', 'Smoothbrain-Building': '1.2.6' };
+    const res = ok(await adapterWith(known).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    const byId = new Map(res.packages.map((p) => [p.packageId, p]));
+    expect(byId.get('denikson-BepInExPack_Valheim')).toMatchObject({ version: '5.4.2351', categories: ['Valheim 1.0', 'Client & Server'], sizeBytes: 702924 });
+    expect(byId.get('Smoothbrain-Building')).toMatchObject({ version: '1.2.7', categories: ['Quality of Life', 'Skill', 'Tools', 'Valheim 1.0', 'Client (& Server)'], sizeBytes: 107075 });
+  });
+
+  it('takes the lookup version as the truth when it differs from the index line', async () => {
+    const fake = routes({ index: syntheticIndex(3, () => '2.0.0'), lookup: answerAll('2.0.1') });
+    const res = ok(await adapterWith(allVersions(3)).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    expect(res.packages.filter((p) => p.packageId.startsWith('Owner')).every((p) => p.version === '2.0.1')).toBe(true);
+  });
+
+  it('never sends a conditional request for the index or a lookup', async () => {
+    const fake = routes({ index: syntheticIndex(3, () => '2.0.0'), lookup: answerAll() });
+    await adapterWith(allVersions(3)).poll(makeCtx(fake, { tickIndex: indexTick(1), state }));
+    for (const call of [...fake.callsTo('package-index'), ...lookupCalls(fake)]) {
+      expect(call.headers['if-none-match']).toBeUndefined();
+      expect(call.headers['if-modified-since']).toBeUndefined();
+    }
+  });
+
+  it('keeps the stored ETag and still scans the index when the listing answers 304 on an index tick', async () => {
+    const fake = createFakeFetch([[LISTING, () => new Response(null, { status: 304 })], [INDEX, () => text(syntheticIndex(3, () => '2.0.0'))], [LOOKUP_PREFIX, () => json(lookupBody('Owner1', 'Package1', '2.0.0'))]]);
+    const scanned = ok(await adapterWith(allVersions(3)).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    expect(scanned.packages.length).toBeGreaterThan(0);
+    expect(scanned.etag).toBe('"h1"');
+  });
+
+  it('skips a candidate the listing already delivered at the same version', async () => {
+    const line = '{"namespace":"GenesisMods","name":"zzzGenesisItemStacks","version_number":"2.1.0","file_format":"zip","file_size":10,"dependencies":[],"suggestions":[]}';
+    const fake = routes({ index: line, lookup: answerAll() });
+    const res = ok(await adapterWith({ 'GenesisMods-zzzGenesisItemStacks': '2.0.0' }).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    expect(lookupCalls(fake)).toHaveLength(0);
+    expect(res.packages.find((p) => p.packageId === 'GenesisMods-zzzGenesisItemStacks')?.version).toBe('2.1.0');
+  });
+
+  it('still looks a candidate up when the listing has it at another version', async () => {
+    const line = '{"namespace":"GenesisMods","name":"zzzGenesisItemStacks","version_number":"2.2.0","file_format":"zip","file_size":10,"dependencies":[],"suggestions":[]}';
+    const fake = routes({ index: line, lookup: answerAll('2.2.0') });
+    await adapterWith({ 'GenesisMods-zzzGenesisItemStacks': '2.0.0' }).poll(makeCtx(fake, { tickIndex: indexTick(1), state }));
+    expect(lookupCalls(fake)).toHaveLength(1);
+  });
+});
+
+describe('HexiumAdapter.poll — packages the store has never seen', () => {
+  const state = makeState({ cursor: null });
+
+  it('looks up packages missing from the store after bootstrap and emits them', async () => {
+    const fake = routes({ index: syntheticIndex(12, () => '1.0.0'), lookup: answerAll('1.0.0') });
+    const known = allVersions(12);
+    delete known['Owner4-Package4'];
+    delete known['Owner9-Package9'];
+    const res = ok(await adapterWith(known).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    expect(ids(res.packages.filter((p) => p.packageId.startsWith('Owner')))).toEqual(['Owner4-Package4', 'Owner9-Package9']);
+  });
+
+  it('turns them into new events and version changes of known packages into updates in the core diff', async () => {
+    const index = syntheticIndex(6, (n) => (n === 2 ? '1.1.0' : '1.0.0'));
+    const known = new Map(Object.entries(allVersions(6)));
+    known.delete('Owner5-Package5');
+    const fake = routes({ index, lookup: (ns, name) => json(lookupBody(ns, name, ns === 'Owner2' ? '1.1.0' : '1.0.0')) });
+    const res = ok(await adapterWith(known).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    const { events } = diffSnapshots(known, res.packages.filter((p) => p.packageId.startsWith('Owner')), FIXTURE_NOW);
+    expect(events.map((e) => [e.pkg.packageId, e.kind, e.versionFrom, e.versionTo]).sort()).toEqual([
+      ['Owner2-Package2', 'update', '1.0.0', '1.1.0'],
+      ['Owner5-Package5', 'new', null, '1.0.0'],
+    ]);
+  });
+});
+
+describe('HexiumAdapter.poll — lookup snapshots fail closed', () => {
+  const state = makeState({ cursor: null });
+  const known = { 'Owner1-Package1': '1.0.0' };
+
+  async function withLookup(mutate: (body: Lookup) => void, version = '2.0.0') {
+    const fake = routes({ index: syntheticIndex(1, () => version), lookup: answerAll(version, mutate) });
+    const res = ok(await adapterWith(known).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    return { res, snapshot: res.packages.find((p) => p.packageId === 'Owner1-Package1') };
+  }
+
+  it('marks a package NSFW when its community entry is missing or belongs to another community', async () => {
+    expect((await withLookup((b) => void (b.community_listings = []))).snapshot?.isNsfw).toBe(true);
+    expect((await withLookup((b) => void (b.community_listings = [{ community: 'riskofrain2', categories: ['Tools'], has_nsfw_content: false }]))).snapshot?.isNsfw).toBe(true);
+    expect((await withLookup((b) => void delete (b as Partial<Lookup>).community_listings)).snapshot?.isNsfw).toBe(true);
+    expect((await withLookup((b) => void (b.community_listings = 'valheim' as unknown as Record<string, unknown>[]))).snapshot?.isNsfw).toBe(true);
+  });
+
+  it.each([
+    ['missing', (entry: Record<string, unknown>) => void delete entry.has_nsfw_content],
+    ['null', (entry: Record<string, unknown>) => void (entry.has_nsfw_content = null)],
+    ['the string false', (entry: Record<string, unknown>) => void (entry.has_nsfw_content = 'false')],
+    ['zero', (entry: Record<string, unknown>) => void (entry.has_nsfw_content = 0)],
+    ['true', (entry: Record<string, unknown>) => void (entry.has_nsfw_content = true)],
+  ])('marks a package NSFW when has_nsfw_content is %s', async (_label, mutate) => {
+    expect((await withLookup((b) => mutate(b.community_listings[0]!))).snapshot?.isNsfw).toBe(true);
+  });
+
+  it('marks a package NSFW when any entry of the community is not exactly false', async () => {
+    const entry = { community: 'valheim', categories: ['Tools'], has_nsfw_content: false };
+    const { snapshot } = await withLookup((b) => void (b.community_listings = [entry, { ...entry, has_nsfw_content: true }]));
+    expect(snapshot?.isNsfw).toBe(true);
+  });
+
+  it('reads categories only from the configured community entry and keeps only strings', async () => {
+    const { snapshot } = await withLookup((b) => {
+      b.community_listings = [
+        { community: 'riskofrain2', categories: ['Other'], has_nsfw_content: false },
+        { community: 'valheim', categories: ['Tools', 7, null, 'Client'], has_nsfw_content: false },
+      ];
+    });
+    expect(snapshot).toMatchObject({ categories: ['Tools', 'Client'], isNsfw: false });
+  });
+
+  it('flags deprecation from the boolean and quarantines a non-boolean value', async () => {
+    expect((await withLookup((b) => void (b.is_deprecated = true))).snapshot?.isDeprecated).toBe(true);
+    for (const bad of [null, 'false', 0, undefined]) {
+      const { snapshot } = await withLookup((b) => void (b.is_deprecated = bad));
+      expect(snapshot, String(bad)).toBeUndefined();
+    }
+  });
+
+  it('counts unreadable lookups in one line without naming packages', async () => {
+    const fake = routes({ index: syntheticIndex(3, () => '2.0.0'), lookup: answerAll('2.0.0', (b) => void (b.is_deprecated = 'maybe')) });
+    const res = ok(await adapterWith(allVersions(3)).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    expect(res.packages.filter((p) => p.packageId.startsWith('Owner'))).toEqual([]);
+    expect(res.complete).toBe(false);
+    const lines = warnings().filter((l) => l.includes('skipped: index lines'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/lookups unreadable 3/);
+    expect(lines[0]).not.toContain('Owner');
+  });
+
+  it.each([
+    ['owner', (b: Lookup) => void (b.owner = 'Someone')],
+    ['name', (b: Lookup) => void (b.name = 'Other')],
+    ['latest', (b: Lookup) => void (b.latest = null as unknown as Lookup['latest'])],
+    ['version', (b: Lookup) => void (b.latest.version_number = '')],
+    ['date_updated', (b: Lookup) => void (b.date_updated = 'yesterday')],
+  ])('does not emit from a lookup with a wrong or unreadable %s', async (_label, mutate) => {
+    expect((await withLookup(mutate)).snapshot).toBeUndefined();
+  });
+
+  it('maps missing description and icon to null and ignores non-string values', async () => {
+    const { snapshot } = await withLookup((b) => {
+      b.latest.description = 42;
+      b.latest.icon = null;
+    });
+    expect(snapshot).toMatchObject({ description: null, iconUrl: null });
+  });
+
+  it('builds the package URL itself when package_url is not on the game host', async () => {
+    for (const url of ['https://evil.example/mods/Owner1/Package1', 'javascript:alert(1)', 42, undefined]) {
+      const { snapshot } = await withLookup((b) => void (b.package_url = url as string));
+      expect(snapshot?.url, String(url)).toBe(`${ORIGIN}/mods/Owner1/Package1`);
+    }
+  });
+
+  it('normalises date_updated to the canonical stamp', async () => {
+    const { snapshot } = await withLookup((b) => void (b.date_updated = '2026-09-26T22:42:31Z'));
+    expect(snapshot?.updatedAt).toBe('2026-09-26T22:42:31.000000Z');
+  });
+});
+
+describe('HexiumAdapter.poll — lookup failures defer without loss', () => {
+  const state = makeState({ cursor: null });
+  const index = syntheticIndex(8, () => '2.0.0');
+  const known = allVersions(8);
+
+  async function pollWith(lookup: LookupResponder, tickIndex = indexTick(1)) {
+    const fake = routes({ index, lookup });
+    const res = ok(await adapterWith(known).poll(makeCtx(fake, { tickIndex, state })));
+    return { fake, res, emitted: ids(res.packages.filter((p) => p.packageId.startsWith('Owner'))) };
+  }
+
+  it.each([
+    ['a 404', () => new Response('{"detail":"Not found."}', { status: 404 })],
+    ['a 500', () => new Response('', { status: 500 })],
+    ['a network error', () => Promise.reject(new TypeError('down'))],
+    ['a body that is not JSON', () => text('<html>maintenance</html>')],
+    ['a JSON array', () => json([])],
+    ['an oversized body', () => text(`{"pad":"${'x'.repeat(HEXIUM_LOOKUP_MAX_BYTES)}"}`)],
+  ])('emits nothing for a candidate whose lookup is %s and still emits the others', async (_label, failure) => {
+    const { res, emitted } = await pollWith((ns, name) => (ns === 'Owner3' ? failure() : json(lookupBody(ns, name, '2.0.0'))));
+    expect(emitted).toEqual(ownerIds(1, 8).filter((id) => id !== 'Owner3-Package3'));
+    expect(res.complete).toBe(false);
+    expect(warnings().filter((l) => l.includes('skipped: index lines'))).toHaveLength(1);
+  });
+
+  it('emits the deferred candidate on a later scan once its lookup works', async () => {
+    let healthy = false;
+    const lookup: LookupResponder = (ns, name) => (ns === 'Owner3' && !healthy ? new Response('', { status: 500 }) : json(lookupBody(ns, name, '2.0.0')));
+    const fake = routes({ index, lookup });
+    const first = ok(await adapterWith(known).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    expect(ids(first.packages)).not.toContain('Owner3-Package3');
+    healthy = true;
+    const second = ok(await adapterWith(known).poll(makeCtx(fake, { tickIndex: indexTick(2), state })));
+    expect(ids(second.packages)).toContain('Owner3-Package3');
+  });
+
+  it('stops looking up further packages after a 429', async () => {
+    const many = syntheticIndex(40, () => '2.0.0');
+    const fake = routes({ index: many, lookup: () => new Response('', { status: 429, headers: { 'retry-after': '60' } }) });
+    const res = ok(await adapterWith(allVersions(40)).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    expect(lookupCalls(fake).length).toBeLessThanOrEqual(CLOUDFLARE.simultaneousConnections);
+    expect(res.complete).toBe(false);
+    expect(res.packages.filter((p) => p.packageId.startsWith('Owner'))).toEqual([]);
+  });
+
+  it('never has more lookups in flight than the connection limit', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const many = syntheticIndex(40, () => '2.0.0');
+    const fake = routes({
+      index: many,
+      lookup: async (ns, name) => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        inFlight -= 1;
+        return json(lookupBody(ns, name, '2.0.0'));
+      },
+    });
+    await adapterWith(allVersions(40)).poll(makeCtx(fake, { tickIndex: indexTick(1), state }));
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(CLOUDFLARE.simultaneousConnections);
+  });
+});
+
+describe('HexiumAdapter.poll — candidate cap', () => {
+  const state = makeState({ cursor: null });
+  const cap = SOURCE_BUDGET.hexiumLookupsPerPoll;
+  const total = cap * 2 + 7;
+
+  it('looks up at most the cap per poll and reports the poll incomplete', async () => {
+    const fake = routes({ index: syntheticIndex(total, () => '2.0.0'), lookup: answerAll() });
+    const res = ok(await adapterWith(allVersions(total)).poll(makeCtx(fake, { tickIndex: indexTick(0), state })));
+    expect(lookupCalls(fake)).toHaveLength(cap);
+    expect(res.packages.filter((p) => p.packageId.startsWith('Owner'))).toHaveLength(cap);
+    expect(res.complete).toBe(false);
+    expect(fake.calls.length).toBeLessThanOrEqual(2 + cap);
+  });
+
+  it('loses nothing across consecutive scans: every changed package is emitted exactly once', async () => {
+    const known = new Map(Object.entries(allVersions(total)));
+    const emitted: string[] = [];
+    const fake = routes({ index: syntheticIndex(total, () => '2.0.0'), lookup: answerAll() });
+    let complete = false;
+    for (let scan = 0; scan < 10 && !complete; scan += 1) {
+      const res = ok(await adapterWith(known).poll(makeCtx(fake, { tickIndex: indexTick(scan), state })));
+      for (const p of res.packages.filter((s) => s.packageId.startsWith('Owner'))) {
+        emitted.push(p.packageId);
+        known.set(p.packageId, p.version);
+      }
+      complete = res.complete;
+    }
+    expect(complete).toBe(true);
+    expect(emitted.sort()).toEqual(ownerIds(1, total));
+    expect(lookupCalls(fake)).toHaveLength(total);
+  });
+
+  it('does not let as many always-failing packages as the cap starve the rest', async () => {
+    const stuck = new Set(ownerIds(1, cap).map((id) => id.split('-')[0]));
+    const known = new Map(Object.entries(allVersions(total)));
+    const fake = routes({
+      index: syntheticIndex(total, () => '2.0.0'),
+      lookup: (ns, name) => (stuck.has(ns) ? new Response('', { status: 404 }) : json(lookupBody(ns, name, '2.0.0'))),
+    });
+    for (let scan = 0; scan < 8; scan += 1) {
+      const res = ok(await adapterWith(known).poll(makeCtx(fake, { tickIndex: indexTick(scan), state })));
+      for (const p of res.packages.filter((s) => s.packageId.startsWith('Owner'))) known.set(p.packageId, p.version);
+    }
+    expect([...known].filter(([, version]) => version === '2.0.0')).toHaveLength(total - cap);
+  });
+});
+
+describe('HexiumAdapter.poll — hostile or reformatted index', () => {
+  const state = makeState({ cursor: null });
+  const changedIndex = syntheticIndex(6, (n) => (n === 2 || n === 4 ? '2.0.0' : '1.0.0'));
+  const known = allVersions(6);
+
+  async function candidates(index: string): Promise<string[]> {
+    const fake = routes({ index, lookup: answerAll() });
+    await adapterWith(known).poll(makeCtx(fake, { tickIndex: indexTick(1), state }));
+    return lookupCalls(fake).map((c) => new URL(c.url).pathname.split('/')[5]!).sort();
+  }
+
+  it('finds the same candidates with CRLF endings, blank lines and no trailing newline', async () => {
+    const lines = changedIndex.split('\n');
+    const expected = ['Package2', 'Package4'];
+    expect(await candidates(lines.join('\r\n') + '\r\n')).toEqual(expected);
+    expect(await candidates(`\n\n${lines.join('\n\n')}\n\n`)).toEqual(expected);
+    expect(await candidates(changedIndex)).toEqual(expected);
+  });
+
+  it('skips malformed, mistyped and unsafe lines and counts them in one warning', async () => {
+    const bad = ['not json', '{"namespace":"Owner2","name":"Package2"', '{"namespace":"..","name":"x","version_number":"9.9.9"}', '{"namespace":"a/b","name":"x","version_number":"9.9.9"}'];
+    const index = [changedIndex, ...bad].join('\n');
+    expect(await candidates(index)).toEqual(['Package2', 'Package4']);
+    const lines = warnings().filter((l) => l.includes('skipped: index lines'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/index lines 4/);
+  });
+
+  it('looks a package that appears twice up once', async () => {
+    const line = indexLine(2, '2.0.0');
+    expect(await candidates([changedIndex, line, line].join('\n'))).toEqual(['Package2', 'Package4']);
+  });
+
+  it('never builds a lookup URL from an unsafe name', async () => {
+    const evil = ['{"namespace":"Owner1","name":"../../v1/package","version_number":"9.9.9"}', '{"namespace":"Owner1","name":"x?y=1","version_number":"9.9.9"}', '{"namespace":"a b","name":"c","version_number":"9.9.9"}'];
+    const fake = routes({ index: evil.join('\n'), lookup: answerAll() });
+    await adapterWith().poll(makeCtx(fake, { tickIndex: indexTick(1), state }));
+    expect(lookupCalls(fake)).toHaveLength(0);
+  });
+
+  it('falls back to the listing packages when the index is unusable or too large', async () => {
+    const unusable: [string, string | (() => Response)][] = [
+      ['an html page', '<html>maintenance</html>'],
+      ['a JSON array', JSON.stringify([{ namespace: 'a', name: 'b', version_number: '1.0.0' }])],
+      ['a 500', () => new Response('', { status: 500 })],
+      ['a huge line', `{"namespace":"a","name":"b","version_number":"1.0.0","d":"${'x'.repeat(200_000)}"}`],
+      ['too many lines', syntheticIndex(HEXIUM_INDEX_MAX_LINES + 5)],
+      ['an oversized body', `${changedIndex}\n${' '.repeat(HEXIUM_INDEX_MAX_BYTES)}`],
+    ];
+    for (const [label, body] of unusable) {
+      const fake = routes({ index: body, lookup: answerAll() });
+      const res = ok(await adapterWith(known).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+      expect(res.packages, label).toHaveLength(4);
+      expect(lookupCalls(fake), label).toHaveLength(0);
+    }
+  });
+
+  it('never reads the index more than once per poll', async () => {
+    const fake = routes({ index: changedIndex, lookup: answerAll() });
+    await adapterWith(known).poll(makeCtx(fake, { tickIndex: indexTick(1), state }));
+    expect(fake.callsTo('package-index')).toHaveLength(1);
+  });
+});
+
+describe('HexiumAdapter.poll — subrequest budget', () => {
+  const state = makeState({ cursor: null });
+
+  it('stays within listing + index + the per-poll lookup cap even when every package changed', async () => {
+    const fake = routes({ index: syntheticIndex(500, () => '2.0.0'), lookup: answerAll() });
+    await adapterWith(allVersions(500)).poll(makeCtx(fake, { tickIndex: indexTick(1), state }));
+    expect(fake.calls.length).toBe(2 + SOURCE_BUDGET.hexiumLookupsPerPoll);
+  });
+
+  it('stays within the cold-start budget: one index read per seed poll and nothing else', async () => {
+    const fake = routes({ index: syntheticIndex(500) });
+    await adapterWith().poll(makeCtx(fake, { state: null }));
+    expect(fake.calls.map((c) => c.url)).toEqual([INDEX]);
+  });
+});
+
+describe('HexiumAdapter.poll — cold start seeding', () => {
+  const count = SOURCE_BUDGET.hexiumSeedSlices;
+  const index = syntheticIndex(400);
+  const everyId = ownerIds(1, 400);
+  const sliceIds = (slice: number, source = index): string[] => {
+    const out: string[] = [];
+    scanPackageIndex(source, (e) => {
+      if (seedSliceOf(e.namespace, e.name, count) === slice) out.push(`${e.namespace}-${e.name}`);
+    });
+    return out.sort();
+  };
+
+  it('seeds slice 0 first from the index alone: lean snapshots, no listing, no lookups, no events', async () => {
+    const fake = routes({ index, lookup: answerAll() });
+    const res = ok(await adapterWith().poll(makeCtx(fake, { state: null })));
+    expect(fake.calls.map((c) => c.url)).toEqual([INDEX]);
+    expect(ids(res.packages)).toEqual(sliceIds(0));
+    expect(res.cursor).toBe('seed:1');
+    expect(res.complete).toBe(false);
+    expect(res.etag).toBeNull();
+    for (const p of res.packages) {
+      expect(p).toMatchObject({
+        source: 'hexium:valheim',
+        store: 'hexium',
+        version: '1.0.0',
+        url: `${ORIGIN}/mods/${p.owner}/${p.name}`,
+        iconUrl: null,
+        description: null,
+        categories: [],
+        isNsfw: false,
+        isDeprecated: false,
+        updatedAt: '2026-09-27T12:00:00.000000Z',
+      });
+      expect(p.sizeBytes).toBe(100_000 + Number(p.owner.slice(5)));
+      expect(p.previousVersion).toBeUndefined();
+    }
+  });
+
+  it('walks every slice, covers each package exactly once, and ends with a complete poll and no cursor', async () => {
+    const fake = routes({ index });
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let slice = 0; slice < count; slice += 1) {
+      const res = ok(await adapterWith().poll(makeCtx(fake, { state: cursor === null ? null : makeState({ cursor, bootstrapped: false }) })));
+      seen.push(...ids(res.packages));
+      expect(res.complete).toBe(slice === count - 1);
+      cursor = res.cursor;
+    }
+    expect(cursor).toBeNull();
+    expect(seen.sort()).toEqual(everyId);
+    expect(fake.callsTo('frontend/packages')).toHaveLength(0);
+    expect(lookupCalls(fake)).toHaveLength(0);
+  });
+
+  it('keeps every package in its own slice when the index changes between polls', async () => {
+    const before = ok(await adapterWith().poll(makeCtx(routes({ index }), { state: null })));
+    const changed = syntheticIndex(420, (n) => (n % 2 === 0 ? '3.0.0' : '1.0.0')).split('\n').filter((line) => !line.includes('"Owner10"')).join('\n');
+    const after = ok(await adapterWith().poll(makeCtx(routes({ index: changed }), { state: makeState({ cursor: before.cursor, bootstrapped: false }) })));
+    expect(ids(after.packages)).toEqual(sliceIds(1, changed));
+    expect(after.packages.every((p) => seedSliceOf(p.owner, p.name, count) === 1)).toBe(true);
+    expect(after.cursor).toBe('seed:2');
+  });
+
+  it('restarts from the first slice for a legacy, out-of-range or garbage seed cursor', async () => {
+    for (const cursor of ['seed:2:2026-09-20T05:18:45.000000Z', `seed:${count}`, 'seed:99', 'seed:-1', 'seed:x', 'seed:', 'garbage', '2026-09-20T05:18:45.000000Z', null]) {
+      const res = ok(await adapterWith().poll(makeCtx(routes({ index }), { state: makeState({ cursor, bootstrapped: false }) })));
+      expect(ids(res.packages), String(cursor)).toEqual(sliceIds(0));
+      expect(res.cursor, String(cursor)).toBe('seed:1');
+    }
+  });
+
+  it('resumes at the stored slice', async () => {
+    const res = ok(await adapterWith().poll(makeCtx(routes({ index }), { state: makeState({ cursor: 'seed:3', bootstrapped: false }) })));
+    expect(ids(res.packages)).toEqual(sliceIds(3));
+    expect(res.cursor).toBe('seed:4');
+  });
+
+  it('does not seed a bootstrapped source, even without a cursor', async () => {
+    const fake = routes({ index });
+    const res = ok(await adapterWith(allVersions(400)).poll(makeCtx(fake, { tickIndex: LISTING_TICK, state: makeState({ cursor: null, bootstrapped: true }) })));
+    expect(fake.callsTo('package-index')).toHaveLength(0);
+    expect(res.packages).toHaveLength(4);
+  });
+
+  it('seeds silently: a seeded package later updates through a lookup and is not new', async () => {
+    const seeded = new Map<string, string>();
+    let cursor: string | null = null;
+    for (let slice = 0; slice < count; slice += 1) {
+      const res = ok(await adapterWith().poll(makeCtx(routes({ index }), { state: cursor === null ? null : makeState({ cursor, bootstrapped: false }) })));
+      for (const p of res.packages) seeded.set(p.packageId, p.version);
+      cursor = res.cursor;
+    }
+    const later = syntheticIndex(401, (n) => (n === 7 || n === 401 ? '2.0.0' : '1.0.0'));
+    const fake = routes({ index: later, lookup: (ns, name) => json(lookupBody(ns, name, '2.0.0')) });
+    const res = ok(await adapterWith(seeded).poll(makeCtx(fake, { tickIndex: indexTick(1), state: makeState({ cursor: null }) })));
+    const { events } = diffSnapshots(seeded, res.packages.filter((p) => p.packageId.startsWith('Owner')), FIXTURE_NOW);
+    expect(events.map((e) => [e.pkg.packageId, e.kind, e.versionFrom]).sort()).toEqual([
+      ['Owner401-Package401', 'new', null],
+      ['Owner7-Package7', 'update', '1.0.0'],
+    ]);
+    expect(events.every((e) => e.pkg.isNsfw === false && e.pkg.description !== null)).toBe(true);
+  });
+
+  it('seeds an empty index to completion', async () => {
+    const res = ok(await adapterWith().poll(makeCtx(routes({ index: '' }), { state: makeState({ cursor: `seed:${count - 1}`, bootstrapped: false }) })));
+    expect(res).toMatchObject({ packages: [], cursor: null, complete: true });
+  });
+
+  it('is skipped, not thrown, on an unusable index or upstream errors', async () => {
+    for (const responder of [
+      () => text('<html>maintenance</html>'),
+      () => text(JSON.stringify([{ namespace: 'a', name: 'b', version_number: '1.0.0' }])),
+      () => new Response('', { status: 502 }),
+      () => new Response('', { status: 429, headers: { 'retry-after': '60' } }),
+      () => Promise.reject(new TypeError('down')),
+      () => text(syntheticIndex(HEXIUM_INDEX_MAX_LINES + 5)),
+    ]) {
+      const fake = routes({ index: responder });
+      await expect(adapterWith().poll(makeCtx(fake, { state: null }))).resolves.toEqual({ status: 'skipped' });
+    }
+  });
+
+  it('keeps a slice small on the largest index it accepts', async () => {
+    const big = syntheticIndex(HEXIUM_INDEX_MAX_LINES);
+    const res = ok(await adapterWith().poll(makeCtx(routes({ index: big }), { state: null })));
+    expect(res.packages.length).toBeLessThanOrEqual(Math.ceil((HEXIUM_INDEX_MAX_LINES / count) * 1.3));
+  });
+
+  it('counts unreadable index lines in one warning while seeding', async () => {
+    const res = ok(await adapterWith().poll(makeCtx(routes({ index: [index, 'garbage', 'more garbage'].join('\n') }), { state: null })));
+    expect(res.packages.length).toBeGreaterThan(0);
+    expect(warnings().filter((l) => l.includes('skipped: index lines 2'))).toHaveLength(1);
   });
 });
 
 describe('HexiumAdapter.reconcile', () => {
-  const now = new Date('2026-09-20T12:00:00Z');
-  const day = Math.floor(now.getTime() / 86_400_000);
-  const slice = day % 4;
-  const inSlice = truth.filter((t) => seq(t) % 4 === slice);
+  const cap = SOURCE_BUDGET.hexiumLookupsPerReconcile;
 
-  it('returns the day’s slice with full detail for changed or unknown packages and lean records otherwise', async () => {
-    const [changed, same, ...rest] = inSlice;
-    expect(rest.length + 2).toBe(inSlice.length);
-    const known: Record<string, string> = {};
-    const leanVersion = (name: string): string => {
-      const at = dumpFixture.indexOf(`"full_name":"${name}"`);
-      const vAt = dumpFixture.indexOf('"version_number":"', at);
-      return dumpFixture.slice(vAt + 18, dumpFixture.indexOf('"', vAt + 18));
-    };
-    known[same!.full_name] = leanVersion(same!.full_name);
-    known[changed!.full_name] = '0.0.0';
-
-    const fake = routes();
-    const out = await adapterWith(known).reconcile!(makeCtx(fake, { now }));
-    expect(ids(out)).toEqual(inSlice.map((t) => t.full_name).sort());
-    expect(out.find((p) => p.packageId === same!.full_name)?.description).toBeNull();
-    expect(out.find((p) => p.packageId === changed!.full_name)?.description).not.toBeNull();
-    for (const p of out) {
-      const t = truth.find((x) => x.full_name === p.packageId)!;
-      expect(p.isNsfw).toBe(t.has_nsfw_content);
-      expect(p.isDeprecated).toBe(t.is_deprecated);
-    }
-    expect(fake.calls).toHaveLength(1);
-    expect(fake.calls[0]?.url).toBe(DUMP);
+  it('makes one index read, looks up only changed and unseen packages, and returns full snapshots', async () => {
+    const index = syntheticIndex(30, (n) => (n === 3 ? '2.0.0' : '1.0.0'));
+    const known = allVersions(30);
+    delete known['Owner9-Package9'];
+    const fake = routes({ index, lookup: (ns, name) => json(lookupBody(ns, name, ns === 'Owner3' ? '2.0.0' : '1.0.0')) });
+    const out = await adapterWith(known).reconcile!(makeCtx(fake));
+    expect(ids(out)).toEqual(['Owner3-Package3', 'Owner9-Package9']);
+    expect(out.every((p) => p.description !== null && p.updatedAt !== '')).toBe(true);
+    expect(fake.callsTo('package-index')).toHaveLength(1);
+    expect(fake.callsTo('frontend/packages')).toHaveLength(0);
+    expect(lookupCalls(fake)).toHaveLength(2);
   });
 
-  it('rotates through all slices on consecutive days', async () => {
+  it('returns nothing and makes no lookup when the store is up to date', async () => {
+    const fake = routes({ index: syntheticIndex(30), lookup: answerAll() });
+    expect(await adapterWith(allVersions(30)).reconcile!(makeCtx(fake))).toEqual([]);
+    expect(fake.calls.map((c) => c.url)).toEqual([INDEX]);
+  });
+
+  it('caps the lookups per run and covers every changed package over consecutive slice hints', async () => {
+    const total = cap * 2 + 5;
+    const known = new Map(Object.entries(allVersions(total)));
+    const fake = routes({ index: syntheticIndex(total, () => '2.0.0'), lookup: answerAll() });
+    const first = await adapterWith(known).reconcile!(makeCtx(fake, { sliceHint: 0 }));
+    expect(first).toHaveLength(cap);
+    expect(fake.calls.length).toBe(1 + cap);
+
     const seen = new Set<string>();
-    for (let d = 0; d < 4; d += 1) {
-      const out = await adapterWith().reconcile!(makeCtx(routes(), { now: new Date(now.getTime() + d * 86_400_000) }));
+    for (let hint = 0; hint < 10 && seen.size < total; hint += 1) {
+      const out = await adapterWith(known).reconcile!(makeCtx(fake, { sliceHint: hint }));
       out.forEach((p) => seen.add(p.packageId));
+      out.forEach((p) => known.set(p.packageId, p.version));
     }
-    expect([...seen].sort()).toEqual(truth.map((t) => t.full_name).sort());
+    expect([...seen].sort()).toEqual(ownerIds(1, total));
   });
 
-  it('throws on upstream failure or an unusable body rather than returning an empty sweep', async () => {
-    for (const responder of [() => new Response('', { status: 503 }), () => text('<html>maintenance</html>')]) {
-      const fake = createFakeFetch([[DUMP, responder]]);
-      await expect(adapterWith().reconcile!(makeCtx(fake, { now }))).rejects.toThrow();
+  it('works without a slice hint', async () => {
+    const fake = routes({ index: syntheticIndex(5, () => '2.0.0'), lookup: answerAll() });
+    expect(await adapterWith(allVersions(5)).reconcile!(makeCtx(fake))).toHaveLength(5);
+  });
+
+  it('throws on an upstream failure or an unusable index rather than returning an empty sweep', async () => {
+    for (const index of [() => new Response('', { status: 503 }), () => text('<html>maintenance</html>'), () => text(syntheticIndex(HEXIUM_INDEX_MAX_LINES + 5))]) {
+      await expect(adapterWith().reconcile!(makeCtx(routes({ index })))).rejects.toThrow();
     }
+  });
+
+  it('throws when the index needs lookups and none of them works', async () => {
+    const fake = routes({ index: syntheticIndex(5, () => '2.0.0'), lookup: () => new Response('', { status: 500 }) });
+    await expect(adapterWith(allVersions(5)).reconcile!(makeCtx(fake))).rejects.toThrow();
+  });
+
+  it('returns what it could look up when only some lookups fail', async () => {
+    const fake = routes({ index: syntheticIndex(5, () => '2.0.0'), lookup: (ns, name) => (ns === 'Owner2' ? new Response('', { status: 404 }) : json(lookupBody(ns, name, '2.0.0'))) });
+    const out = await adapterWith(allVersions(5)).reconcile!(makeCtx(fake));
+    expect(ids(out)).toEqual(ownerIds(1, 5).filter((id) => id !== 'Owner2-Package2'));
+  });
+
+  it('marks packages NSFW when their community entry is missing, like a poll', async () => {
+    const fake = routes({ index: syntheticIndex(2, () => '2.0.0'), lookup: answerAll('2.0.0', (b) => void (b.community_listings = [])) });
+    const out = await adapterWith(allVersions(2)).reconcile!(makeCtx(fake));
+    expect(out.every((p) => p.isNsfw)).toBe(true);
   });
 });
 
@@ -323,232 +849,19 @@ describe('HexiumAdapter.fetchChangelog', () => {
     const fake = createFakeFetch([['/changelog/', () => new Response('', { status: 500 })]]);
     expect(await adapterWith().fetchChangelog(makeCtx(fake), pkg, '5.4.2350')).toEqual({ excerpt: null, url: null });
   });
-});
-
-describe('HexiumAdapter — unreadable records are quarantined', () => {
-  const warnings = (): string[] => vi.mocked(console.warn).mock.calls.map((call) => String(call[0]));
-  const names = (from: number, to: number, skip: number[] = []): string[] =>
-    Array.from({ length: to - from + 1 }, (_, i) => from + i)
-      .filter((n) => !skip.includes(n))
-      .map((n) => `Owner${n}-P${n}`)
-      .sort();
-
-  it('seeds through an unreadable record, reaches a plain cursor, and logs one count-only line per affected poll', async () => {
-    const fake = routes(dump(20, (n) => (n === 5 ? { versions: 0 } : {})));
-    let res = ok(await adapterWith().poll(makeCtx(fake, { state: null })));
-    const seen = ids(res.packages);
-    for (let slice = 1; slice < 4; slice += 1) {
-      expect(res.complete).toBe(false);
-      res = ok(await adapterWith().poll(nextCtx(fake, res, { state: makeState({ cursor: res.cursor, bootstrapped: slice === 1 }) })));
-      seen.push(...ids(res.packages));
-    }
-    expect(res.complete).toBe(true);
-    expect(res.cursor).toBe(stampFor(20));
-    expect(seen.sort()).toEqual(names(1, 20, [5]));
-    const lines = warnings().filter((line) => line.includes('unreadable'));
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatch(/unreadable dump records skipped: 1$/);
-    expect(lines[0]).not.toContain('Owner5');
-  });
-
-  it('advances the cursor past an unreadable record in steady state and stops re-reading the records behind it', async () => {
-    const fake = routes(dump(10, (n) => (n === 5 ? { versions: 0 } : {})));
-    const first = ok(await adapterWith().poll(makeCtx(fake, { tickIndex: 0, state: makeState({ cursor: stampFor(0) }) })));
-    expect(first.complete).toBe(true);
-    expect(first.cursor).toBe(stampFor(10));
-    expect(ids(first.packages)).toEqual(names(1, 10, [5]));
-    expect(warnings().filter((line) => line.includes('unreadable'))).toHaveLength(1);
-
-    const second = ok(await adapterWith().poll(nextCtx(fake, first, { tickIndex: 0 })));
-    expect(ids(second.packages)).toEqual(names(10, 10));
-    expect(second.cursor).toBe(stampFor(10));
-  });
-
-  it('holds the cursor and falls back to the listing when no matched record is readable', async () => {
-    const fake = routes(dump(10, () => ({ versions: 0 })));
-    const res = ok(await adapterWith().poll(makeCtx(fake, { tickIndex: 0, state: makeState({ cursor: stampFor(0) }) })));
-    expect(res.cursor).toBe(stampFor(0));
-    expect(res.packages).toHaveLength(4);
-    expect(fake.callsTo('frontend/packages')).toHaveLength(1);
-  });
-});
-
-describe('HexiumAdapter — cursor validation', () => {
-  const state = (cursor: string) => makeState({ cursor });
-
-  it('never moves the cursor backwards', async () => {
-    const cursor = '2026-06-01T00:00:00.000000Z';
-    const res = ok(await adapterWith().poll(makeCtx(routes(dump(10)), { tickIndex: 0, state: state(cursor) })));
-    expect(res.cursor).toBe(cursor);
-    expect(res.packages).toEqual([]);
-  });
-
-  it('keeps a far-future record out of the cursor but still reports it', async () => {
-    const text = dump(5, (n) => (n === 3 ? { updated: '2999-01-01T00:00:00.000000Z' } : {}));
-    const res = ok(await adapterWith().poll(makeCtx(routes(text), { tickIndex: 0, state: state(stampFor(0)) })));
-    expect(res.cursor).toBe(stampFor(5));
-    expect(ids(res.packages)).toContain('Owner3-P3');
-  });
-
-  it('accepts a stamp up to an hour ahead of now and rejects one beyond', async () => {
-    const at = (iso: string) => routes(dump(3, (n) => (n === 2 ? { updated: iso } : {})));
-    const now = new Date('2026-09-19T00:05:00Z');
-    const within = ok(await adapterWith().poll(makeCtx(at('2026-09-19T01:00:00.000000Z'), { tickIndex: 0, now, state: state(stampFor(0)) })));
-    expect(within.cursor).toBe('2026-09-19T01:00:00.000000Z');
-    const beyond = ok(await adapterWith().poll(makeCtx(at('2026-09-19T01:20:00.000000Z'), { tickIndex: 0, now, state: state(stampFor(0)) })));
-    expect(beyond.cursor).toBe(stampFor(3));
-  });
-
-  it('skips a record with a garbage stamp without poisoning the cursor', async () => {
-    const text = dump(5, (n) => (n === 3 ? { updatedField: '"zzzzzzzzzzTzzzzzzzzzzzzzzzZ"' } : {}));
-    const res = ok(await adapterWith().poll(makeCtx(routes(text), { tickIndex: 0, state: state(stampFor(0)) })));
-    expect(res.cursor).toBe(stampFor(5));
-    expect(ids(res.packages)).toEqual(['Owner1-P1', 'Owner2-P2', 'Owner4-P4', 'Owner5-P5']);
-  });
-
-  it('keeps a far-future record out of the seed mark', async () => {
-    const text = dump(20, (n) => (n === 3 ? { updated: '2999-01-01T00:00:00.000000Z' } : {}));
-    const res = ok(await adapterWith().poll(makeCtx(routes(text), { state: null })));
-    expect(res.cursor).toBe(`seed:1:${stampFor(20)}`);
-  });
-
-  it('clamps a stored cursor from the future to now, so newer records are not skipped forever', async () => {
-    const text = dump(5, (n) => (n === 3 ? { updated: '2026-09-20T12:30:00.000000Z' } : {}));
-    const res = ok(await adapterWith().poll(makeCtx(routes(text), { tickIndex: 0, state: state('2099-01-01T00:00:00.000000Z') })));
-    expect(ids(res.packages)).toEqual(['Owner3-P3']);
-    expect(res.cursor).toBe('2026-09-20T12:30:00.000000Z');
-  });
-
-  it('holds a clamped cursor at now when nothing newer exists', async () => {
-    const res = ok(await adapterWith().poll(makeCtx(routes(dump(5)), { tickIndex: 0, state: state('2099-01-01T00:00:00.000000Z') })));
-    expect(res.packages).toEqual([]);
-    expect(res.cursor).toBe('2026-09-20T12:00:00.000000Z');
-  });
-
-  it('leaves a cursor within the future slack untouched', async () => {
-    const cursor = '2026-09-20T12:30:00.000000Z';
-    const res = ok(await adapterWith().poll(makeCtx(routes(dump(5)), { tickIndex: 0, state: state(cursor) })));
-    expect(res.cursor).toBe(cursor);
-  });
-
-  it('clamps a seed mark from the future while seeding', async () => {
-    const res = ok(await adapterWith().poll(makeCtx(routes(dump(20)), { state: makeState({ cursor: 'seed:1:2099-01-01T00:00:00.000000Z', bootstrapped: false }) })));
-    expect(res.cursor).toBe('seed:2:2026-09-20T12:00:00.000000Z');
-  });
-
-  it('ends the seed on a clamped mark', async () => {
-    const res = ok(await adapterWith().poll(makeCtx(routes(dump(20)), { state: makeState({ cursor: 'seed:3:2099-01-01T00:00:00.000000Z', bootstrapped: false }) })));
-    expect(res.cursor).toBe('2026-09-20T12:00:00.000000Z');
-    expect(res.complete).toBe(true);
-  });
-
-  it('ignores a garbage seed mark and recomputes it', async () => {
-    const res = ok(await adapterWith().poll(makeCtx(routes(dump(20)), { state: makeState({ cursor: 'seed:1:zzzz', bootstrapped: false }) })));
-    expect(res.cursor).toBe(`seed:2:${stampFor(20)}`);
-  });
-});
-
-describe('HexiumAdapter — listing flags fail closed', () => {
-  const state = makeState({ cursor: '2026-09-20T02:00:00.000000Z' });
-
-  async function listing(mutate: (item: Record<string, unknown>) => void) {
-    const body = JSON.parse(listingFixture) as { packages: Record<string, unknown>[] };
-    mutate(body.packages[0]!);
-    const fake = createFakeFetch([[LISTING, () => json(body)]]);
-    return ok(await adapterWith().poll(makeCtx(fake, { tickIndex: 1, state })));
-  }
-
-  it.each([
-    ['missing', (item: Record<string, unknown>) => void delete item.has_nsfw_content],
-    ['null', (item: Record<string, unknown>) => void (item.has_nsfw_content = null)],
-    ['a string', (item: Record<string, unknown>) => void (item.has_nsfw_content = 'false')],
-    ['a number', (item: Record<string, unknown>) => void (item.has_nsfw_content = 0)],
-  ])('marks an item NSFW when its flag is %s', async (_label, mutate) => {
-    const res = await listing(mutate);
-    expect(res.packages[0]?.isNsfw).toBe(true);
-    expect(res.packages[1]?.isNsfw).toBe(false);
-  });
-
-  it('treats a non-boolean deprecated flag as not deprecated', async () => {
-    const res = await listing((item) => void (item.is_deprecated = 'yes'));
-    expect(res.packages[0]?.isDeprecated).toBe(false);
-  });
-
-  it('leaves previousVersion unknown for listing items', async () => {
-    const res = await listing(() => {});
-    expect(res.packages.every((p) => p.previousVersion === undefined)).toBe(true);
-  });
-});
-
-describe('HexiumAdapter — previousVersion', () => {
-  it('is carried from the dump history into steady-state snapshots and unknown for lean seeds', async () => {
-    const fake = routes(dump(12));
-    const steady = ok(await adapterWith().poll(makeCtx(fake, { tickIndex: 0, state: makeState({ cursor: stampFor(0) }) })));
-    const byId = new Map(steady.packages.map((p) => [p.packageId, p]));
-    expect(byId.get('Owner3-P3')).toMatchObject({ version: '1.0.3', previousVersion: '1.0.2' });
-    expect(byId.get('Owner6-P6')).toMatchObject({ version: '1.0.0', previousVersion: null });
-
-    const seed = ok(await adapterWith().poll(makeCtx(fake, { state: null })));
-    expect(seed.packages.length).toBeGreaterThan(0);
-    expect(seed.packages.every((p) => p.previousVersion === undefined)).toBe(true);
-  });
-});
-
-describe('HexiumAdapter.reconcile — slice hint', () => {
-  const now = new Date('2026-09-20T12:00:00Z');
-  const sliceOf = (index: number) => truth.filter((t) => seq(t) % 4 === index).map((t) => t.full_name).sort();
-
-  it('uses sliceHint modulo the slice count instead of the day', async () => {
-    for (const [hint, index] of [[0, 0], [1, 1], [2, 2], [3, 3], [6, 2], [7, 3]] as const) {
-      const out = await adapterWith().reconcile!(makeCtx(routes(), { now, sliceHint: hint }));
-      expect(ids(out), `hint ${hint}`).toEqual(sliceOf(index));
-    }
-  });
-
-  it('covers every slice when the same day runs with consecutive hints', async () => {
-    const seen = new Set<string>();
-    for (let hint = 10; hint < 14; hint += 1) {
-      (await adapterWith().reconcile!(makeCtx(routes(), { now, sliceHint: hint }))).forEach((p) => seen.add(p.packageId));
-    }
-    expect([...seen].sort()).toEqual(truth.map((t) => t.full_name).sort());
-  });
-
-  it('falls back to the day-based slice without a hint', async () => {
-    const out = await adapterWith().reconcile!(makeCtx(routes(), { now }));
-    expect(ids(out)).toEqual(sliceOf(Math.floor(now.getTime() / 86_400_000) % 4));
-  });
-});
-
-describe('HexiumAdapter.fetchChangelog — size cap', () => {
-  const pkg = {
-    source: 'hexium:valheim',
-    store: 'hexium' as const,
-    packageId: 'a-b',
-    owner: 'a',
-    name: 'b',
-    version: '1.0.0',
-    url: `${ORIGIN}/mods/a/b`,
-    iconUrl: null,
-    description: null,
-    categories: [],
-    isNsfw: false,
-    isDeprecated: false,
-    updatedAt: '2026-09-09T12:30:12.000000Z',
-    sizeBytes: null,
-  };
 
   it('refuses a changelog body above the changelog cap without parsing it', async () => {
-    const huge = JSON.stringify({ markdown: `## 1.0.0\n${'- entry\n'.repeat(60_000)}` });
+    const huge = JSON.stringify({ markdown: `## 5.4.2350\n${'- entry\n'.repeat(60_000)}` });
     expect(huge.length).toBeGreaterThan(300_000);
     const fake = createFakeFetch([['/changelog/', () => text(huge)]]);
     const spy = vi.spyOn(JSON, 'parse');
-    expect(await adapterWith().fetchChangelog(makeCtx(fake), pkg, '1.0.0')).toEqual({ excerpt: null, url: null });
+    expect(await adapterWith().fetchChangelog(makeCtx(fake), pkg, '5.4.2350')).toEqual({ excerpt: null, url: null });
     expect(spy).not.toHaveBeenCalled();
   });
 
   it('still reads a changelog just below the cap', async () => {
-    const body = JSON.stringify({ markdown: `## 1.0.0\n- fixed a thing\n${'x'.repeat(100_000)}` });
+    const body = JSON.stringify({ markdown: `## 5.4.2350\n- fixed a thing\n${'x'.repeat(100_000)}` });
     const fake = createFakeFetch([['/changelog/', () => text(body)]]);
-    expect((await adapterWith().fetchChangelog(makeCtx(fake), pkg, '1.0.0')).excerpt).toContain('fixed a thing');
+    expect((await adapterWith().fetchChangelog(makeCtx(fake), pkg, '5.4.2350')).excerpt).toContain('fixed a thing');
   });
 });

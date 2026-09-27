@@ -135,7 +135,7 @@ reconciliation.
 
 ## Hexium
 
-Base: `https://{game}.hexium.gg` for the listing, dump, index, package detail and
+Base: `https://{game}.hexium.gg` for the listing, package index, per-package lookup and
 changelog. `hexium.gg` also serves changelogs but cannot resolve
 `frontend/p/...` (404). Gale uses the bare host for `/api/experimental/package/...`.
 
@@ -179,110 +179,112 @@ ignored, not honoured. Do not retry this.
 
 The website does serve `?sort=updated`, so the backend supports the ordering; it
 is simply not exposed on the API. Worth asking Hexium to expose it — a one-line
-change on their side that would remove the need for dump polling entirely.
-Until then, updates to existing Hexium packages come from the `/api/v1/package/` dump.
+change on their side that would remove the need for the index comparison entirely.
+Until then, updates to existing Hexium packages are found by comparing the package
+index with the stored versions (next section).
 
-### Full dump: `/api/v1/package/` — the update source
+### Update source: package index plus per-package lookup
 
-**[live]** `GET /api/v1/package/` on `{game}.hexium.gg` returns one compact JSON
-array with a record per package. Valheim, 2026-09-20: 1113 records, 4,461,836
-bytes raw (4,461,314 characters), ~425 KB gzip (`content-encoding: gzip`,
-chunked), **no `ETag` or `Last-Modified`**. The largest record is 173,566
-characters; 377 packages have a single version and the most versions on one
-package is 41.
+**Why not the full dump.** **[live]** (2026-09-20 and 2026-09-26) `GET /api/v1/package/` carries the
+full version history of every package, so it grows without bound: 4.4 MB (1113
+packages) on 2026-09-20, 6.7 MB raw (~614 KB gzip; 1318 packages, 5685 versions,
+about 1.2 KB per version) on 2026-09-26. A scan already cost ~9 ms CPU and the body
+exceeded `MAX_SCAN_BYTES` (6 MiB), so production polls were skipped. Not viable; the
+adapter no longer reads it. Query parameters `q`, `search` and `page` are ignored by
+both the dump and the listing.
 
-Record keys: `name, full_name, owner, package_url, donation_link, date_created,
-date_updated, uuid4, rating_score, is_pinned, is_deprecated, has_nsfw_content,
-categories[], versions[]`. `versions[]` items: `name, full_name, description,
-icon, version_number, dependencies, suggestions, download_url, downloads,
-date_created, website_url, is_active, uuid4, file_size`.
+**Package index** **[live]** (2026-09-27) `GET /api/experimental/package-index/`: NDJSON,
+`application/x-ndjson`, chunked, no `ETag`, no `Last-Modified`, no `Content-Length`,
+no trailing newline. One line per package with only the latest version:
 
-- Records are separated by `}]},{"name":"` (the last version object closes, the
-  array closes, the record closes; `"versions":[]},{"name":"` for a record with
-  no versions) and version items by `},{"name":"`; neither sequence can occur
-  inside a JSON string (a quote there is escaped). A version item that itself ends
-  with an array (`...]},{"name":"`) is not a record boundary. The scanner cuts the
-  body at the record separator and only ever searches inside one record or one
-  version item, so every search is bounded by the record and the total cost is
-  linear in the body size. A region that does not end with the record close is
-  unreadable and quarantined, and so is a region holding a second `date_updated`
-  marker (the separators were lost); the second-marker check runs on every full
-  extraction and, in lean mode, on records over 16 KiB. There is no per-record size
-  limit: a real record with hundreds of versions is about 4.2 KB per version, and
-  the body as a whole is bounded by `MAX_SCAN_BYTES`.
-- `"date_updated":"` occurs exactly once per record, in the header before
-  `versions[]`. The first eight hex digits of `uuid4` are only sometimes a
-  sequential creation id (410 of 1113 real records); slicing by them modulo the
-  slice count is still stable, because the value is a fixed property of the record.
-- `versions[]` is not reliably ordered: 27 of 1113 records list a version out
-  of `date_created` order (one was oldest-first with `date_updated` older than
-  its newest version). The adapter reads every version item of a fully
-  extracted record and takes the newest and second-newest by `date_created`
-  (`version` and `previousVersion`; null when there is one version). Lean
-  extraction (seeding, unchanged reconciliation) takes the first listed version
-  and leaves `previousVersion` unknown. Semver order is not usable: 89 records
-  list a lower version number after a higher one. `is_active` was true
-  everywhere.
-- `has_nsfw_content` and `is_deprecated` are present and boolean (0 NSFW, 48
-  deprecated in Valheim), as are description, icon, categories and `file_size`.
-  A record whose `has_nsfw_content` is not the literal `true` or `false` is
-  unreadable and is never emitted (fail closed); so is a record whose
-  `is_deprecated` is missing or not a boolean. The listing item flag is treated the same way:
-  anything but the boolean `false` marks the package NSFW.
-- Unreadable records (no `versions[]`, no readable version, bad flag, missing or
-  invalid `date_updated`) are quarantined: skipped, counted, and reported in a
-  single count-only log line per poll. Seeding and the steady-state cursor keep
-  advancing. The poll is skipped (listing fallback, cursor held) when no record
-  at all could be read, when the first 8 records all fail, or when no record
-  is recognised.
-- `date_updated` must be a canonical `YYYY-MM-DDTHH:MM:SS.ffffffZ` stamp with
-  in-range fields, otherwise the record is unreadable. The cursor is
-  `max(previous cursor, newest stamp)` and stamps more than one hour
-  (`CURSOR_FUTURE_SLACK_MS`) after the poll time never raise it, so a bad or
-  far-future record cannot freeze or poison it. The seed marker
-  (`seed:<slice>:<iso>`) is validated the same way. A stored cursor (or seed
-  marker) that is already more than that hour ahead of the poll time, written by an
-  older version, is cut back to the poll time when read; the same rule applies to
-  the Thunderstore and Nexus cursors.
+```
+{"namespace","name","version_number","file_format","file_size","dependencies":[],"suggestions":[]}
+```
 
-Never `JSON.parse` the body: a full parse takes ~8 ms. Measured cold, one fresh
-Node process per figure, real payload (before -> after this scanner):
+Valheim: 1318 lines, 514,768 bytes (~390 bytes per line; longest line 4947 bytes),
+1318 unique `namespace-name` ids, every `version_number` a string and every `file_size`
+an integer, no `\r`. It grows only with the package count. There is **no date, no
+description, no NSFW or deprecated flag**, so it says *whether* a package changed,
+never *what* it is. The game subdomain serves that game only; `hexium.gg` merges
+every game.
 
-| Operation | CPU before -> after |
-|---|---|
-| Scan with `date_updated >= cursor` (33 matches) | ~2.9 -> ~2.7 ms |
-| Scan where no record matches | ~2.5 -> ~1.9 ms |
-| Lean extraction of all 1113 records | ~5.2 -> ~4.6 ms |
-| Lean extraction of one quarter of the records | ~3.9 -> ~3.2 ms |
-| Full extraction of one quarter of the records | ~4.8 -> ~5.4 ms |
-| Full extraction of all 1113 records | ~8.4 -> ~11.9 ms |
+Reading rules (`src/sources/hexium-index.ts`):
 
-Full extraction got dearer because every version item is now read for
-`previousVersion`. It runs for matched records only in steady state and for
-changed packages in reconciliation, in slices (see `docs/spec.md`).
+- One pass with `indexOf('\n')` and one sticky regex per line; no `split`, no
+  whole-body `JSON.parse`, nothing parsed that is not needed. Every read is bounded
+  by its line, so cost is linear in the body size. `\r\n`, blank lines and a missing
+  trailing newline are accepted.
+- A line must open with `{"namespace":"…","name":"…","version_number":"…"` in that key
+  order. `namespace` and `name` are 1-128 characters of `[A-Za-z0-9_.-]` and do not
+  start with a dot (they go into a lookup URL path: never `.`/`..`, no `/`, `?`,
+  space or non-ASCII); the version is 1-64 characters without quote, backslash or
+  control characters. `file_size` is read only in the live layout
+  (`,"file_format":"…","file_size":<int>`), otherwise the size is unknown (null).
+  A line that does not match, or is longer than `HEXIUM_INDEX_MAX_LINE_BYTES`
+  (32 KiB), is unreadable: skipped and counted in the one-line warning, never used.
+- The body is refused above `HEXIUM_INDEX_MAX_BYTES` (1.5 MiB, checked while
+  streaming) and above `HEXIUM_INDEX_MAX_LINES` (3000); a body in which no line is
+  readable (HTML, a JSON array, a changed layout) is unusable. All of these fail
+  soft: the poll keeps its listing result and logs one line; reconcile throws.
+- Duplicate lines of one package cause one lookup.
 
-Response reading concatenates the streamed chunks and decodes once
-(`TextDecoder`, ~2 ms for 4.4 MB plus ~0.5 ms to concatenate) instead of decoding
-every chunk and joining the strings (~4.7 ms with 16 KB chunks, more with larger
-ones). The size limit is still enforced while streaming.
+Cost, measured cold (fresh Node process per figure, real 1318-line index, network
+excluded): decode 0.2 ms; scan 0.8 ms; scan plus comparison with the stored versions
+1.5 ms; scan plus seed-slice selection 1.2 ms. At 5000 synthetic lines: scan 1.7 ms.
+A whole index tick (listing, index read, comparison, no changes) is ~4 ms and ~6 ms
+with 15 lookups, ~7 ms at 3000 lines; the line cap is set there.
 
-Budget: a steady-state dump tick costs about 1.3 ms per MB of payload (decode,
-concatenate, scan), ~5.8 ms at today's 4.46 MB, and ~7.8 ms at the 6 MiB
-`MAX_SCAN_BYTES`, the largest cap that still leaves room for the rest of the tick.
+**Per-package lookup** **[live]** (2026-09-27) `GET /api/experimental/package/{namespace}/{name}/`,
+~1.1 KB JSON, 404 `{"detail":"Not found."}` for an unknown package:
 
-Reconciliation slices by `ctx.sliceHint mod hexiumDumpSlices` when the core
-provides a hint (it increases by one per reconcile run, so the three daily runs
-cover different slices) and by day number otherwise.
+```
+namespace, name, full_name, owner, package_url, date_created, date_updated,
+rating_score, is_pinned, is_deprecated, total_downloads, hexium_downloads,
+latest { version_number, description, icon, download_url, date_created, dependencies, … },
+community_listings [ { community, categories[], has_nsfw_content, review_status } ]
+```
 
-### Package index — no longer used
+`is_deprecated` is package-wide; `has_nsfw_content` and `categories` are per community.
+Rules for the snapshot built from it:
 
-**[live]** `GET /api/experimental/package-index/`: NDJSON, one line per package
-with `{"namespace","name","version_number","file_format","file_size","dependencies":[],"suggestions":[]}`.
-There is **no `date_updated`** and no description, icon, categories, NSFW or
-deprecated flag. 1063 lines, ~377 KB, chunked `application/x-ndjson`, no
-`ETag` or `Last-Modified`. The game subdomain serves that game only; `hexium.gg`
-merges every game (1116 lines). Because it cannot tell us whether a package is
-NSFW, it is not used for detection or seeding.
+- `version` = `latest.version_number` (the truth even when the index line differs),
+  `description` and `iconUrl` from `latest`, `updatedAt` = `date_updated`, `sizeBytes`
+  from the index line, `previousVersion` unset (the core diffs against the stored
+  version for known packages; unseen packages are `new`).
+- The response must name the requested `owner` and `name`, otherwise it is unreadable.
+- **NSFW fails closed.** `categories` and `has_nsfw_content` come from the
+  `community_listings` entry whose `community` equals the configured community. No such
+  entry (or `community_listings` missing or not an array) means NSFW; so does any
+  matching entry whose `has_nsfw_content` is not exactly boolean `false`.
+- `is_deprecated` must be boolean; anything else quarantines the candidate (not
+  emitted, counted in the one-line warning). `latest` must be an object with a
+  non-empty `version_number` and `date_updated` a parsable timestamp, otherwise the
+  lookup is unreadable and the candidate is not emitted.
+- `package_url` is used only when it starts with `https://{game}.hexium.gg/mods/`,
+  otherwise the URL is built from the ids.
+- Responses above `HEXIUM_LOOKUP_MAX_BYTES` (64 KiB) are refused before parsing. A
+  404, another HTTP error or a network error defers the candidate: it is never emitted
+  without a lookup and never from the lean index data. A 429 stops the remaining
+  lookups of that poll.
+
+**How the adapter uses them** (`docs/spec.md` has the full algorithm):
+
+- Every tick: listing page 1 (new packages, with flags).
+- Every `CADENCE.hexiumIndexEveryNthTick`-th tick: read the index once and compare each
+  line's version with the stored versions (`store.getAllKnownVersions`). Candidates are
+  packages whose version differs and packages the store has never seen. Candidates the
+  listing already delivered at the same version need no lookup. At most
+  `hexiumLookupsPerPoll` (15) candidates are looked up per poll, six at a time; the
+  window of candidates advances by that amount per scan so packages that keep failing
+  cannot starve the others; the poll is then reported incomplete and the rest are found
+  again by the next scan.
+- Cold start: the index seeds every package as a lean snapshot (index version, size,
+  default flags, no metadata) in `hexiumSeedSlices` (8) stable slices, one per poll,
+  slice = hash of `namespace-name` modulo 8. Seeded rows are never emitted; any later
+  event for them goes through a lookup that supplies real flags, and the stores' upserts
+  keep flags sticky and never overwrite richer fields with nulls.
+- Reconciliation: the same comparison over the whole index, up to
+  `hexiumLookupsPerReconcile` (20) lookups per run.
 
 ### Changelog, per version
 
@@ -296,7 +298,7 @@ GET /api/experimental/package/{namespace}/{name}/{version}/readme/
 ### Other
 
 **[source]** `/api/v1/package-listing-index/` and `/api/v1/package-listing-chunk/`
-exist, gzip. Superseded by `/api/v1/package/` for our purposes.
+exist, gzip. Not used.
 
 **[source]** `/api/experimental/frontend/p/{namespace}/{name}/` returns full
 package detail including `versions[]`, `last_updated`, `markdown`.

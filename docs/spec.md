@@ -52,53 +52,73 @@ in-memory store and the D1 store over a SQLite shim).
 ## Sources
 
 Per game, per store. Game is configuration, not code. Cost is linear in
-enabled sources: one listing fetch per source per tick.
+enabled sources: one listing fetch per source per tick (Hexium adds an index read and
+at most 15 lookups every 3rd tick).
 
 | Source | Per-tick listing | Covers new | Covers updates |
 |---|---|---|---|
 | Thunderstore | `cyberstorm/listing?ordering=last-updated` | yes | yes |
-| Hexium | `frontend/packages` (creation order) + `v1/package` dump | yes | yes, via the dump |
+| Hexium | `frontend/packages` (creation order) + `package-index` and per-package lookups | yes | yes, via the index |
 | Nexus | `mods/updated.json?period=1d` | via `latest_added` | yes |
 
 Hexium has no sorted-by-update listing and will not get one soon — the
-undocumented sort parameters were tested and are ignored. Its update source is
-the full dump `/api/v1/package/` (~4.4 MB raw, ~425 KB gzip), which carries a
-per-record `date_updated`, `has_nsfw_content`, `is_deprecated` and the version
-list. Hexium therefore runs on a **split cadence**:
+undocumented sort parameters were tested and are ignored. The full dump
+`/api/v1/package/` carries every version of every package and grows without
+bound (4.4 MB to 6.7 MB in six days), so it is not used. Updates come from the
+lean package index `/api/experimental/package-index/` (NDJSON, one line per
+package with only its latest version, ~515 KB for 1318 packages, growing only with
+the package count) plus one per-package lookup
+`/api/experimental/package/{namespace}/{name}/` for each package that changed.
+Hexium therefore runs on a **split cadence**:
 
-- ticks that are not a multiple of 3: `frontend/packages?page=1` — 20 items,
-  cheap, catches new packages within one tick
-- every 3rd tick (~15 min): a single `indexOf` pass over the dump, keeping
-  records with `date_updated >= cursor` (the cursor is the newest
-  `date_updated` seen by a dump scan; the listing never moves it). Each match
-  is extracted with its real NSFW and deprecated flags, description, icon,
-  categories, size and newest version. No extra subrequests, ~4.6 ms CPU cold
+- every tick: `frontend/packages?page=1` — 20 items, cheap, catches new
+  packages within one tick, with their flags
+- every 3rd tick (~15 min): read the index once and scan it in a single
+  `indexOf` pass, comparing each line's `version_number` with the versions the
+  store already knows. Candidates are the packages whose version differs and the
+  packages the store has never seen (this path only runs after bootstrap).
+  Each candidate gets one lookup, at most 15 per poll, six at a time, starting
+  at a window that advances by 15 per scan; the poll is then reported
+  incomplete and the rest are found again by the next scan, so nothing is
+  lost. The snapshot is built from the lookup only: version = `latest`, flags
+  and categories from the community entry, `updatedAt` = `date_updated`,
+  `sizeBytes` from the index line. A failed lookup defers its candidate;
+  nothing is ever emitted from lean index data. The index has no NSFW or
+  deprecated flag, so those come from the lookup and fail closed: a missing
+  community entry or a `has_nsfw_content` other than boolean `false` means NSFW,
+  a non-boolean `is_deprecated` quarantines the candidate. A package the
+  listing already delivered at the same version needs no lookup
 
-Updates on Hexium arrive with up to 15 minutes of latency. That is acceptable
-for a digest that fires every 30 minutes anyway. Neither the listing nor the dump
-honours `If-None-Match` (no `ETag`, no `Last-Modified`), so every scan downloads
-~425 KB gzip; do not raise the cadence without measuring. The date cursor is
-inclusive so a second update landing within the same second is not lost.
+Updates on Hexium arrive with up to 15 minutes of latency, plus one scan
+interval per 15 pending changes. That is acceptable for a digest that fires
+every 30 minutes anyway. Neither the listing nor the index honours
+`If-None-Match` (no `ETag`, no `Last-Modified`), so every scan downloads the
+whole index; do not raise the cadence without measuring. A scan costs ~1.5 ms
+CPU at 1318 lines (4 ms for the whole tick, 7 ms at the 3000-line cap
+`HEXIUM_INDEX_MAX_LINES`; `docs/api-notes.md` has the numbers). An index beyond
+the caps, or one that cannot be read, is skipped with one log line and the
+listing result is kept; the source then only sees new packages until the cap is
+raised.
 
-The dump cannot be fully extracted within the 10 ms CPU limit (~10 ms cold for
-1112 records), so cold start and reconciliation run in slices. A record's slice
-is its sequential `uuid4` id modulo 4.
-
-- **Cold start** seeds one slice per poll (four polls, ~20 minutes): lean records
-  with correct NSFW/deprecated flags and the first listed version, no events. The
-  cursor is `seed:<next slice>:<newest date_updated at the first slice>` and
-  becomes a plain timestamp after the last slice, so updates that happen while
-  seeding are picked up by the first normal scan. This needs the core to keep
-  `bootstrapped = false` while a poll returns `complete: false`.
-- A package that is only ever seen through the dump always carries the real
-  flags; nothing about a Hexium package is inferred from `package-index`.
+- **Cold start** seeds every package from the index as a lean snapshot (index
+  version, size, `isNsfw` and `isDeprecated` false, no metadata) in 8 stable
+  slices, one per poll (about 40 minutes), slice = hash of `namespace-name`
+  modulo 8. No events: the poll returns `complete: false` until the last slice,
+  which keeps the source un-bootstrapped and silent. Seeded rows are safe
+  because they are never emitted: any later event for such a package goes
+  through a lookup that supplies the real flags, and the stores' upserts keep
+  flags sticky and never overwrite richer stored fields with nulls. The seed
+  cursor is `seed:<next slice>`; a cursor that is out of range or of an older
+  format restarts at slice 0, and the cursor is empty after the last slice.
+  Packages created while seeding are found by the first index scans after
+  bootstrap as unseen packages.
 
 ### Reconciliation
 
-Once a day, walk the full dump for each store that offers one (for Hexium, one
-rotating quarter of `/api/v1/package/` per run — a full sweep every four days),
-compare against D1 and emit anything missed. Records whose version differs from
-D1 are extracted in full; the rest stay lean. This covers the two real gaps:
+Three times a day, walk the full index for each store that offers one (for
+Hexium, the whole package index in one read), compare against D1 and emit anything
+missed: packages whose version differs from D1 or that D1 lacks get a full lookup,
+at most 20 per run, unchanged packages produce nothing. This covers the two real gaps:
 cron triggers have no retries, so a failed tick is simply skipped; and a burst
 larger than one listing page slips past a page-1 poller.
 
@@ -107,8 +127,9 @@ same per-tick budget — process one store per run. Reconcile crons run at minut
 1 (`1 3`, `1 4`, `1 5`), never on the 5-minute tick grid, so a reconcile run
 never overlaps a tick run (both drain the outbox and write cursors). Each run
 gets `sliceHint = floor(scheduledTime / 1 day) * 3 + reconcileIndex` in its
-`PollContext`, which advances by one per run, so an adapter with a sliced index
-(Hexium) rotates through its slices instead of rescanning one.
+`PollContext`, which advances by one per run, so an adapter with more pending work
+than one run can do (Hexium: more than 20 changed packages) starts at a different
+candidate each run.
 
 The same run purges delivered outbox rows older than 7 days (at most 1000 per
 run, index-backed); see the outbox notes below.
@@ -450,8 +471,9 @@ Resolved live in 2026-09 (see `docs/api-notes.md`):
 - Hexium sorted listing — negative; split cadence above.
 - Thunderstore cyberstorm listing has no `latest_version_number`; versions come
   from `/versions/`, capped per tick.
-- Hexium `package-index` has no `date_updated` or flags; `/api/v1/package/` has both
-  and drives detection, seeding and reconciliation.
+- Hexium `package-index` has no `date_updated` or flags and `/api/v1/package/` grows
+  without bound; the index detects changes, the per-package lookup supplies flags
+  and metadata, and the index also drives seeding and reconciliation.
 - Conditional requests — Thunderstore supports `If-Modified-Since` only,
   Hexium supports neither.
 
