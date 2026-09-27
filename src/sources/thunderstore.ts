@@ -2,8 +2,9 @@
 import type { PackageSnapshot, SourceConfig } from '../core/types.ts';
 import type { PollContext, PollResult, SourceAdapter } from '../core/ports.ts';
 import { extractChangelog } from '../changelog/extract.ts';
-import { CHANGELOG_MAX_BYTES, SOURCE_BUDGET, STALE_CACHE_WINDOW_MS, VERSIONS_MAX_BYTES } from './budget.ts';
-import { UnexpectedShapeError, count, isRecord, num, parseJson, safeSlug, str, type Json } from './guards.ts';
+import { MAX_DETAIL_REQUESTS_PER_EVENT } from '../core/constants.ts';
+import { CHANGELOG_MAX_BYTES, SOURCE_BUDGET, STALE_CACHE_WINDOW_MS, THUNDERSTORE_PACKAGE_MAX_BYTES, VERSIONS_MAX_BYTES } from './budget.ts';
+import { UnexpectedShapeError, count, isRecord, num, parseJson, safeSlug, str, websiteUrl, type Json } from './guards.ts';
 import { ResponseTooLargeError, UpstreamError, conditionalGet, describeError, skipOnError } from './http.ts';
 import { clampToNow, maxIso, normalizeIso } from './iso.ts';
 
@@ -286,14 +287,26 @@ export class ThunderstoreAdapter implements SourceAdapter {
       sizeBytes: num(r.size),
       downloadUrl: downloadUrl(entry.namespace, entry.name, version),
       downloads: count(r.download_count),
+      likes: count(r.rating_count),
+      websiteUrl: null,
     };
   }
+
+  /** One request for the changelog and, when the package has no website yet, one for the package. */
+  readonly detailRequests = MAX_DETAIL_REQUESTS_PER_EVENT;
 
   async fetchChangelog(
     ctx: PollContext,
     pkg: PackageSnapshot,
     version: string,
-  ): Promise<{ excerpt: string | null; url: string | null }> {
+  ): Promise<{ excerpt: string | null; url: string | null; websiteUrl?: string | null }> {
+    const changelog = await this.fetchChangelogExcerpt(ctx, pkg, version);
+    if (pkg.websiteUrl !== undefined && pkg.websiteUrl !== null) return changelog;
+    const website = await this.fetchWebsite(ctx, pkg);
+    return website === null ? changelog : { ...changelog, websiteUrl: website };
+  }
+
+  private async fetchChangelogExcerpt(ctx: PollContext, pkg: PackageSnapshot, version: string): Promise<{ excerpt: string | null; url: string | null }> {
     const fullUrl = `${pkg.url}changelog/`;
     try {
       const api = `${THUNDERSTORE_ORIGIN}/api/experimental/package/${encodeURIComponent(pkg.owner)}/${encodeURIComponent(pkg.name)}/${encodeURIComponent(version)}/changelog/`;
@@ -306,6 +319,20 @@ export class ThunderstoreAdapter implements SourceAdapter {
     } catch (err) {
       console.warn(`[${this.config.id}] changelog fetch failed: ${describeError(err)}`);
       return { excerpt: null, url: null };
+    }
+  }
+
+  /** `latest.website_url` of the package endpoint, validated; null when unavailable, empty or unsafe. */
+  private async fetchWebsite(ctx: PollContext, pkg: PackageSnapshot): Promise<string | null> {
+    try {
+      const api = `${THUNDERSTORE_ORIGIN}/api/experimental/package/${encodeURIComponent(pkg.owner)}/${encodeURIComponent(pkg.name)}/`;
+      const res = await conditionalGet(ctx, api, { validator: null, maxBytes: THUNDERSTORE_PACKAGE_MAX_BYTES });
+      if (res.status !== 'ok') return null;
+      const body = parseJson(res.text);
+      return isRecord(body) && isRecord(body.latest) ? websiteUrl(body.latest.website_url) : null;
+    } catch (err) {
+      console.warn(`[${this.config.id}] website fetch failed: ${describeError(err)}`);
+      return null;
     }
   }
 }

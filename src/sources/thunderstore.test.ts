@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SourceConfig } from '../core/types.ts';
 import type { PollResult, SourceAdapter } from '../core/ports.ts';
 import { createFakeFetch, fixture, json, makeCtx, makeState, text } from './__fixtures__/fake-fetch.ts';
-import { VERSIONS_MAX_BYTES } from './budget.ts';
+import { SOURCE_URL_MAX_CHARS, THUNDERSTORE_PACKAGE_MAX_BYTES, VERSIONS_MAX_BYTES } from './budget.ts';
 import { ThunderstoreAdapter } from './thunderstore.ts';
 
 const config: SourceConfig = { id: 'thunderstore:valheim', store: 'thunderstore', community: 'valheim', enabled: true };
@@ -28,6 +28,7 @@ interface Item {
   pinned?: boolean;
   nsfw?: boolean;
   downloads?: unknown;
+  likes?: unknown;
 }
 
 function listingBody(items: Item[], next = false): unknown {
@@ -47,6 +48,7 @@ function listingBody(items: Item[], next = false): unknown {
       icon_url: `https://cdn.test/${i.name}.png`,
       size: 1234,
       ...(i.downloads === undefined ? {} : { download_count: i.downloads }),
+      ...(i.likes === undefined ? {} : { rating_count: i.likes }),
     })),
   };
 }
@@ -708,5 +710,193 @@ describe('ThunderstoreAdapter snapshot download fields', () => {
     expect((await pollOne({ ns: '..' })).downloadUrl).toBeNull();
     expect((await pollOne({ name: '.' })).downloadUrl).toBeNull();
     expect((await pollOne({}, '..')).downloadUrl).toBeNull();
+  });
+});
+
+describe('ThunderstoreAdapter snapshot likes', () => {
+  const pollOne = async (item: Partial<Item>) => {
+    const fake = createFakeFetch([
+      [LISTING, () => json(listingBody([{ ns: 'Owner', name: 'Mod', updated: stamp(10), ...item }]))],
+      ['/versions/', () => json(versionsBody('1.0.0', stamp(10)))],
+    ]);
+    return okResult(await adapter.poll(makeCtx(fake, { state: makeState({ cursor: stamp(60) }) }))).packages[0]!;
+  };
+
+  it('takes the count from rating_count, zero included', async () => {
+    expect((await pollOne({ likes: 639 })).likes).toBe(639);
+    expect((await pollOne({ likes: 0 })).likes).toBe(0);
+  });
+
+  it.each([['a string', '12'], ['negative', -1], ['fractional', 1.5], ['huge', 1e30], ['null', null], ['boolean', true], ['object', {}], ['array', [1]]])(
+    'drops a rating_count that is %s',
+    async (_label, raw) => {
+      expect((await pollOne({ likes: raw })).likes).toBeNull();
+    },
+  );
+
+  it('has no likes when the listing omits the field, and never carries a website (the listing has none)', async () => {
+    const snapshot = await pollOne({});
+    expect(snapshot.likes).toBeNull();
+    expect(snapshot.websiteUrl ?? null).toBeNull();
+  });
+});
+
+describe('ThunderstoreAdapter.fetchChangelog — website', () => {
+  const pkg = {
+    source: 'thunderstore:valheim',
+    store: 'thunderstore' as const,
+    packageId: 'Cartur-Carturs_Map_Pins',
+    owner: 'Cartur',
+    name: 'Carturs_Map_Pins',
+    version: '1.3.6',
+    url: 'https://thunderstore.io/c/valheim/p/Cartur/Carturs_Map_Pins/',
+    iconUrl: null,
+    description: null,
+    categories: [],
+    isNsfw: false,
+    isDeprecated: false,
+    updatedAt: '2026-09-18T23:58:52.651200Z',
+    sizeBytes: null,
+  };
+  const CHANGELOG = '/api/experimental/package/Cartur/Carturs_Map_Pins/1.3.6/changelog/';
+  const PACKAGE = '/api/experimental/package/Cartur/Carturs_Map_Pins/';
+  const packageBody = (website: unknown): unknown => ({ namespace: 'Cartur', name: 'Carturs_Map_Pins', latest: { version_number: '1.3.6', website_url: website } });
+  const routes = (website: () => Response) =>
+    createFakeFetch([
+      [CHANGELOG, () => text(fixture('thunderstore-changelog.json'))],
+      [PACKAGE, website],
+    ]);
+  const isPackageCall = (url: string): boolean => url.endsWith('/Carturs_Map_Pins/');
+
+  it('spends exactly two requests, changelog first, and returns excerpt, url and website', async () => {
+    const fake = routes(() => json(packageBody('https://github.com/cartur/pins')));
+    const out = await adapter.fetchChangelog(makeCtx(fake), pkg, '1.3.6');
+    expect(out).toMatchObject({ url: 'https://thunderstore.io/c/valheim/p/Cartur/Carturs_Map_Pins/changelog/', websiteUrl: 'https://github.com/cartur/pins' });
+    expect(out.excerpt).toContain('No more duplicate pins');
+    expect(fake.calls).toHaveLength(2);
+    expect(fake.calls[0]!.url.endsWith('/changelog/')).toBe(true);
+    expect(isPackageCall(fake.calls[1]!.url)).toBe(true);
+    expect(fake.calls[1]!.headers['user-agent']).toBeTruthy();
+  });
+
+  it('does not request the package again when the package already carries a website', async () => {
+    const fake = routes(() => json(packageBody('https://other.example/')));
+    const out = await adapter.fetchChangelog(makeCtx(fake), { ...pkg, websiteUrl: 'https://known.example/' }, '1.3.6');
+    expect(fake.calls).toHaveLength(1);
+    expect(out.websiteUrl).toBeUndefined();
+  });
+
+  it('asks again when the package website is null', async () => {
+    const fake = routes(() => json(packageBody('https://example.com/')));
+    const out = await adapter.fetchChangelog(makeCtx(fake), { ...pkg, websiteUrl: null }, '1.3.6');
+    expect(fake.calls).toHaveLength(2);
+    expect(out.websiteUrl).toBe('https://example.com/');
+  });
+
+  it('still returns the website when the changelog request fails', async () => {
+    const fake = createFakeFetch([
+      [CHANGELOG, () => new Response('', { status: 500 })],
+      [PACKAGE, () => json(packageBody('https://example.com/'))],
+    ]);
+    expect(await adapter.fetchChangelog(makeCtx(fake), pkg, '1.3.6')).toEqual({ excerpt: null, url: null, websiteUrl: 'https://example.com/' });
+  });
+
+  it('still returns the changelog when the package request fails, without a website key', async () => {
+    const fake = routes(() => new Response('', { status: 500 }));
+    const out = await adapter.fetchChangelog(makeCtx(fake), pkg, '1.3.6');
+    expect(out.excerpt).toContain('No more duplicate pins');
+    expect('websiteUrl' in out).toBe(false);
+  });
+
+  it('survives a package request that throws', async () => {
+    const fake = routes(() => {
+      throw new Error('network down');
+    });
+    const out = await adapter.fetchChangelog(makeCtx(fake), pkg, '1.3.6');
+    expect(out.excerpt).not.toBeNull();
+    expect('websiteUrl' in out).toBe(false);
+  });
+
+  it.each([
+    ['an empty string', ''],
+    ['null', null],
+    ['a number', 5],
+    ['javascript:', 'javascript:alert(1)'],
+    ['userinfo', 'https://user:pw@example.com/'],
+    ['a relative path', '/x'],
+    ['too long', `https://example.com/${'a'.repeat(SOURCE_URL_MAX_CHARS)}`],
+  ])('leaves the website out when latest.website_url is %s', async (_label, raw) => {
+    const fake = routes(() => json(packageBody(raw)));
+    const out = await adapter.fetchChangelog(makeCtx(fake), pkg, '1.3.6');
+    expect('websiteUrl' in out).toBe(false);
+  });
+
+  it('leaves the website out when latest is missing or the body is not an object', async () => {
+    for (const body of [{ namespace: 'Cartur' }, [], 'x', null, { latest: 'x' }]) {
+      const fake = routes(() => json(body));
+      expect('websiteUrl' in (await adapter.fetchChangelog(makeCtx(fake), pkg, '1.3.6'))).toBe(false);
+    }
+  });
+
+  it('refuses a package body above the cap without parsing it', async () => {
+    const huge = JSON.stringify({ latest: { website_url: 'https://example.com/' }, dependencies: 'x'.repeat(THUNDERSTORE_PACKAGE_MAX_BYTES) });
+    const fake = createFakeFetch([
+      [CHANGELOG, () => new Response('', { status: 404 })],
+      [PACKAGE, () => text(huge)],
+    ]);
+    const parse = vi.spyOn(JSON, 'parse');
+    const out = await adapter.fetchChangelog(makeCtx(fake), pkg, '1.3.6');
+    expect('websiteUrl' in out).toBe(false);
+    expect(parse).not.toHaveBeenCalled();
+  });
+
+  it('keeps the changelog when the budget refuses the second request', async () => {
+    let calls = 0;
+    const fake = routes(() => json(packageBody('https://example.com/')));
+    const limited = createFakeFetch([]);
+    const ctx = makeCtx(limited, {
+      fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls += 1;
+        if (calls > 1) throw new Error('subrequest budget exhausted');
+        return fake.fetch(input, init);
+      }) as typeof fetch,
+    });
+    const out = await adapter.fetchChangelog(ctx, pkg, '1.3.6');
+    expect(out.excerpt).toContain('No more duplicate pins');
+    expect('websiteUrl' in out).toBe(false);
+    expect(fake.calls).toHaveLength(1);
+  });
+});
+
+describe('ThunderstoreAdapter.fetchChangelog — website cost', () => {
+  it('reads twelve package bodies of the size cap within a loose CPU allowance', async () => {
+    const dependencies = Array.from({ length: Math.floor(THUNDERSTORE_PACKAGE_MAX_BYTES / 37) - 40 }, (_, i) => `Owner${i}-Some_Mod_Name_${i}-1.2.3`);
+    const body = JSON.stringify({ latest: { website_url: 'https://example.com/mod', dependencies } });
+    expect(body.length).toBeLessThanOrEqual(THUNDERSTORE_PACKAGE_MAX_BYTES);
+    expect(body.length).toBeGreaterThan(THUNDERSTORE_PACKAGE_MAX_BYTES * 0.9);
+    const pkg = {
+      source: 'thunderstore:valheim',
+      store: 'thunderstore' as const,
+      packageId: 'A-B',
+      owner: 'A',
+      name: 'B',
+      version: '1.0.0',
+      url: 'https://thunderstore.io/c/valheim/p/A/B/',
+      iconUrl: null,
+      description: null,
+      categories: [],
+      isNsfw: false,
+      isDeprecated: false,
+      updatedAt: '2026-09-18T23:58:52.651200Z',
+      sizeBytes: null,
+    };
+    const fake = createFakeFetch([['/changelog/', () => new Response('', { status: 404 })], ['/api/experimental/package/A/B/', () => text(body)]]);
+    let best = Number.POSITIVE_INFINITY;
+    for (let round = 0; round < 6; round += 1) {
+      const start = performance.now();
+      for (let i = 0; i < 12; i += 1) expect((await adapter.fetchChangelog(makeCtx(fake), pkg, '1.0.0')).websiteUrl).toBe('https://example.com/mod');
+      if (round > 0) best = Math.min(best, performance.now() - start);
+    }
+    expect(best).toBeLessThan(100);
   });
 });

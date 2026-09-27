@@ -115,6 +115,29 @@ degrades to plain text. HTML stripping removes only known tag names, so `<T>`,
 renderer inserts the excerpt with only invisible character stripping, mention
 neutralising and a length cap.
 
+### Package website, per event
+
+**[live]** (2026-09-27) Neither the listing nor `/versions/` carries the author's website. The
+experimental package endpoint does:
+
+```
+GET /api/experimental/package/{namespace}/{name}/
+→ { namespace, name, full_name, owner, package_url, date_created, date_updated, rating_score,
+    is_pinned, is_deprecated, total_downloads,
+    latest { version_number, description, icon, dependencies, download_url, downloads, date_created,
+             website_url, is_active, … },
+    community_listings [ … ] }
+```
+
+`latest.website_url` is an author-supplied string and may be empty. Measured: 1.2 KB for a small
+package, 31 KB for `ebkr-r2modman` (the dependency list dominates); the body is refused above 64 KiB
+(`THUNDERSTORE_PACKAGE_MAX_BYTES`) before parsing. The adapter reads it in the per-event details
+phase (`fetchChangelog`), after the changelog request and only when the package has no website yet, so
+a delivered Thunderstore event costs up to two subrequests (`MAX_DETAIL_REQUESTS_PER_EVENT`) and the
+tick budgets for both (`docs/spec.md`, "Subrequest budget"). A failing, oversized or unreadable
+response only leaves the website out; the changelog is unaffected. Measured (Node, network excluded,
+median of 30): 12 events cost 0.4 ms of CPU with 1 KB bodies and 1.9 ms with 62 KB bodies.
+
 ### Full catalogue
 
 **[source]** `GET /c/{community}/api/v1/package-listing-index/` → gzipped JSON
@@ -321,6 +344,7 @@ Rules for the snapshot built from it:
   emitted, counted in the one-line warning). `latest` must be an object with a
   non-empty `version_number` and `date_updated` a parsable timestamp, otherwise the
   lookup is unreadable and the candidate is not emitted.
+- `likes` = `rating_score`, `websiteUrl` = `latest.website_url` (see "Fields the messages use").
 - `package_url` is used only when it starts with `https://{game}.hexium.gg/mods/`,
   otherwise the URL is built from the ids.
 - Responses above `HEXIUM_LOOKUP_MAX_BYTES` (64 KiB) are refused before parsing. A
@@ -419,6 +443,20 @@ list of strings is ignored line by line.
 - **Total downloads** (`PackageSnapshot.downloads`). Thunderstore listing `download_count`,
   Hexium lookup `total_downloads`, Hexium listing item `download_count`; accepted only as a
   non-negative safe integer, else null. Lean seed rows carry none.
+- **Likes** (`PackageSnapshot.likes`). Thunderstore listing item `rating_count` **[live]**
+  (2026-09-27: 639 for `denikson-BepInExPack_Valheim`, 1422 for `ebkr-r2modman`), Hexium
+  lookup `rating_score` and Hexium listing item `rating_score` **[live]** (an integer; 0 for most
+  packages, 9-11 for popular ones). Accepted only as a non-negative safe integer (`count()`), else
+  null; the stored value is the latest non-null one. Hexium lean seed rows and Nexus carry none.
+- **Website** (`PackageSnapshot.websiteUrl`). Hexium lookup `latest.website_url` **[live]** (for
+  example a `discord.gg` invite or a GitHub repository); Thunderstore `latest.website_url` of the
+  package endpoint above, fetched per delivered event. Kept only when it is an http(s) URL without
+  credentials, at most 512 characters both as received and after `URL.href` normalisation
+  (`websiteUrl()` in `src/sources/guards.ts`); an empty, non-string, relative, non-http(s) or
+  credential-bearing value is null. The host is not restricted: it is only ever shown as a link
+  (the renderer validates it again), never fetched. Hexium listing items and lean seed rows carry
+  none; Nexus carries none. The stored value is the latest non-null one, and the details phase
+  writes it with the event's changelog in one batch (`Store.setEventDetails`).
 
 ---
 

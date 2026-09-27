@@ -270,6 +270,8 @@ describe('HexiumAdapter.poll — index scan finds version changes', () => {
       sizeBytes: 216262,
       downloadUrl: 'https://cdn.hexium.gg/upload/1686/1.0.1.zip',
       downloads: 109,
+      likes: 0,
+      websiteUrl: 'https://discord.gg/THGNhtAYC8',
     });
     expect('previousVersion' in snapshot!).toBe(false);
   });
@@ -1100,5 +1102,101 @@ describe('HexiumAdapter — download url and download count', () => {
       expect(p.downloadUrl).toBeNull();
       expect(p.downloads).toBeNull();
     }
+  });
+});
+
+describe('HexiumAdapter — likes and website', () => {
+  const state = makeState({ cursor: null, etag: null });
+
+  async function lookedUp(mutate: (body: Lookup) => void): Promise<import('../core/types.ts').PackageSnapshot> {
+    const fake = routes({ index: syntheticIndex(1), lookup: answerAll('2.0.0', mutate) });
+    const res = ok(await adapterWith(allVersions(1, '0.9.0')).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    return res.packages.find((p) => p.packageId === 'Owner1-Package1')!;
+  }
+  const withWebsite = (value: unknown) => (body: Lookup) => void ((body.latest as Record<string, unknown>).website_url = value);
+  const withRating = (value: unknown) => (body: Lookup) => void (body.rating_score = value);
+
+  it('takes likes from rating_score and the website from latest.website_url of a lookup', async () => {
+    const snapshot = await lookedUp((body) => {
+      withRating(11)(body);
+      withWebsite('https://github.com/blaxxun-boop/Building')(body);
+    });
+    expect(snapshot).toMatchObject({ likes: 11, websiteUrl: 'https://github.com/blaxxun-boop/Building' });
+  });
+
+  it('accepts zero likes and drops rating scores that are not non-negative integers', async () => {
+    expect((await lookedUp(withRating(0))).likes).toBe(0);
+    for (const bad of ['5', -3, 2.5, 1e30, null, true, [], {}, undefined]) {
+      expect((await lookedUp(withRating(bad))).likes, String(bad)).toBeNull();
+    }
+  });
+
+  it.each([
+    ['an https site', 'https://github.com/o/m', 'https://github.com/o/m'],
+    ['plain http', 'http://example.org/mod', 'http://example.org/mod'],
+    ['a discord invite', 'https://discord.gg/THGNhtAYC8', 'https://discord.gg/THGNhtAYC8'],
+    ['upper case', 'HTTPS://GitHub.com/O/M', 'https://github.com/O/M'],
+    ['a host that only starts with hexium.gg', 'https://hexium.gg.evil.example/x', 'https://hexium.gg.evil.example/x'],
+  ])('accepts a website that is %s', async (_label, raw, expected) => {
+    expect((await lookedUp(withWebsite(raw))).websiteUrl).toBe(expected);
+  });
+
+  it.each([
+    ['an empty string', ''],
+    ['whitespace', '   '],
+    ['a script url', 'javascript:alert(1)'],
+    ['a data url', 'data:text/html;base64,PHNjcmlwdD4='],
+    ['a file url', 'file:///etc/passwd'],
+    ['credentials before the host', 'https://user:pw@example.com/'],
+    ['a protocol-relative url', '//example.com/x'],
+    ['a relative path', '/x'],
+    ['garbage', 'not a url'],
+    ['a number', 42],
+    ['null', null],
+    ['an object', { url: 'https://example.com/' }],
+    ['over 512 characters', `https://example.com/${'a'.repeat(600)}`],
+  ])('drops a website that is %s', async (_label, raw) => {
+    expect((await lookedUp(withWebsite(raw))).websiteUrl).toBeNull();
+  });
+
+  it('has no website when the lookup omits it', async () => {
+    expect((await lookedUp((body) => void delete (body.latest as Record<string, unknown>).website_url)).websiteUrl).toBeNull();
+  });
+
+  it('maps the listing rating_score to likes and leaves the website empty', async () => {
+    const body = JSON.parse(listingFixture) as { packages: Record<string, unknown>[] };
+    const scores: unknown[] = [7, 0, 3, 12];
+    body.packages.forEach((item, i) => void (item.rating_score = scores[i]));
+    const res = ok(await adapterWith().poll(makeCtx(routes({ listing: JSON.stringify(body) }), { tickIndex: LISTING_TICK, state })));
+    expect(res.packages.map((p) => p.likes)).toEqual([7, 0, 3, 12]);
+    for (const p of res.packages) expect(p.websiteUrl).toBeNull();
+  });
+
+  it('drops a listing rating_score that is not a non-negative integer', async () => {
+    const body = JSON.parse(listingFixture) as { packages: Record<string, unknown>[] };
+    const bad: unknown[] = ['3', -1, 1.5, 1e30];
+    body.packages.forEach((item, i) => void (item.rating_score = bad[i]));
+    const res = ok(await adapterWith().poll(makeCtx(routes({ listing: JSON.stringify(body) }), { tickIndex: LISTING_TICK, state })));
+    expect(res.packages.map((p) => p.likes)).toEqual([null, null, null, null]);
+    delete body.packages[0]!.rating_score;
+    const missing = ok(await adapterWith().poll(makeCtx(routes({ listing: JSON.stringify(body) }), { tickIndex: LISTING_TICK, state })));
+    expect(missing.packages[0]!.likes).toBeNull();
+  });
+
+  it('gives lean seed rows neither likes nor a website', async () => {
+    const res = ok(await adapterWith().poll(makeCtx(routes({ index: syntheticIndex(40) }), { state: null })));
+    expect(res.packages.length).toBeGreaterThan(0);
+    for (const p of res.packages) {
+      expect(p.likes).toBeNull();
+      expect(p.websiteUrl).toBeNull();
+    }
+  });
+
+  it('fetchChangelog spends one request and returns no website', async () => {
+    const fake = createFakeFetch([['/changelog/', () => json({ markdown: null })]]);
+    const pkg = ok(await adapterWith().poll(makeCtx(routes(), { tickIndex: LISTING_TICK, state }))).packages[0]!;
+    const out = await adapterWith().fetchChangelog(makeCtx(fake), pkg, '1.0.0');
+    expect(fake.calls).toHaveLength(1);
+    expect('websiteUrl' in out).toBe(false);
   });
 });

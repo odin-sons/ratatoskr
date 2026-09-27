@@ -46,3 +46,9 @@ export const CHANGELOG_MAX_BYTES = 128 * 1024;
 
 /** Thunderstore versions responses above this size (about 2300 versions) are refused before parsing. */
 export const VERSIONS_MAX_BYTES = 512 * 1024;
+
+/** Longest URL an adapter keeps (download link, website); the renderer drops longer ones (`DISCORD.buttonUrlMax`). */
+export const SOURCE_URL_MAX_CHARS = 512;
+
+/** Thunderstore per-package responses (about 1-31 KB, dependency list included) above this size are refused before parsing. */
+export const THUNDERSTORE_PACKAGE_MAX_BYTES = 64 * 1024;

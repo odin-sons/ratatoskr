@@ -8,8 +8,9 @@ import {
   HEXIUM_INDEX_MAX_BYTES,
   HEXIUM_LOOKUP_MAX_BYTES,
   SOURCE_BUDGET,
+  SOURCE_URL_MAX_CHARS,
 } from './budget.ts';
-import { UnexpectedShapeError, count, isRecord, parseJson, safeSlug, str, type Json } from './guards.ts';
+import { UnexpectedShapeError, count, isRecord, parseJson, safeSlug, str, websiteUrl, type Json } from './guards.ts';
 import { ResponseTooLargeError, UpstreamError, conditionalGet, describeError, skipOnError } from './http.ts';
 import { scanPackageIndex, seedSliceOf, type IndexEntry, type IndexScan } from './hexium-index.ts';
 import { normalizeIso } from './iso.ts';
@@ -20,12 +21,11 @@ const SEED_UNREADABLE_LINES_FLOOR = 3;
 const SEED_UNREADABLE_LINES_SHARE = 0.01;
 
 const HEXIUM_HOST = 'hexium.gg';
-const DOWNLOAD_URL_MAX_CHARS = 512;
 
 /** An https URL on hexium.gg or a subdomain, without credentials, at most 512 characters; anything else is null. */
 function hexiumDownloadUrl(raw: unknown): string | null {
   const text = str(raw);
-  if (text === null || text.length > DOWNLOAD_URL_MAX_CHARS) return null;
+  if (text === null || text.length > SOURCE_URL_MAX_CHARS) return null;
   let url: URL;
   try {
     url = new URL(text);
@@ -34,7 +34,7 @@ function hexiumDownloadUrl(raw: unknown): string | null {
   }
   const onHexium = url.hostname === HEXIUM_HOST || url.hostname.endsWith(`.${HEXIUM_HOST}`);
   const plain = url.protocol === 'https:' && url.username === '' && url.password === '';
-  return onHexium && plain && url.href.length <= DOWNLOAD_URL_MAX_CHARS ? url.href : null;
+  return onHexium && plain && url.href.length <= SOURCE_URL_MAX_CHARS ? url.href : null;
 }
 
 const WARN_INDEX_OVER_CAP = 'package-index above cap: updates of existing packages are not detected';
@@ -301,6 +301,8 @@ export class HexiumAdapter implements SourceAdapter {
       sizeBytes: entry.sizeBytes,
       downloadUrl: hexiumDownloadUrl(body.latest.download_url),
       downloads: count(body.total_downloads),
+      likes: count(body.rating_score),
+      websiteUrl: websiteUrl(body.latest.website_url),
     };
   }
 
@@ -323,6 +325,8 @@ export class HexiumAdapter implements SourceAdapter {
       sizeBytes: entry.sizeBytes,
       downloadUrl: null,
       downloads: null,
+      likes: null,
+      websiteUrl: null,
     };
   }
 
@@ -370,6 +374,8 @@ export class HexiumAdapter implements SourceAdapter {
       sizeBytes: null,
       downloadUrl: null,
       downloads: count(item.download_count),
+      likes: count(item.rating_score),
+      websiteUrl: null,
     };
   }
 
