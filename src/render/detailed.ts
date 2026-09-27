@@ -38,7 +38,7 @@ function relativeTimestamp(event: ModEvent, now: Date): string | null {
 function titleLine(event: ModEvent, storeEmoji: string, unnamed: string): string {
   const text = inline(event.pkg.name, CAPS.name) || unnamed;
   const url = safeUrl(event.pkg.url);
-  return `# ${storeEmoji ? `${storeEmoji} ` : ''}${url ? mdLink(text, url) : text}`;
+  return `## ${storeEmoji ? `${storeEmoji} ` : ''}${url ? mdLink(text, url) : text}`;
 }
 
 function kindLine(event: ModEvent, ctx: Ctx, now: Date): string {
@@ -58,7 +58,8 @@ function infoLine(event: ModEvent, ctx: Ctx): string | null {
   const parts: string[] = [];
   const size = formatBytes(pkg.sizeBytes, messages.byteUnits, messages.decimalSeparator);
   if (size !== null) parts.push(size);
-  const downloads = wholeCount(pkg.downloads);
+  // A newly published package has no download history yet, so the count would always read zero.
+  const downloads = event.kind === 'new' ? null : wholeCount(pkg.downloads);
   if (downloads !== null) parts.push(messages.downloaded(downloads, formatCount(downloads, messages.thousandsSeparator)!));
   const likes = wholeCount(pkg.likes);
   if (likes !== null && likes > 0) parts.push(messages.likes(likes, formatCount(likes, messages.thousandsSeparator)!));
@@ -110,6 +111,7 @@ function mentionsLabel(body: string, label: string): boolean {
  * catalog language that stays inside the budget. A link in the body that impersonates that label is degraded to text.
  */
 function changelogExcerpt(event: ModEvent, ctx: Ctx): string | null {
+  if (!ctx.includeChangelog) return null;
   const label = ctx.messages.fullChangelog;
   const cleaned = neutralizeMentions(stripUnsafeChars(head(event.changelog ?? '', CHANGELOG_DISPLAY_MAX * 4)));
   const split = splitFullLink(cleaned.trimEnd());

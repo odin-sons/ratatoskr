@@ -136,7 +136,7 @@ describe('detailed embed layout (digest)', () => {
     const embed = msg.embeds![0]!;
     expect(embed.description).toBe(
       [
-        `# ${TS_EMOJI} [Alpha](${PAGE})`,
+        `## ${TS_EMOJI} [Alpha](${PAGE})`,
         `${KIND_EMOJI.update} Updated by Bob · 1.2.3 → 1.2.4 · ${TIME}`,
         'ℹ️ 94.2 MB · Downloaded 12,345 times · 5 likes',
         '',
@@ -166,15 +166,15 @@ describe('detailed embed layout (digest)', () => {
   });
 
   it('puts the store emoji only in the title and only when configured for that store', () => {
-    expect(lines(digestOf({}, { storeEmojis: { thunderstore: TS_EMOJI, hexium: HX_EMOJI } }))[0]).toBe(`# ${TS_EMOJI} [Alpha](${PAGE})`);
-    expect(lines(digestOf({ store: 'nexus' }, { storeEmojis: { thunderstore: TS_EMOJI } }))[0]).toBe(`# [Alpha](${PAGE})`);
-    expect(lines(digestOf({}))[0]).toBe(`# [Alpha](${PAGE})`);
+    expect(lines(digestOf({}, { storeEmojis: { thunderstore: TS_EMOJI, hexium: HX_EMOJI } }))[0]).toBe(`## ${TS_EMOJI} [Alpha](${PAGE})`);
+    expect(lines(digestOf({ store: 'nexus' }, { storeEmojis: { thunderstore: TS_EMOJI } }))[0]).toBe(`## [Alpha](${PAGE})`);
+    expect(lines(digestOf({}))[0]).toBe(`## [Alpha](${PAGE})`);
     expect(lines(digestOf({}, { storeEmojis: { thunderstore: TS_EMOJI } }))[1]!.startsWith(TS_EMOJI)).toBe(false);
   });
 
   it('ignores malformed emoji markup instead of emitting it', () => {
     const bad = digestOf({}, { storeEmojis: { thunderstore: '<:x:1> @everyone' } });
-    expect(lines(bad)[0]).toBe(`# [Alpha](${PAGE})`);
+    expect(lines(bad)[0]).toBe(`## [Alpha](${PAGE})`);
     expect(bad.embeds![0]!.description).not.toContain('@everyone');
   });
 
@@ -183,6 +183,12 @@ describe('detailed embed layout (digest)', () => {
     expect(lines(digestOf({ sizeBytes: null }))).toHaveLength(2);
     expect(lines(digestOf({ sizeBytes: null, downloads: 0 }))[2]).toBe('ℹ️ Downloaded 0 times');
     expect(lines(digestOf({ sizeBytes: null, likes: 0 }))).toHaveLength(2);
+  });
+
+  it('never shows a download count for a new package: it is always zero at that point', () => {
+    expect(lines(digestOf({ kind: 'new', sizeBytes: null, downloads: 0 }))).toHaveLength(2);
+    expect(lines(digestOf({ kind: 'new', sizeBytes: null, downloads: 12345 }))).toHaveLength(2);
+    expect(lines(digestOf({ kind: 'new', sizeBytes: null, likes: 3 }))[2]).toBe('ℹ️ 3 likes');
   });
 
   it('uses the package update time, then the event time, then the render time for the timestamp', () => {
@@ -205,7 +211,7 @@ describe('detailed embed layout (digest)', () => {
   });
 
   it('links the heading only when the url is usable', () => {
-    expect(lines(digestOf({ url: 'javascript:alert(1)' }))[0]).toBe('# Alpha');
+    expect(lines(digestOf({ url: 'javascript:alert(1)' }))[0]).toBe('## Alpha');
   });
 
   it('carries the changelog and categories fields, in that order, before the project field', () => {
@@ -218,6 +224,13 @@ describe('detailed embed layout (digest)', () => {
     expect(all[0]!.inline).toBeUndefined();
     expect(PROJECT_FIELD).not.toHaveProperty('inline');
     expect(all.map((f) => f.name)).not.toContain('Total downloads');
+  });
+
+  it('omits the changelog field entirely when the subscription opted out, even with a real excerpt', () => {
+    const withIt = embedOf({ changelog: '- fixed', changelogUrl: 'https://x.io/c', categories: ['Tools'] });
+    expect(withIt.fields!.map((f) => f.name)).toEqual(['Changelog', '🗂️ Categories', PROJECT_FIELD.name]);
+    const without = embedOf({ changelog: '- fixed', changelogUrl: 'https://x.io/c', categories: ['Tools'] }, { includeChangelog: false });
+    expect(without.fields!.map((f) => f.name)).toEqual(['🗂️ Categories', PROJECT_FIELD.name]);
   });
 
   it('omits the changelog field without an excerpt, even with a changelog link', () => {
@@ -281,9 +294,9 @@ describe('detailed embed layout (digest)', () => {
       const msg = digestOf({ name, owner: name, versionTo: name, versionFrom: name, description: name, kind: 'update', sizeBytes: null });
       const all = lines(msg);
       const heading = all[0]!;
-      expect(heading.startsWith('# [')).toBe(true);
+      expect(heading.startsWith('## [')).toBe(true);
       expect(heading.endsWith(`](${PAGE})`)).toBe(true);
-      const text = heading.slice(3, heading.length - `](${PAGE})`.length);
+      const text = heading.slice(4, heading.length - `](${PAGE})`.length);
       for (const ch of ['[', ']', '(', ')', '|', '<']) expect(unescapedCount(text, ch), ch).toBe(0);
       expect(all[1]!.startsWith(`${KIND_EMOJI.update} Updated by `)).toBe(true);
       expect(all[2]).toBe('');
@@ -305,7 +318,7 @@ describe('detailed embed layout (digest)', () => {
             if (i === 0) continue;
             expect(line.startsWith('#') || line.startsWith('-#'), `line ${i}: ${line}`).toBe(false);
           }
-          expect(all.filter((line) => line.startsWith('# '))).toHaveLength(1);
+          expect(all.filter((line) => line.startsWith('## '))).toHaveLength(1);
         }),
         { numRuns: 300 },
       );

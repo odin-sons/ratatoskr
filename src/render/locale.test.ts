@@ -43,7 +43,7 @@ describe('Components V2 message in every language', () => {
     const msg = renderImmediate(full, { now: NOW, locale: 'en' });
     expect(texts(msg)).toEqual([
       [
-        `# [Alpha](${PAGE})`,
+        `## [Alpha](${PAGE})`,
         `\u2b06\ufe0f Updated by Bob · 1.2.3 → 1.2.4 · ${TIME}`,
         'ℹ️ 94.2 MB · Downloaded 12,345 times · 21 likes',
         'Also on [Hexium](https://hexium.example/p)',
@@ -61,7 +61,7 @@ describe('Components V2 message in every language', () => {
     const msg = renderImmediate(full, { now: NOW, locale: 'ru' });
     expect(texts(msg)).toEqual([
       [
-        `# [Alpha](${PAGE})`,
+        `## [Alpha](${PAGE})`,
         `\u2b06\ufe0f Обновление от Bob · 1.2.3 → 1.2.4 · ${TIME}`,
         `ℹ️ 94,2 МБ · Скачан 12${NBSP}345 раз · 21 лайк`,
         'Также на [Hexium](https://hexium.example/p)',
@@ -84,8 +84,8 @@ describe('Components V2 message in every language', () => {
 
   it('names a nameless mod in the catalog language, in every layout', () => {
     const nameless = makeEvent({ kind: 'new', name: '   ', url: PAGE });
-    expect(texts(renderImmediate(nameless, { now: NOW, locale: 'ru' }))[0]!.split('\n')[0]).toBe(`# [без названия](${PAGE})`);
-    expect(renderDigest([nameless], { detailed: () => true, now: NOW, locale: 'ru' })[0]!.embeds![0]!.description).toContain('# [без названия]');
+    expect(texts(renderImmediate(nameless, { now: NOW, locale: 'ru' }))[0]!.split('\n')[0]).toBe(`## [без названия](${PAGE})`);
+    expect(renderDigest([nameless], { detailed: () => true, now: NOW, locale: 'ru' })[0]!.embeds![0]!.description).toContain('## [без названия]');
     const compact = renderDigest([{ ...nameless, kind: 'update' }], { detailed: () => false, now: NOW, locale: 'ru' });
     expect(compact[0]!.embeds![0]!.description).toContain('[без названия]');
     expect(renderDigest([{ ...nameless, kind: 'update' }], { detailed: () => false, now: NOW })[0]!.embeds![0]!.description).toContain('[unnamed]');

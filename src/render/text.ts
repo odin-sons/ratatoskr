@@ -2,7 +2,9 @@
 import { neutralizeMentions, stripUnsafeChars } from '../text/sanitize.ts';
 import { CAPS } from './layout.ts';
 
-const SPECIAL = /[\\*_~|`[\]()<>]/g;
+const SPECIAL = /[\\*~|`[\]()<>]/g;
+/** An underscore that is not flanked by a word character on both sides: Discord never reads an intraword `_` as emphasis. */
+const UNDERSCORE = /(?<![\p{L}\p{N}])_|_(?![\p{L}\p{N}])/gu;
 const LINE_START = /(^|\n)(?:([-#])|(\d+)\.(?![^ \n]))/g;
 const BIDI = /\p{Bidi_Control}/gu;
 const HOST = /^https?:\/\/[^\s/?#]+/i;
@@ -22,9 +24,10 @@ function cleanInline(raw: string, max: number): string {
 /** Escapes Markdown control characters and line-start list markers; never splits an escape pair; appends `…` when cut. */
 export function escapeTruncate(text: string, max: number): string {
   if (max < 1) return '';
-  const escaped = text.replace(SPECIAL, '\\$&').replace(LINE_START, (_match, before: string, mark?: string, digits?: string) =>
-    mark !== undefined ? `${before}\\${mark}` : `${before}${digits}\\.`,
-  );
+  const escaped = text
+    .replace(SPECIAL, '\\$&')
+    .replace(UNDERSCORE, '\\_')
+    .replace(LINE_START, (_match, before: string, mark?: string, digits?: string) => (mark !== undefined ? `${before}\\${mark}` : `${before}${digits}\\.`));
   if (escaped.length <= max) return escaped;
   let end = max - 1;
   let slashes = 0;

@@ -73,7 +73,7 @@ describe('header block', () => {
       { now: NOW, storeEmojis: { thunderstore: TS_EMOJI } },
     );
     expect(headerLines(msg)).toEqual([
-      `# ${TS_EMOJI} [Alpha](${PAGE})`,
+      `## ${TS_EMOJI} [Alpha](${PAGE})`,
       `${UPD} · 1.2.3 → 1.2.4 · ${TIME}`,
       'ℹ️ 94.2 MB · Downloaded 12,345 times · 5 likes',
       '',
@@ -84,19 +84,19 @@ describe('header block', () => {
 
   it('renders a new package with only the version it starts at', () => {
     const msg = render({ kind: 'new', versionFrom: null, versionTo: '1.0.0', sizeBytes: null });
-    expect(headerLines(msg)).toEqual([`# [Alpha](${PAGE})`, `${KIND_EMOJI.new} New by Bob · 1.0.0 · ${TIME}`]);
+    expect(headerLines(msg)).toEqual([`## [Alpha](${PAGE})`, `${KIND_EMOJI.new} New by Bob · 1.0.0 · ${TIME}`]);
   });
 
   it('has no fallback icon in the title when the store has no emoji', () => {
-    expect(headerLines(render())[0]).toBe(`# [Alpha](${PAGE})`);
+    expect(headerLines(render())[0]).toBe(`## [Alpha](${PAGE})`);
     const other = render({ store: 'nexus' }, { now: NOW, storeEmojis: { thunderstore: TS_EMOJI } });
-    expect(headerLines(other)[0]).toBe(`# [Alpha](${PAGE})`);
-    expect(headerLines(render({ store: 'hexium' }, { now: NOW, storeEmojis: { hexium: HX_EMOJI } }))[0]).toBe(`# ${HX_EMOJI} [Alpha](${PAGE})`);
+    expect(headerLines(other)[0]).toBe(`## [Alpha](${PAGE})`);
+    expect(headerLines(render({ store: 'hexium' }, { now: NOW, storeEmojis: { hexium: HX_EMOJI } }))[0]).toBe(`## ${HX_EMOJI} [Alpha](${PAGE})`);
   });
 
   it('ignores malformed store emoji markup instead of emitting it', () => {
     const msg = render({}, { now: NOW, storeEmojis: { thunderstore: '<:x:1> @everyone' } });
-    expect(headerLines(msg)[0]).toBe(`# [Alpha](${PAGE})`);
+    expect(headerLines(msg)[0]).toBe(`## [Alpha](${PAGE})`);
     expect(JSON.stringify(msg)).not.toContain('@everyone');
   });
 
@@ -151,11 +151,11 @@ describe('header block', () => {
   });
 
   it('links the title only when the page url is usable', () => {
-    expect(headerLines(render({ url: 'javascript:alert(1)' }))[0]).toBe('# Alpha');
+    expect(headerLines(render({ url: 'javascript:alert(1)' }))[0]).toBe('## Alpha');
   });
 
   it('names a nameless mod', () => {
-    expect(headerLines(render({ name: '   ' }))[0]).toBe(`# [unnamed](${PAGE})`);
+    expect(headerLines(render({ name: '   ' }))[0]).toBe(`## [unnamed](${PAGE})`);
   });
 });
 
@@ -165,7 +165,7 @@ describe('thumbnail', () => {
     expect(first.type).toBe(9);
     expect(first.accessory).toEqual({ type: 11, media: { url: ICON } });
     expect(first.components).toHaveLength(1);
-    expect(first.components[0]).toEqual({ type: 10, content: expect.stringContaining('# [Alpha]') });
+    expect(first.components[0]).toEqual({ type: 10, content: expect.stringContaining('## [Alpha]') });
   });
 
   it('is replaced by a plain text display without a usable icon', () => {
@@ -189,6 +189,12 @@ describe('changelog and categories blocks', () => {
     for (const changelog of [null, '', '   \n ']) {
       expect(texts({ changelog, changelogUrl: 'https://x.io/c' })).toHaveLength(1);
     }
+  });
+
+  it('omits the changelog block entirely when the subscription opted out, even with a real excerpt', () => {
+    const texts = displayTexts(render({ changelog: '- fixed', changelogUrl: 'https://x.io/c', categories: ['Tools'] }, { now: NOW, includeChangelog: false }));
+    expect(texts.some((t) => t.startsWith('**Changelog**'))).toBe(false);
+    expect(texts.some((t) => t.startsWith('**🗂️ Categories**'))).toBe(true);
   });
 
   it('shows one full-changelog link when the excerpt already ends with it', () => {
@@ -313,9 +319,9 @@ describe('injection', () => {
     const msg = render({ name, owner: name, versionTo: name, versionFrom: name, description: name, kind: 'update', sizeBytes: null });
     const lines = headerLines(msg);
     const title = lines[0]!;
-    expect(title.startsWith('# [')).toBe(true);
+    expect(title.startsWith('## [')).toBe(true);
     expect(title.endsWith(`](${PAGE})`)).toBe(true);
-    const text = title.slice(3, title.length - `](${PAGE})`.length);
+    const text = title.slice(4, title.length - `](${PAGE})`.length);
     for (const ch of ['[', ']', '(', ')', '|', '<']) expect(unescapedCount(text, ch), ch).toBe(0);
     expect(lines[1]!.startsWith(`${KIND_EMOJI.update} Updated by `)).toBe(true);
     expect(lines[2]).toBe('');
@@ -338,7 +344,7 @@ describe('injection', () => {
           if (i === 0) continue;
           expect(line.startsWith('#') || line.startsWith('-#'), `line ${i}: ${line}`).toBe(false);
         }
-        expect(lines.filter((line) => line.startsWith('# '))).toHaveLength(1);
+        expect(lines.filter((line) => line.startsWith('## '))).toHaveLength(1);
       }),
       { numRuns: 300 },
     );

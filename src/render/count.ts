@@ -22,7 +22,7 @@ export function countItems(messages: readonly DiscordMessage[]): number {
     for (const top of msg.components ?? []) if (top.type === 17) total += 1;
     for (const embed of msg.embeds ?? []) {
       if (!embed.description) continue;
-      if (embed.description.startsWith('# ')) {
+      if (embed.description.startsWith('## ')) {
         total += 1;
         continue;
       }

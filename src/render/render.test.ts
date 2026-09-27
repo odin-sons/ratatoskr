@@ -300,7 +300,7 @@ describe('invisible characters in text fields', () => {
     }
     const detailed = renderDigest([event], allDetail)[0]!.embeds![0]!;
     const compact = detailed.description!.replace(/\s/g, '');
-    expect(detailed.description?.split('\n')[0]?.replace(/\s/g, '')).toBe(`#[Mod](${event.pkg.url})`);
+    expect(detailed.description?.split('\n')[0]?.replace(/\s/g, '')).toBe(`##[Mod](${event.pkg.url})`);
     expect(compact).toContain('byOwner');
     expect(compact).toContain('1.0→2.0');
     expect(compact).toContain('Desc');
@@ -354,9 +354,9 @@ describe('splitting', () => {
     const plan = planDigest(events, noDetail);
     expect(plan.messages).toHaveLength(1);
     const [first, second] = plan.messages[0]!.embeds!;
-    expect(first!.description!.split('\n')[0]).toBe('# [Brand New](https://thunderstore.io/c/valheim/p/Author0/Mod900/)');
+    expect(first!.description!.split('\n')[0]).toBe('## [Brand New](https://thunderstore.io/c/valheim/p/Author0/Mod900/)');
     expect(first!.fields![0]!.value).toContain('[Full changelog](https://x.io/changelog)');
-    expect(second!.description!.startsWith('# ')).toBe(false);
+    expect(second!.description!.startsWith('## ')).toBe(false);
     expect(countItems(plan.messages)).toBe(31);
   });
 
@@ -364,7 +364,7 @@ describe('splitting', () => {
     const events = realisticUpdates(3);
     const messages = renderDigest(events, { detailed: (e) => e === events[1], now: NOW });
     const embeds = messages.flatMap((m) => m.embeds!);
-    expect(embeds.filter((e) => e.description!.startsWith('# '))).toHaveLength(1);
+    expect(embeds.filter((e) => e.description!.startsWith('## '))).toHaveLength(1);
     expect(countItems(messages)).toBe(3);
   });
 });
@@ -455,7 +455,8 @@ describe('changelog field', () => {
 });
 
 describe('escapeTruncate', () => {
-  const SPECIAL = new Set(['\\', '*', '_', '~', '|', '`', '[', ']', '(', ')', '<', '>']);
+  const SPECIAL = new Set(['\\', '*', '~', '|', '`', '[', ']', '(', ')', '<', '>']);
+  const isWord = (ch: string | undefined): boolean => ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
 
   function reference(text: string, max: number): string {
     const chars = Array.from(text);
@@ -467,7 +468,9 @@ describe('escapeTruncate', () => {
       const ch = chars[i]!;
       const next = chars[i + 1];
       const listDot = ch === '.' && col > 0 && onlyDigits && (next === undefined || next === ' ' || next === '\n');
-      const escape = SPECIAL.has(ch) || (col === 0 && (ch === '-' || ch === '#')) || listDot;
+      // An intraword underscore (word characters on both sides) never starts emphasis in Discord's Markdown, so it is left as-is.
+      const underscore = ch === '_' && !(isWord(chars[i - 1]) && isWord(next));
+      const escape = SPECIAL.has(ch) || underscore || (col === 0 && (ch === '-' || ch === '#')) || listDot;
       const piece = escape ? `\\${ch}` : ch;
       if (len + piece.length > max) {
         while (pieces.length > 0 && len + 1 > max) len -= pieces.pop()!.length;
@@ -505,6 +508,16 @@ describe('escapeTruncate', () => {
     for (const [text, max] of [['- item', 50], ['1. item', 50], ['# h > q', 50], ['a\\b*c', 4], ['\\\\\\\\', 3], ['x'.repeat(100), 10], ['\u{1F600}'.repeat(10), 5], ['1.\n2.\n3.', 20]] as const) {
       expect(escapeTruncate(text, max), text).toBe(reference(text, max));
     }
+  });
+
+  it('leaves an intraword underscore raw, since Discord does not read it as emphasis, but still escapes one at a word boundary', () => {
+    expect(escapeTruncate('ArcaneDecor_WaterGardens', 100)).toBe('ArcaneDecor_WaterGardens');
+    expect(escapeTruncate('Mad_Lad_Modpack_BossRush', 100)).toBe('Mad_Lad_Modpack_BossRush');
+    expect(escapeTruncate('_leading', 100)).toBe('\\_leading');
+    expect(escapeTruncate('trailing_', 100)).toBe('trailing\\_');
+    expect(escapeTruncate('foo _bar_ baz', 100)).toBe('foo \\_bar\\_ baz');
+    expect(escapeTruncate('a_1', 100)).toBe('a_1');
+    expect(escapeTruncate('日本_語', 100)).toBe('日本_語');
   });
 });
 
