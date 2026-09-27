@@ -1,6 +1,6 @@
 ---
 name: tdd-security-performance
-description: Playbook for writing and reviewing TypeScript server code (Node.js and edge runtimes such as Cloudflare Workers): test-first development, security by construction, and per-algorithm cost analysis with optimisation, plus an architecture review checklist. Use when writing new logic or when reviewing a module, diff or commit range.
+description: Playbook for writing and reviewing TypeScript server code (Node.js and edge runtimes such as Cloudflare Workers) - test-first development, security by construction, and per-algorithm cost analysis with optimisation, plus an architecture review checklist. Use when writing new logic or when reviewing a module, diff or commit range.
 ---
 
 # TDD, security and performance
@@ -82,7 +82,7 @@ State, in the test or in a one-line note only where the choice is non-obvious:
   B payload bytes), worst case.
 - **Space/allocation**: intermediate arrays, strings, parsed objects, copies.
 - **I/O**: subrequests, D1 statements, rows read/written, bound parameters, bytes,
-  checked against the budget in `CLAUDE.md`. Every query has an index
+  checked against the budget in `AGENTS.md`. Every query has an index
   (`EXPLAIN QUERY PLAN`), batches respect parameter and statement limits.
 - **Budget share** at maximum realistic input.
 

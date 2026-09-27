@@ -12,7 +12,7 @@ commit anything, and never run destructive commands.
 
 ## Before reviewing
 
-1. Read `CLAUDE.md` (hard constraints, conventions, what not to do) and the parts
+1. Read `AGENTS.md` (hard constraints, conventions, what not to do) and the parts
    of `docs/spec.md`, `docs/api-notes.md` and `docs/legal.md` relevant to the
    code under review. Those documents are the requirements; a violation of them
    is a finding.
