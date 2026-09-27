@@ -314,7 +314,7 @@ describe('drainOutbox', () => {
         expect(JSON.stringify(payload)).toContain('Обновление от A');
       } else {
         expect(payload.embeds![0]!.description).toContain('1 обновление');
-        expect(payload.embeds!.at(-1)!.fields!.at(-1)!.value).toBe('-# [ratatoskr v1.0.1](https://github.com/odin-sons/ratatoskr)');
+        expect(payload.embeds!.at(-1)!.fields!.at(-1)!.value).toBe('-# [ratatoskr v1.0.2](https://github.com/odin-sons/ratatoskr)');
         expect(payload.components).toBeUndefined();
       }
     }

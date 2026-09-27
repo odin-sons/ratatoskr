@@ -78,7 +78,7 @@ export function shellDoubleQuote(value: string): string {
 }
 
 export function buildWranglerCommand(sql: string, database: string, local: boolean): string {
-  return `wrangler d1 execute ${database} ${local ? '--local' : '--remote'} --command ${shellDoubleQuote(sql)}`;
+  return `pnpm run wrangler d1 execute ${database} ${local ? '--local' : '--remote'} --command ${shellDoubleQuote(sql)}`;
 }
 
 export function parseCli(argv: string[], env: Record<string, string | undefined>): CliOptions {

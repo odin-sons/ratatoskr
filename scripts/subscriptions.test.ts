@@ -203,7 +203,7 @@ describe('planCommand', () => {
   it('prints wrangler commands for the remote database by default', () => {
     const plan = planCommand(parseCli(['disable', '--id', 'main']));
     if (!plan.ok) throw new Error('expected a plan');
-    expect(plan.command).toBe('wrangler d1 execute ratatoskr --remote --command "UPDATE subscriptions SET enabled = 0 WHERE id = \'main\';"');
+    expect(plan.command).toBe('pnpm run wrangler d1 execute ratatoskr --remote --command "UPDATE subscriptions SET enabled = 0 WHERE id = \'main\';"');
   });
 
   it('honours --local, --database and --sql-only', () => {

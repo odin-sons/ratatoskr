@@ -1,6 +1,6 @@
 {
   "name": "ratatoskr",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Discord bot that reports new and updated game mods from Thunderstore, Hexium and Nexus Mods.",
   "license": "AGPL-3.0-or-later",
   "private": true,
@@ -18,7 +18,8 @@
     "add-subscription": "node --env-file-if-exists=.env --experimental-strip-types scripts/add-subscription.ts",
     "subscriptions": "node --experimental-strip-types scripts/subscriptions.ts",
     "check": "node --experimental-strip-types scripts/check.ts",
-    "deploy": "node --env-file-if-exists=.env --experimental-strip-types scripts/deploy.ts"
+    "deploy": "node --env-file-if-exists=.env --experimental-strip-types scripts/deploy.ts",
+    "wrangler": "node --env-file-if-exists=.env --experimental-strip-types scripts/wrangler.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260918.1",

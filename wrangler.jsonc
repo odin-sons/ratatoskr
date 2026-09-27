@@ -16,7 +16,7 @@
       "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
     }
   ],
-  // LANGUAGE: en or ru. Custom emoji ({"thunderstore": "<:name:id>"}, RATATOSKR_EMOJI) belong in the git-ignored wrangler.local.jsonc.
+  // Defaults for a plain `wrangler deploy`. `pnpm run deploy` overrides these with --var from .env; see README.
   "vars": { "STORE_EMOJIS": {}, "LANGUAGE": "en" },
   "observability": {
     "enabled": true

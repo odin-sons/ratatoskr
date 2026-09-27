@@ -61,7 +61,7 @@ describe('shellDoubleQuote', () => {
 describe('buildWranglerCommand', () => {
   it('targets remote by default and local on request', () => {
     expect(buildWranglerCommand('SELECT 1;', 'ratatoskr', false)).toBe(
-      'wrangler d1 execute ratatoskr --remote --command "SELECT 1;"',
+      'pnpm run wrangler d1 execute ratatoskr --remote --command "SELECT 1;"',
     );
     expect(buildWranglerCommand('SELECT 1;', 'db', true)).toContain('--local');
   });
@@ -169,7 +169,7 @@ describe('planSubscription', () => {
     if (!plan.ok) throw new Error('expected a plan');
     expect(plan.sql).toContain(`"Bob''s-Mod''; DROP TABLE subscriptions;--"`);
     const command = buildWranglerCommand(plan.sql, 'ratatoskr', false);
-    expect(command.startsWith('wrangler d1 execute ratatoskr --remote --command "INSERT INTO')).toBe(true);
+    expect(command.startsWith('pnpm run wrangler d1 execute ratatoskr --remote --command "INSERT INTO')).toBe(true);
   });
 
   it('reports invalid filter values without echoing the webhook URL', () => {

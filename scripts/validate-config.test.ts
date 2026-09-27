@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { validateConfig, validateSubscription, validateSubscriptionFilter } from './validate-config.ts';
 
-const UA = 'ratatoskr/1.0.1 (+https://github.com/odin-sons/ratatoskr; unofficial mod notifier)';
+const UA = 'ratatoskr/1.0.2 (+https://github.com/odin-sons/ratatoskr; unofficial mod notifier)';
 
 function config(overrides: Record<string, unknown> = {}) {
   return {
@@ -42,7 +42,7 @@ describe('validateConfig', () => {
 
   it('rejects an empty or repo-less user agent', () => {
     expect(errorsOf(config({ userAgent: '  ' }))[0]).toMatch(/userAgent/);
-    expect(errorsOf(config({ userAgent: 'ratatoskr/1.0.1' }))[0]).toMatch(/repository URL/);
+    expect(errorsOf(config({ userAgent: 'ratatoskr/1.0.2' }))[0]).toMatch(/repository URL/);
   });
 
   it('rejects duplicate source ids', () => {

@@ -296,8 +296,8 @@ Enforcement points:
 ### Managing subscriptions
 
 Each subscription is one row, so several channels with independent filters are
-several rows. Two scripts print (never execute) the `wrangler d1 execute`
-commands:
+several rows. Two scripts print (never execute) the `pnpm run wrangler d1
+execute` commands:
 
 - `pnpm add-subscription`: a plain `INSERT`, so a duplicate `--id` fails on the
   primary key instead of replacing a row. The filter comes from repeatable flags
@@ -482,7 +482,7 @@ footer of their own.
 
 **Project link** (AGPL notice in digests, which cannot carry buttons). The last field of the
 last embed of every digest message is non-inline, named with a zero-width space (Discord
-requires a non-empty name) and valued `-# [ratatoskr v1.0.1](https://github.com/odin-sons/ratatoskr)`,
+requires a non-empty name) and valued `-# [ratatoskr v1.0.2](https://github.com/odin-sons/ratatoskr)`,
 built from `PROJECT` (`PROJECT_FIELD` in `src/render/layout.ts`). It is not part of any
 description. A digest that spans several messages numbers them: the footer of the last embed
 of each message is only the localised `(i/n)` (`Messages.page`), and no other embed has a
@@ -694,11 +694,13 @@ and `wrangler d1 execute`. Accepted trade-off for a zero-surface deployment.
 Optional Worker variable `STORE_EMOJIS` (object or JSON string, keyed by store) sets
 custom store emoji, `RATATOSKR_EMOJI` (string) the emoji of the trailing source subtext and
 `LANGUAGE` (`en` default, `ru`) the message language; see "Message layout". Real ids
-belong in the operator's git-ignored `wrangler.local.jsonc` or `.env`, never in the
-repository. `pnpm run deploy` reads `STORE_EMOJI_*`, `RATATOSKR_EMOJI` and `RATATOSKR_LANGUAGE`
-(not `LANGUAGE`, the POSIX locale variable) from `.env`, validates them (a bad value
-stops the deploy and is never echoed) and passes them as `--var` (`LANGUAGE:xx` for
-the language).
+belong in the operator's git-ignored `.env`, never in the repository:
+`wrangler.jsonc` commits a placeholder `database_id`, and `scripts/wrangler-config.ts`
+substitutes the real one (from `D1_DATABASE_ID`) into a throwaway copy next to it at
+deploy time, deleted right after. `pnpm run deploy` reads `STORE_EMOJI_*`, `RATATOSKR_EMOJI`
+and `RATATOSKR_LANGUAGE` (not `LANGUAGE`, the POSIX locale variable) from `.env`, validates
+them (a bad value stops the deploy and is never echoed) and passes them as `--var`
+(`LANGUAGE:xx` for the language).
 
 Build-time validation: a schema in `scripts/`, run in CI and pre-deploy, types
 generated from it, **not bundled into the Worker**. Runtime input from D1 and

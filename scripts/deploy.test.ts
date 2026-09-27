@@ -39,16 +39,12 @@ describe('collectStoreEmojis', () => {
 });
 
 describe('buildDeployArgs', () => {
-  it('uses the local config when present and passes no variable without emoji', () => {
-    expect(buildDeployArgs({ env: {}, hasLocalConfig: true })).toEqual({ ok: true, args: ['deploy', '-c', 'wrangler.local.jsonc'] });
-  });
-
-  it('falls back to the default config when there is no local one', () => {
-    expect(buildDeployArgs({ env: {}, hasLocalConfig: false })).toEqual({ ok: true, args: ['deploy'] });
+  it('passes no variable without emoji', () => {
+    expect(buildDeployArgs({ env: {} })).toEqual({ ok: true, args: ['deploy'] });
   });
 
   it('passes the emoji as one STORE_EMOJIS variable holding JSON', () => {
-    const result = buildDeployArgs({ env: { STORE_EMOJI_THUNDERSTORE: THUNDERSTORE, STORE_EMOJI_HEXIUM: HEXIUM }, hasLocalConfig: true });
+    const result = buildDeployArgs({ env: { STORE_EMOJI_THUNDERSTORE: THUNDERSTORE, STORE_EMOJI_HEXIUM: HEXIUM } });
     expect(result.ok).toBe(true);
     if (result.ok) {
       const at = result.args.indexOf('--var');
@@ -60,7 +56,7 @@ describe('buildDeployArgs', () => {
   });
 
   it('refuses to deploy with an invalid emoji value', () => {
-    const result = buildDeployArgs({ env: { STORE_EMOJI_HEXIUM: 'nope' }, hasLocalConfig: true });
+    const result = buildDeployArgs({ env: { STORE_EMOJI_HEXIUM: 'nope' } });
     expect(result.ok).toBe(false);
   });
 });
@@ -74,7 +70,7 @@ describe('collectLanguage', () => {
 
   it('ignores the POSIX locale variable LANGUAGE', () => {
     expect(collectLanguage({ LANGUAGE: 'en_US:en' })).toEqual({ ok: true });
-    expect(buildDeployArgs({ env: { LANGUAGE: 'en_US:en' }, hasLocalConfig: false })).toEqual({ ok: true, args: ['deploy'] });
+    expect(buildDeployArgs({ env: { LANGUAGE: 'en_US:en' } })).toEqual({ ok: true, args: ['deploy'] });
   });
 
   it('accepts every catalog language, trimmed and lower-cased', () => {
@@ -129,22 +125,22 @@ describe('buildDeployArgs with language and source emoji', () => {
   const varsOf = (args: string[]): string[] => args.flatMap((arg, i) => (args[i - 1] === '--var' ? [arg] : []));
 
   it('passes the language as LANGUAGE and RATATOSKR_EMOJI as separate --var arguments', () => {
-    const result = buildDeployArgs({ env: { RATATOSKR_LANGUAGE: 'ru', RATATOSKR_EMOJI: RT }, hasLocalConfig: false });
+    const result = buildDeployArgs({ env: { RATATOSKR_LANGUAGE: 'ru', RATATOSKR_EMOJI: RT } });
     expect(result).toEqual({ ok: true, args: ['deploy', '--var', 'LANGUAGE:ru', '--var', `RATATOSKR_EMOJI:${RT}`] });
   });
 
   it('passes nothing extra when neither is set', () => {
-    expect(buildDeployArgs({ env: {}, hasLocalConfig: false })).toEqual({ ok: true, args: ['deploy'] });
+    expect(buildDeployArgs({ env: {} })).toEqual({ ok: true, args: ['deploy'] });
   });
 
   it('keeps the store emoji variable next to them', () => {
-    const result = buildDeployArgs({ env: { RATATOSKR_LANGUAGE: 'en', STORE_EMOJI_HEXIUM: '<:hexium:223456789012345678>' }, hasLocalConfig: true });
+    const result = buildDeployArgs({ env: { RATATOSKR_LANGUAGE: 'en', STORE_EMOJI_HEXIUM: '<:hexium:223456789012345678>' } });
     expect(result.ok).toBe(true);
     if (result.ok) expect(varsOf(result.args).map((v) => v.split(':')[0])).toEqual(['STORE_EMOJIS', 'LANGUAGE']);
   });
 
   it('refuses to deploy with a bad language or emoji and reports every problem without echoing values', () => {
-    const result = buildDeployArgs({ env: { RATATOSKR_LANGUAGE: 'secret-lang', RATATOSKR_EMOJI: 'secret-emoji', STORE_EMOJI_NEXUS: 'secret-store' }, hasLocalConfig: true });
+    const result = buildDeployArgs({ env: { RATATOSKR_LANGUAGE: 'secret-lang', RATATOSKR_EMOJI: 'secret-emoji', STORE_EMOJI_NEXUS: 'secret-store' } });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       const text = result.errors.join('\n');

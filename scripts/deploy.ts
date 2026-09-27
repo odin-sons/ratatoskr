@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DISCORD_CUSTOM_EMOJI } from '../src/core/constants.ts';
 import { isLanguage, LANGUAGES, type Language } from '../src/i18n/index.ts';
+import { buildDeployConfig, collectDatabaseId, CONFIG_FILE, stripLeadingSeparator, withGeneratedConfig } from './wrangler-config.ts';
 
-const LOCAL_CONFIG = 'wrangler.local.jsonc';
+export { buildDeployConfig, collectDatabaseId } from './wrangler-config.ts';
 
 const EMOJI_VARIABLES = {
   STORE_EMOJI_THUNDERSTORE: 'thunderstore',
@@ -51,14 +52,13 @@ export function collectRatatoskrEmoji(env: Record<string, string | undefined>): 
   return { ok: false, errors: ['RATATOSKR_EMOJI must be full emoji markup like <:name:123456789012345678>'] };
 }
 
-export function buildDeployArgs(input: { env: Record<string, string | undefined>; hasLocalConfig: boolean }): DeployArgsResult {
+export function buildDeployArgs(input: { env: Record<string, string | undefined> }): DeployArgsResult {
   const stores = collectStoreEmojis(input.env);
   const language = collectLanguage(input.env);
   const source = collectRatatoskrEmoji(input.env);
   const errors = [stores, language, source].flatMap((result) => (result.ok ? [] : result.errors));
   if (errors.length > 0) return { ok: false, errors };
   const args = ['deploy'];
-  if (input.hasLocalConfig) args.push('-c', LOCAL_CONFIG);
   if (stores.ok && Object.keys(stores.emojis).length > 0) args.push('--var', `STORE_EMOJIS:${JSON.stringify(stores.emojis)}`);
   if (language.ok && language.language !== undefined) args.push('--var', `LANGUAGE:${language.language}`);
   if (source.ok && source.emoji !== undefined) args.push('--var', `RATATOSKR_EMOJI:${source.emoji}`);
@@ -66,14 +66,24 @@ export function buildDeployArgs(input: { env: Record<string, string | undefined>
 }
 
 function main(): number {
-  const built = buildDeployArgs({ env: process.env, hasLocalConfig: existsSync(LOCAL_CONFIG) });
-  if (!built.ok) {
-    for (const error of built.errors) console.error(`deploy: ${error}`);
+  const databaseId = collectDatabaseId(process.env);
+  const built = buildDeployArgs({ env: process.env });
+  if (!databaseId.ok || !built.ok) {
+    for (const error of [...(databaseId.ok ? [] : databaseId.errors), ...(built.ok ? [] : built.errors)]) console.error(`deploy: ${error}`);
     return 1;
   }
-  const wrangler = resolve(dirname(fileURLToPath(import.meta.url)), '../node_modules/wrangler/bin/wrangler.js');
-  const result = spawnSync(process.execPath, [wrangler, ...built.args, ...process.argv.slice(2)], { stdio: 'inherit' });
-  return result.status ?? 1;
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const config = buildDeployConfig(readFileSync(join(root, CONFIG_FILE), 'utf8'), databaseId.id);
+  if (!config.ok) {
+    for (const error of config.errors) console.error(`deploy: ${error}`);
+    return 1;
+  }
+  const [command, ...rest] = built.args;
+  return withGeneratedConfig(root, config.text, (tempConfig) => {
+    const wrangler = resolve(root, 'node_modules/wrangler/bin/wrangler.js');
+    const result = spawnSync(process.execPath, [wrangler, command!, '-c', tempConfig, ...rest, ...stripLeadingSeparator(process.argv.slice(2))], { stdio: 'inherit' });
+    return result.status ?? 1;
+  });
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {

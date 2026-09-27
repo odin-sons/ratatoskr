@@ -88,22 +88,25 @@ Until then, use the manual steps below.
    pnpm install
    ```
 
-2. Create the D1 database and copy the printed `database_id` into
-   `wrangler.jsonc`.
+2. Create the D1 database and put the printed `database_id` into `.env` (copy
+   `.env.example` to `.env` first) as `D1_DATABASE_ID`.
 
    ```sh
    wrangler d1 create ratatoskr
    ```
 
-3. Apply the schema to the remote database.
+3. Apply the schema to the remote database. Raw `wrangler` commands need the
+   real `database_id`, which `wrangler.jsonc` never carries (see below); use
+   `pnpm run wrangler` instead of `wrangler` directly for any command that
+   touches the remote database.
 
    ```sh
-   wrangler d1 execute ratatoskr --remote --file=./schema.sql
+   pnpm run wrangler d1 execute ratatoskr --remote --file=./schema.sql
    ```
 
    Upgrading an existing database: apply the files in `migrations/` you have not
    applied yet, in order, before `schema.sql`
-   (for example `wrangler d1 execute ratatoskr --remote --file=./migrations/0003_package_likes_and_website.sql`).
+   (for example `pnpm run wrangler d1 execute ratatoskr --remote --file=./migrations/0003_package_likes_and_website.sql`).
    Apply each file once; the current ones are `0001_outbox_delivered_at.sql`,
    `0002_package_download_url_and_downloads.sql` and `0003_package_likes_and_website.sql`.
    A database created from the current `schema.sql` needs none of them.
@@ -115,11 +118,11 @@ Until then, use the manual steps below.
    ```
 
 5. Create a Discord webhook (channel settings, Integrations, Webhooks) and add
-   a subscription. The script prints the `wrangler d1 execute` command; it does
-   not run it. Review the output, then run it.
+   a subscription. The script prints a `pnpm run wrangler d1 execute` command;
+   it does not run it. Review the output, then run it.
 
    ```sh
-   cp .env.example .env   # then put the webhook URL into .env (git-ignored)
+   # put the webhook URL into .env (git-ignored, from step 2)
    pnpm add-subscription --guild-id <guild id> --webhook-url-env DISCORD_WEBHOOK_URL
    ```
 
@@ -146,12 +149,18 @@ Until then, use the manual steps below.
    pnpm run deploy
    ```
 
-   To keep your real `database_id` out of git, copy `wrangler.jsonc` to
-   `wrangler.local.jsonc` (git-ignored) and put the id there. `pnpm run deploy`
-   uses that file when it exists and loads `.env`, so the optional store emoji
-   (`STORE_EMOJI_*`), `RATATOSKR_EMOJI` and `RATATOSKR_LANGUAGE` (see below) reach the
-   Worker without being committed. Pass
-   `-c wrangler.local.jsonc` to the other `wrangler` commands as well.
+   `wrangler.jsonc` commits a placeholder `database_id`, never your real one.
+   `pnpm run deploy` reads `D1_DATABASE_ID` from `.env` (step 2), substitutes it
+   into a throwaway copy of `wrangler.jsonc` next to the real one, deploys with
+   that, and deletes it immediately after — your id never touches a file that
+   could be committed. It also loads `.env` for the optional store emoji
+   (`STORE_EMOJI_*`), `RATATOSKR_EMOJI` and `RATATOSKR_LANGUAGE` (see below), so
+   they reach the Worker without being committed either. A plain `wrangler
+   deploy` (bypassing this script) is expected to be rejected by the Cloudflare
+   API for the placeholder id; `--dry-run` skips that check entirely (it makes
+   no network calls), so it succeeds either way and proves nothing about the id.
+   Use `pnpm run wrangler` for any other `wrangler` command that needs the real
+   one.
 
 ## Configuration
 
@@ -162,7 +171,7 @@ in CI) and not bundled into the Worker.
 
 ```json
 {
-  "userAgent": "ratatoskr/1.0.1 (+https://github.com/odin-sons/ratatoskr; unofficial mod notifier)",
+  "userAgent": "ratatoskr/1.0.2 (+https://github.com/odin-sons/ratatoskr; unofficial mod notifier)",
   "sources": [
     { "id": "thunderstore:valheim", "store": "thunderstore", "community": "valheim", "enabled": true },
     { "id": "hexium:valheim", "store": "hexium", "community": "valheim", "enabled": true },
@@ -208,12 +217,14 @@ JSON string of one) keyed by store:
 - `wrangler.jsonc` ships `"vars": { "STORE_EMOJIS": {}, "LANGUAGE": "en" }`. The easy way to set
   it: put `STORE_EMOJI_THUNDERSTORE`, `STORE_EMOJI_HEXIUM` and `STORE_EMOJI_NEXUS`
   in the git-ignored `.env` (see `.env.example`); `pnpm run deploy` validates them
-  and passes them to the Worker as `STORE_EMOJIS`. You can also set the variable
-  in the git-ignored `wrangler.local.jsonc`. Do not commit your ids. Always
-  deploy with `pnpm run deploy` on a machine that has your `.env`: a plain
-  `wrangler deploy`, or a CI deploy without those variables, publishes the
-  config's empty `STORE_EMOJIS` and the emoji silently disappear. The same
-  goes for `RATATOSKR_LANGUAGE` and `RATATOSKR_EMOJI` below.
+  and passes them to the Worker as `STORE_EMOJIS`. Do not commit your ids.
+  Always deploy with `pnpm run deploy` on a machine that has your `.env`: a
+  plain `wrangler deploy` is expected to be rejected for `wrangler.jsonc`'s
+  placeholder `database_id` (see the deploy step above), but a `pnpm run
+  deploy` on a machine or CI runner missing only the optional emoji/language
+  variables
+  still succeeds and silently publishes the config's empty `STORE_EMOJIS`. The
+  same goes for `RATATOSKR_LANGUAGE` and `RATATOSKR_EMOJI` below.
 
 ### Source-link emoji (`RATATOSKR_EMOJI`)
 
@@ -354,8 +365,8 @@ pnpm add-subscription --id main --guild-id <id> --webhook-url-env DISCORD_WEBHOO
   --exclude-package SomeAuthor-NoisyMod
 ```
 
-Every command prints a `wrangler d1 execute` command and runs nothing; review
-it, then run it. Package entries match the package id or the owner exactly
+Every command prints a `pnpm run wrangler d1 execute` command and runs nothing;
+review it, then run it. Package entries match the package id or the owner exactly
 (case-insensitive, no partial matches); when a package is both allowed and
 excluded, the exclusion wins. Because the sources are matched separately, a
 per-store channel receives the releases of its own store even when the same

@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-27
+
+### Changed
+
+- `wrangler.local.jsonc` (a hand-maintained, git-ignored duplicate of
+  `wrangler.jsonc`) is gone. `wrangler.jsonc` commits a placeholder
+  `database_id`; `pnpm run deploy` substitutes the real one, read from
+  `D1_DATABASE_ID` (`.env`), into a throwaway copy next to it, deployed
+  from and deleted immediately after.
+- New `pnpm run wrangler` command for any other `wrangler` subcommand that
+  needs the real database id (for example `d1 execute`); `pnpm
+  add-subscription` and `pnpm subscriptions` now print that instead of a
+  raw `wrangler d1 execute ...`.
+
+### Added
+
+- `src/cloudflare/crons.test.ts`: verifies `wrangler.jsonc`'s
+  `triggers.crons` matches `src/cloudflare/crons.ts`, so the two can no
+  longer drift apart silently.
+
+### Fixed
+
+- `pnpm run deploy`/`pnpm run wrangler` no longer silently run for real
+  when called as `... -- --dry-run`: pnpm forwards the `--` separator
+  itself into the script's argv instead of stripping it, which made
+  wrangler read the following flag as a positional after an
+  end-of-options marker and ignore it outright.
+
 ## [1.0.1] - 2026-09-27
 
 ### Added
