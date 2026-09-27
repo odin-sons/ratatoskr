@@ -14,28 +14,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Extract changelog section
-        id: notes
         run: |
           version="${GITHUB_REF_NAME#v}"
-          notes="$(awk -v ver="[$version]" '
+          awk -v ver="[$version]" '
             index($0, "## " ver) == 1 { found=1; next }
             found && index($0, "## [") == 1 { exit }
             found { print }
-          ' CHANGELOG.md)"
-          if [ -z "$notes" ]; then
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
             echo "No CHANGELOG.md section found for $GITHUB_REF_NAME" >&2
             exit 1
           fi
-          delimiter="EOF_$(openssl rand -hex 8)"
-          {
-            echo "notes<<$delimiter"
-            echo "$notes"
-            echo "$delimiter"
-          } >> "$GITHUB_OUTPUT"
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --notes "${{ steps.notes.outputs.notes }}"
+            --notes-file release-notes.md
