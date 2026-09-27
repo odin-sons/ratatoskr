@@ -100,6 +100,8 @@ export interface SubscriptionFilter {
   excludeCategories?: string[];
   /** Collapse the same release seen on several stores into one item. Default true. */
   dedupAcrossStores?: boolean;
+  /** `false` never shows the Changelog block for this subscription, however long or short the excerpt. Default true. */
+  includeChangelog?: boolean;
 }
 
 export type DeliveryMode = 'immediate' | 'digest';

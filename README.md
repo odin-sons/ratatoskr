@@ -296,6 +296,7 @@ fields apply together (a package must pass every one that is set).
 | `includeCategories` | `--category` | Only packages in these categories. |
 | `excludeCategories` | `--exclude-category` | Drop packages in these categories. |
 | `dedupAcrossStores` | (JSON only) | Collapse the same release seen on several stores into one item. Default `true`. |
+| `includeChangelog` | `--no-changelog` | Set to `false` to never show the Changelog block for this subscription. Default `true`. Most mods ship a long `CHANGELOG.md`, and showing it in every message makes each card much taller; turn it off for a broad subscription and keep it on for a subscription that follows one mod or a small set. |
 
 Examples:
 

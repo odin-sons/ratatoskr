@@ -31,7 +31,8 @@ describe('validateConfig', () => {
     ) as unknown;
     const r = validateConfig(raw);
     expect(r.ok).toBe(true);
-    if (r.ok) expect(r.warnings).toEqual([]);
+    // This operator's instance enables Nexus with a personal key; that is the only warning validateConfig ever raises.
+    if (r.ok) for (const w of r.warnings) expect(w).toMatch(/nexus.*personal API key/i);
   });
 
   it('rejects non-objects', () => {
@@ -120,10 +121,16 @@ describe('validateSubscription', () => {
           includeCategories: ['Tools'],
           excludeCategories: ['Cosmetics'],
           dedupAcrossStores: false,
+          includeChangelog: false,
         },
       }),
     );
     expect(r.ok).toBe(true);
+  });
+
+  it('rejects includeChangelog of the wrong type', () => {
+    const r = validateSubscription(subscription({ filter: { includeChangelog: 'no' } }));
+    expect(r.ok).toBe(false);
   });
 
   it('keeps the package allowlist and exclusion in the validated subscription', () => {

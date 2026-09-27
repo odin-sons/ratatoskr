@@ -266,6 +266,7 @@ an event is delivered only if it passes every one that is set.
 | `includeCategories`, `excludeCategories` | Category restriction, case-insensitive. |
 | `watchlist` | Highlight only: a hit is shown in detail in a digest. Never restricts delivery. |
 | `dedupAcrossStores` | Collapse the same release seen on several stores (default `true`). Evaluated per subscription against the events that subscription's own filter accepts. |
+| `includeChangelog` | `false` never renders the Changelog block for this subscription's messages, regardless of excerpt length (default `true`). A rendering setting, not a matching rule: the changelog is still fetched (subject to the usual caps) for any other subscription that wants it. |
 
 Deprecated packages are never reported as `update` events.
 
@@ -390,9 +391,10 @@ Every user-visible string of the renderer comes from a catalog in `src/i18n` (se
 **Header block** (shared by both message kinds). One block of Markdown:
 
 ```
-# {store emoji }[Name](package url)                 h1 link, no version; without a store emoji just the linked name
+## {store emoji }[Name](package url)                h2 link, no version; without a store emoji just the linked name
 ⬆️ Updated by Owner · 1.2.2 → 1.2.3 · <t:UNIX:R>    🆕 New by Owner · 1.0.0 · <t:UNIX:R> for new packages
-ℹ️ 94.2 MB · Downloaded 12,345 times · 21 likes     each part only when known; the line is omitted when none is
+ℹ️ 94.2 MB · Downloaded 12,345 times · 21 likes     each part only when known; a new package never shows a download
+                                                     count (it is always zero); the line is omitted when none is left
 Also on [Hexium](url)                               only when the release exists on other stores
 (blank line)
 **📜 Description**                                  only when there is an excerpt
@@ -457,7 +459,7 @@ components only when the request has `?with_components=true`, which `DiscordSend
 when the payload has components; the URL is never logged.
 
 **Detailed embed** (digest: new packages and watchlist hits). A classic embed with the
-header block as its description (so the h1 link title is its first line), the mod icon
+header block as its description (so the h2 link title is its first line), the mod icon
 as `thumbnail`, the store colour bar, and no `title`, `url`, `timestamp` or footer. Its
 fields are `Changelog` (full width, only when there is one) and `🗂️ Categories`, then
 the project field (below): an embed holds at most three fields, so the 25-field and

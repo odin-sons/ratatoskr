@@ -15,6 +15,7 @@ export const FILTER_FLAG_OPTIONS = {
   category: { type: 'string', multiple: true },
   'exclude-category': { type: 'string', multiple: true },
   'allow-nsfw': { type: 'boolean' },
+  'no-changelog': { type: 'boolean' },
 } as const;
 
 export const FILTER_FLAGS_USAGE = `  --filter <json>            SubscriptionFilter as a JSON string (default: {})
@@ -27,7 +28,8 @@ export const FILTER_FLAGS_USAGE = `  --filter <json>            SubscriptionFilt
                              Never this package or owner; wins over everything (repeatable)
   --category <name>          Only packages in this category (repeatable)
   --exclude-category <name>  Drop packages in this category (repeatable)
-  --allow-nsfw               Also deliver NSFW packages (excluded by default)`;
+  --allow-nsfw               Also deliver NSFW packages (excluded by default)
+  --no-changelog             Never show the Changelog block for this subscription`;
 
 export const FILTER_FLAGS_NOTE = 'The filter flags (--source ... --allow-nsfw) cannot be combined with --filter or --filter-file.';
 
@@ -41,6 +43,7 @@ export interface FilterFlagValues {
   category?: string[];
   'exclude-category'?: string[];
   'allow-nsfw'?: boolean;
+  'no-changelog'?: boolean;
 }
 
 const LIST_FLAGS = [
@@ -67,6 +70,7 @@ export function resolveFilter(
   const given: string[] = [];
   for (const [flag] of LIST_FLAGS) if ((values[flag]?.length ?? 0) > 0) given.push(`--${flag}`);
   if (values['allow-nsfw'] === true) given.push('--allow-nsfw');
+  if (values['no-changelog'] === true) given.push('--no-changelog');
 
   const rawFlags = [values.filter, values['filter-file']].filter((v) => v !== undefined).length;
   if (rawFlags === 2) throw new Error('use either --filter or --filter-file, not both');
@@ -92,5 +96,6 @@ export function resolveFilter(
     if (list !== undefined && list.length > 0) filter[key] = unique(list);
   }
   if (values['allow-nsfw'] === true) filter.allowNsfw = true;
+  if (values['no-changelog'] === true) filter.includeChangelog = false;
   return filter;
 }

@@ -41,6 +41,12 @@ describe('resolveFilter', () => {
     expect(resolveFilter({ 'allow-nsfw': false }, noFile)).toEqual({});
   });
 
+  it('sets includeChangelog to false only with --no-changelog', () => {
+    expect(resolveFilter({ 'no-changelog': true }, noFile)).toEqual({ includeChangelog: false });
+    expect(resolveFilter({ 'no-changelog': false }, noFile)).toEqual({});
+    expect(resolveFilter({}, noFile)).toEqual({});
+  });
+
   it('drops repeated values and keeps the first order', () => {
     expect(resolveFilter({ source: ['a:b', 'c:d', 'a:b'], kind: ['new', 'new'] }, noFile)).toEqual({
       sources: ['a:b', 'c:d'],
@@ -83,6 +89,7 @@ describe('resolveFilter', () => {
     ['category', { category: ['a'] }],
     ['exclude-category', { 'exclude-category': ['a'] }],
     ['allow-nsfw', { 'allow-nsfw': true }],
+    ['no-changelog', { 'no-changelog': true }],
   ])('rejects raw JSON combined with --%s', (flag, extra) => {
     expect(() => resolveFilter({ filter: '{}', ...extra }, noFile)).toThrow(new RegExp(`--${flag}`));
     expect(() => resolveFilter({ 'filter-file': 'f.json', ...extra }, noFile)).toThrow(/not both|cannot be combined/);

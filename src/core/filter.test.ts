@@ -184,6 +184,7 @@ describe('parseFilter', () => {
       includeCategories: ['Tools'],
       excludeCategories: ['Misc'],
       dedupAcrossStores: false,
+      includeChangelog: false,
     };
     expect(parseFilter(full)).toEqual(full);
   });
@@ -203,6 +204,7 @@ describe('parseFilter', () => {
     ['allowNsfw as a string', { allowNsfw: 'true' }],
     ['allowNsfw as a number', { allowNsfw: 1 }],
     ['dedupAcrossStores as a string', { dedupAcrossStores: 'false' }],
+    ['includeChangelog as a string', { includeChangelog: 'false' }],
     ['watchlist with a non-string', { watchlist: [null] }],
     ['excludeCategories that is an object', { excludeCategories: {} }],
     ['packages that is a string', { packages: 'Author-CoolMod' }],

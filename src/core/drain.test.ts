@@ -1031,3 +1031,38 @@ describe('drain: unrenderable events', () => {
     expect(h.store.pendingRows()).toEqual([]);
   });
 });
+
+describe('drain: subscription changelog opt-out', () => {
+  const real = { renderDigest, renderImmediate };
+  const withChangelog = () =>
+    makeEvent({
+      kind: 'update',
+      versionFrom: '0.9.0',
+      changelog: '- fixed a thing',
+      changelogUrl: 'https://thunderstore.io/c/valheim/p/A/Mod/changelog/',
+    });
+
+  it('leaves the Changelog block out of an immediate message when the subscription opted out', async () => {
+    const h = makeHarness();
+    await enqueue(h, makeSubscription({ mode: 'immediate', filter: { includeChangelog: false } }), [withChangelog()]);
+    await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now });
+    const payload = JSON.stringify(h.sender.calls[0]!.payload);
+    expect(payload).not.toContain('fixed a thing');
+    expect(payload).not.toContain('Changelog');
+  });
+
+  it('still shows the Changelog block by default', async () => {
+    const h = makeHarness();
+    await enqueue(h, makeSubscription({ mode: 'immediate' }), [withChangelog()]);
+    await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now });
+    expect(JSON.stringify(h.sender.calls[0]!.payload)).toContain('fixed a thing');
+  });
+
+  it('leaves the Changelog field out of a digest message when the subscription opted out', async () => {
+    const h = makeHarness();
+    await enqueue(h, makeSubscription({ mode: 'digest', filter: { includeChangelog: false } }), [withChangelog()]);
+    await drainOutbox({ store: h.store, sender: h.sender, renderer: real, now });
+    const payload = JSON.stringify(h.sender.calls[0]!.payload);
+    expect(payload).not.toContain('fixed a thing');
+  });
+});

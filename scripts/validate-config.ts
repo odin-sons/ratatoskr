@@ -40,6 +40,7 @@ const FILTER_KEYS = [
   'includeCategories',
   'excludeCategories',
   'dedupAcrossStores',
+  'includeChangelog',
 ];
 const SUBSCRIPTION_KEYS = [
   'id',
@@ -203,7 +204,7 @@ function validateFilter(raw: unknown, errors: string[]): SubscriptionFilter | un
       filter.kinds = kinds;
     }
   }
-  for (const key of ['allowNsfw', 'dedupAcrossStores'] as const) {
+  for (const key of ['allowNsfw', 'dedupAcrossStores', 'includeChangelog'] as const) {
     const v = raw[key];
     if (v === undefined) continue;
     if (typeof v === 'boolean') filter[key] = v;

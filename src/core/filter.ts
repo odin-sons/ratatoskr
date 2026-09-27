@@ -100,7 +100,7 @@ function isStringArray(value: unknown): value is string[] {
 }
 
 const STRING_LIST_KEYS = ['sources', 'watchlist', 'packages', 'excludePackages', 'includeCategories', 'excludeCategories'] as const;
-const BOOLEAN_KEYS = ['allowNsfw', 'dedupAcrossStores'] as const;
+const BOOLEAN_KEYS = ['allowNsfw', 'dedupAcrossStores', 'includeChangelog'] as const;
 
 /** Narrows untrusted (stored) JSON to a filter; `null` when any known key has the wrong type. Unknown keys are dropped. */
 export function parseFilter(value: unknown): SubscriptionFilter | null {

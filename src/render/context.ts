@@ -13,6 +13,8 @@ export interface RenderSettings {
   locale?: Language;
   /** `false` leaves out the Download and Website buttons (default `true`); the mod page and source buttons stay. */
   optionalButtons?: boolean;
+  /** `false` never shows the Changelog block, however long or short the excerpt (default `true`). */
+  includeChangelog?: boolean;
 }
 
 /** Settings after validation. */
@@ -21,6 +23,7 @@ export interface Ctx {
   storeEmojis: StoreEmojis;
   ratatoskrEmoji: string | null;
   optionalButtons: boolean;
+  includeChangelog: boolean;
 }
 
 export function makeCtx(settings: RenderSettings): Ctx {
@@ -29,5 +32,6 @@ export function makeCtx(settings: RenderSettings): Ctx {
     storeEmojis: resolveStoreEmojis(settings.storeEmojis),
     ratatoskrEmoji: resolveRatatoskrEmoji(settings.ratatoskrEmoji),
     optionalButtons: settings.optionalButtons !== false,
+    includeChangelog: settings.includeChangelog !== false,
   };
 }

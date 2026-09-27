@@ -19,6 +19,8 @@ export interface RenderContext {
   locale?: Language;
   /** `false` renders an immediate message with only the mod page and source buttons. */
   optionalButtons?: boolean;
+  /** `false` never shows the Changelog block, however long or short the excerpt. */
+  includeChangelog?: boolean;
 }
 
 export interface Renderer {
@@ -231,11 +233,12 @@ function allowance(drain: Drain, webhook: string): number {
   return Math.max(0, room);
 }
 
-function renderContext(deps: DrainDeps): RenderContext {
+function renderContext(deps: DrainDeps, sub: Subscription): RenderContext {
   const context: RenderContext = {};
   if (deps.storeEmojis !== undefined) context.storeEmojis = deps.storeEmojis;
   if (deps.ratatoskrEmoji !== undefined) context.ratatoskrEmoji = deps.ratatoskrEmoji;
   if (deps.locale !== undefined) context.locale = deps.locale;
+  if (sub.filter.includeChangelog === false) context.includeChangelog = false;
   return context;
 }
 
@@ -247,14 +250,14 @@ async function deliverImmediate(drain: Drain, sub: Subscription, entry: Collapse
   }
   let message: DiscordMessage;
   try {
-    message = renderer.renderImmediate(entry.delivery.event, { now, ...renderContext(drain.deps) });
+    message = renderer.renderImmediate(entry.delivery.event, { now, ...renderContext(drain.deps, sub) });
   } catch {
     await parkUnrenderable(drain, [entry]);
     return;
   }
   let failure = await sendAll(drain, sub.webhookUrl, [message]);
   if (failure !== null) {
-    const reduced = reducedMessage(drain, sub.webhookUrl, entry.delivery.event, message, failure);
+    const reduced = reducedMessage(drain, sub, entry.delivery.event, message, failure);
     if (reduced !== null) {
       drain.report.failed -= 1;
       failure = await sendAll(drain, sub.webhookUrl, [reduced]);
@@ -273,11 +276,11 @@ async function deliverImmediate(drain: Drain, sub: Subscription, entry: Collapse
  * rendered with only the mod page and source buttons; null when the failure is another one, no send is left, or the
  * message has nothing more to drop.
  */
-function reducedMessage(drain: Drain, webhook: string, event: ModEvent, message: DiscordMessage, failure: SendFailure): DiscordMessage | null {
+function reducedMessage(drain: Drain, sub: Subscription, event: ModEvent, message: DiscordMessage, failure: SendFailure): DiscordMessage | null {
   const { result } = failure;
-  if (result.retryable || result.status !== 400 || message.components === undefined || allowance(drain, webhook) < 1) return null;
+  if (result.retryable || result.status !== 400 || message.components === undefined || allowance(drain, sub.webhookUrl) < 1) return null;
   try {
-    const reduced = drain.deps.renderer.renderImmediate(event, { now: drain.deps.now, ...renderContext(drain.deps), optionalButtons: false });
+    const reduced = drain.deps.renderer.renderImmediate(event, { now: drain.deps.now, ...renderContext(drain.deps, sub), optionalButtons: false });
     return JSON.stringify(reduced) === JSON.stringify(message) ? null : reduced;
   } catch {
     return null;
@@ -286,7 +289,7 @@ function reducedMessage(drain: Drain, webhook: string, event: ModEvent, message:
 
 async function deliverDigest(drain: Drain, sub: Subscription, kept: CollapsedDelivery[], filter: CompiledFilter): Promise<void> {
   const { renderer, now } = drain.deps;
-  const context = renderContext(drain.deps);
+  const context = renderContext(drain.deps, sub);
   const rowCount = (entries: readonly CollapsedDelivery[]): number => entries.reduce((sum, k) => sum + k.rows.length, 0);
   const room = allowance(drain, sub.webhookUrl);
   if (room < 1) {
