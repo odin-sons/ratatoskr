@@ -20,6 +20,14 @@ runs:
     - uses: actions/setup-node@v7
       with:
         node-version: 24
-        cache: pnpm
+    - id: pnpm-store
+      run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      shell: bash
+    - uses: actions/cache@v6
+      with:
+        path: ${{ steps.pnpm-store.outputs.path }}
+        key: pnpm-store-${{ runner.os }}-${{ runner.arch }}-${{ steps.pm.outputs.value }}-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: |
+          pnpm-store-${{ runner.os }}-${{ runner.arch }}-${{ steps.pm.outputs.value }}-
     - run: pnpm install --frozen-lockfile
       shell: bash
