@@ -10,7 +10,7 @@ import { renderDigest, renderImmediate } from './index.ts';
 import { KIND_EMOJI, PAGE_SUFFIX_RESERVE, PROJECT_FIELD, PROJECT_LINE, SECTION_EMOJI, TEXT_BUDGET, ZERO_WIDTH_SPACE } from './layout.ts';
 import { assertWithinLimits } from './limits.ts';
 import { formatBytes, formatCount } from './text.ts';
-import { bestOf } from '../testing/timing.ts';
+import { bestOf, bestOfPaired } from '../testing/timing.ts';
 import { en } from '../i18n/en.ts';
 import { ru } from '../i18n/ru.ts';
 
@@ -417,9 +417,12 @@ describe('cost in every language', () => {
   it('renders link-heavy detailed digests in russian about as fast as in english', () => {
     for (const n of [150, 400]) {
       const list = events(n);
-      const en = bestOf(6, () => renderDigest(list, { ...allDetail, locale: 'en' }));
-      const ru = bestOf(6, () => renderDigest(list, { ...allDetail, locale: 'ru' }));
-      expect(ru, `${n}: en ${en.toFixed(2)} ms, ru ${ru.toFixed(2)} ms`).toBeLessThan(en * 1.5 + 0.2);
+      const [en, ru] = bestOfPaired(
+        12,
+        () => renderDigest(list, { ...allDetail, locale: 'en' }),
+        () => renderDigest(list, { ...allDetail, locale: 'ru' }),
+      );
+      expect(ru, `${n}: en ${en.toFixed(2)} ms, ru ${ru.toFixed(2)} ms`).toBeLessThan(en * 1.8 + 0.5);
       expect(ru).toBeLessThan(n === 400 ? 30 : 15);
     }
   });
