@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-27
+
+### Added
+
+- ESLint (flat config, typescript-eslint's non-type-checked `recommended`)
+  as part of `pnpm check`/`pnpm lint`. Type-checked linting isn't available
+  yet: typescript-eslint doesn't support TypeScript 7. Works around that with
+  the TypeScript team's own documented side-by-side shim instead of
+  downgrading the compiler `tsc --noEmit` uses.
+- Tag-triggered GitHub Releases (`.github/workflows/release.yml`): pushing a
+  `vX.Y.Z` tag cuts a release from that version's `CHANGELOG.md` section.
+
+### Changed
+
+- CI: split the single `check` job into parallel `typecheck`/`lint`/`test`/
+  `validate-config` jobs, consolidated Node/pnpm/install into one composite
+  action (`.github/actions/setup`), swapped `pnpm/action-setup` for
+  Corepack, and pinned `ubuntu-24.04`. Roughly halved total workflow wall
+  time (measured, not estimated).
+- Test suite: `pool: 'threads'` and `isolate: false` in `vitest.config.ts`,
+  since Vitest was spawning one worker per test file regardless of
+  available cores.
+
+### Fixed
+
+- The Russian/English render-cost comparison test no longer flakes under
+  CI load: it now samples both locales in alternation instead of one after
+  the other, so a transient scheduling spike lands on both instead of
+  skewing whichever one happened to be mid-measurement.
+
 ## [1.0.0] - 2026-09-27
 
 ### Added

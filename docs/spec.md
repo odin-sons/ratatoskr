@@ -482,7 +482,7 @@ footer of their own.
 
 **Project link** (AGPL notice in digests, which cannot carry buttons). The last field of the
 last embed of every digest message is non-inline, named with a zero-width space (Discord
-requires a non-empty name) and valued `-# [ratatoskr v1.0.0](https://github.com/odin-sons/ratatoskr)`,
+requires a non-empty name) and valued `-# [ratatoskr v1.0.1](https://github.com/odin-sons/ratatoskr)`,
 built from `PROJECT` (`PROJECT_FIELD` in `src/render/layout.ts`). It is not part of any
 description. A digest that spans several messages numbers them: the footer of the last embed
 of each message is only the localised `(i/n)` (`Messages.page`), and no other embed has a

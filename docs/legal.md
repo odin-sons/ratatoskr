@@ -9,7 +9,7 @@ Not legal advice. This is the working position the project operates under.
 - AGPL's network clause requires that users of the running service can obtain
   the source. For a Discord bot that means a visible link in the output. Every
   message carries one pointing at `github.com/odin-sons/ratatoskr`: an immediate
-  message ends with a small linked subtext line, `ratatoskr v1.0.0`, outside its
+  message ends with a small linked subtext line, `ratatoskr v1.0.1`, outside its
   coloured block; a digest ends with the same text as the last field of its
   last embed (embed footers cannot carry links). Both are always present,
   whatever else in the message is missing or invalid.
