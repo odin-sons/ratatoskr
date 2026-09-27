@@ -17,7 +17,7 @@
       "id": "nexus:valheim",
       "store": "nexus",
       "community": "valheim",
-      "enabled": false
+      "enabled": true
     }
   ]
 }
