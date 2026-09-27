@@ -164,10 +164,13 @@ Until then, use the manual steps below.
 
    Pushing a `vX.Y.Z` tag also deploys, via `.github/workflows/release.yml`,
    after cutting the GitHub Release: gated on approving the `production`
-   environment (`Settings → Environments`, a required reviewer — not
-   automatic). Needs `CLOUDFLARE_API_TOKEN` and `D1_DATABASE_ID` (same value as
-   your `.env`) as repository secrets, plus the optional presentation ones
-   below if you want a tag-triggered deploy to carry them too.
+   environment (`Settings → Environments → production`, a required reviewer —
+   not automatic). Needs `CLOUDFLARE_API_TOKEN` and `D1_DATABASE_ID` (same
+   value as your `.env`) as that environment's **secrets** — not repository
+   secrets, so they stay unreadable by any workflow run that hasn't cleared
+   the approval gate. The optional presentation ones below aren't
+   credentials, so they go in the same environment's **variables** instead,
+   if you want a tag-triggered deploy to carry them too.
 
 ## Configuration
 

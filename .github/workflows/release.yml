@@ -46,8 +46,8 @@ jobs:
         env:
           D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          RATATOSKR_LANGUAGE: ${{ secrets.RATATOSKR_LANGUAGE }}
-          RATATOSKR_EMOJI: ${{ secrets.RATATOSKR_EMOJI }}
-          STORE_EMOJI_THUNDERSTORE: ${{ secrets.STORE_EMOJI_THUNDERSTORE }}
-          STORE_EMOJI_HEXIUM: ${{ secrets.STORE_EMOJI_HEXIUM }}
-          STORE_EMOJI_NEXUS: ${{ secrets.STORE_EMOJI_NEXUS }}
+          RATATOSKR_LANGUAGE: ${{ vars.RATATOSKR_LANGUAGE }}
+          RATATOSKR_EMOJI: ${{ vars.RATATOSKR_EMOJI }}
+          STORE_EMOJI_THUNDERSTORE: ${{ vars.STORE_EMOJI_THUNDERSTORE }}
+          STORE_EMOJI_HEXIUM: ${{ vars.STORE_EMOJI_HEXIUM }}
+          STORE_EMOJI_NEXUS: ${{ vars.STORE_EMOJI_NEXUS }}
