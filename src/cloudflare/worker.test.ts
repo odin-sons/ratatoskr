@@ -40,6 +40,7 @@ const REPORT: TickReport = {
   changelogSkipped: 0,
   deferred: 0,
   parked: 0,
+  degraded: 0,
   filtered: 0,
   purged: 0,
   subrequests: 4,
@@ -211,6 +212,60 @@ describe('worker', () => {
     });
   });
 
+  describe('RATATOSKR_EMOJI', () => {
+    const RT = '<:ratatoskr:123456789012345681>';
+
+    it('reaches the tick and reconcile deps', async () => {
+      await run(TICK_CRON, { ...env, RATATOSKR_EMOJI: RT });
+      await run(RECONCILE_CRONS[0], { ...env, RATATOSKR_EMOJI: RT });
+      expect(runTick.mock.calls[0]![0].ratatoskrEmoji).toBe(RT);
+      expect(runReconcile.mock.calls[0]![0].ratatoskrEmoji).toBe(RT);
+      expect(warns).toEqual([]);
+    });
+
+    it('means no emoji when absent or empty, without a warning', async () => {
+      await run(TICK_CRON);
+      await run(TICK_CRON, { ...env, RATATOSKR_EMOJI: '' });
+      expect(runTick.mock.calls.map((c) => c[0].ratatoskrEmoji)).toEqual([undefined, undefined]);
+      expect(warns).toEqual([]);
+    });
+
+    it('ignores an invalid value with one warning naming only the key and still runs', async () => {
+      await run(TICK_CRON, { ...env, RATATOSKR_EMOJI: ':ratatoskr: https://evil.example/x' });
+      expect(runTick).toHaveBeenCalledTimes(1);
+      expect(runTick.mock.calls[0]![0].ratatoskrEmoji).toBeUndefined();
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toContain('RATATOSKR_EMOJI');
+      expect(warns[0]).not.toContain('evil');
+    });
+  });
+
+  describe('LANGUAGE', () => {
+    it('reaches the tick and reconcile deps', async () => {
+      await run(TICK_CRON, { ...env, LANGUAGE: 'ru' });
+      await run(RECONCILE_CRONS[0], { ...env, LANGUAGE: 'ru' });
+      expect(runTick.mock.calls[0]![0].locale).toBe('ru');
+      expect(runReconcile.mock.calls[0]![0].locale).toBe('ru');
+      expect(warns).toEqual([]);
+    });
+
+    it('defaults to en when absent or empty, without a warning', async () => {
+      await run(TICK_CRON);
+      await run(TICK_CRON, { ...env, LANGUAGE: '' });
+      expect(runTick.mock.calls.map((c) => c[0].locale)).toEqual(['en', 'en']);
+      expect(warns).toEqual([]);
+    });
+
+    it('falls back to en for an unknown value with one warning naming only the key', async () => {
+      await run(TICK_CRON, { ...env, LANGUAGE: 'klingon-secret' });
+      expect(runTick).toHaveBeenCalledTimes(1);
+      expect(runTick.mock.calls[0]![0].locale).toBe('en');
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toContain('LANGUAGE');
+      expect(warns[0]).not.toContain('klingon');
+    });
+  });
+
   it('keeps wrangler.jsonc crons in sync with the code', () => {
     const raw = readFileSync(join(import.meta.dirname, '../../wrangler.jsonc'), 'utf8');
     const json = raw
@@ -223,6 +278,17 @@ describe('worker', () => {
     expect(wrangler.workers_dev).toBe(false);
     expect(wrangler.preview_urls).toBe(false);
     expect(wrangler.routes).toBeUndefined();
+  });
+
+  it('ships wrangler.jsonc with the default language and no source-button emoji', () => {
+    const raw = readFileSync(join(import.meta.dirname, '../../wrangler.jsonc'), 'utf8');
+    const json = raw
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n');
+    const wrangler = JSON.parse(json) as { vars?: Record<string, unknown> };
+    expect(wrangler.vars?.LANGUAGE).toBe('en');
+    expect(wrangler.vars?.RATATOSKR_EMOJI ?? '').toBe('');
   });
 
   it('ships wrangler.jsonc with an empty STORE_EMOJIS var: real emoji ids are operator configuration', () => {

@@ -4,7 +4,8 @@ import { formatRunLog, sanitizeLogText } from '../core/report.ts';
 import { runReconcile, runTick } from '../core/tick.ts';
 import type { TickDeps, TickReport } from '../core/tick.ts';
 import type { AppConfig } from '../core/types.ts';
-import { parseStoreEmojis } from '../render/index.ts';
+import { parseLanguage } from '../i18n/index.ts';
+import { parseRatatoskrEmoji, parseStoreEmojis } from '../render/index.ts';
 import { createAdapters } from '../sources/index.ts';
 import { RECONCILE_CRONS, TICK_CRON } from './crons.ts';
 import { D1Store } from './d1-store.ts';
@@ -15,6 +16,10 @@ export interface Env {
   NEXUS_API_KEY?: string;
   /** Custom emoji per store: an object, or a JSON string of one, `{"thunderstore":"<:name:id>", ...}`. */
   STORE_EMOJIS?: string | Record<string, string>;
+  /** Full custom emoji markup for the source button. */
+  RATATOSKR_EMOJI?: string;
+  /** Message language, a catalog name from `src/i18n`: `en` (default) or `ru`. */
+  LANGUAGE?: string;
 }
 
 function buildDeps(env: Env): TickDeps {
@@ -27,6 +32,8 @@ function buildDeps(env: Env): TickDeps {
     config: appConfig,
     secrets: { NEXUS_API_KEY: env.NEXUS_API_KEY },
     storeEmojis: parseStoreEmojis(env.STORE_EMOJIS),
+    ratatoskrEmoji: parseRatatoskrEmoji(env.RATATOSKR_EMOJI),
+    locale: parseLanguage(env.LANGUAGE),
     fetch: globalThis.fetch.bind(globalThis),
     clock: { now: () => new Date() },
     reconcileRunsPerDay: RECONCILE_CRONS.length,

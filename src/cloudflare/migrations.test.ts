@@ -10,6 +10,7 @@ const ROOT = join(import.meta.dirname, '../..');
 const SCHEMA = readFileSync(join(ROOT, 'schema.sql'), 'utf8');
 const MIGRATION = readFileSync(join(ROOT, 'migrations/0001_outbox_delivered_at.sql'), 'utf8');
 const MIGRATION_DOWNLOAD_URL = readFileSync(join(ROOT, 'migrations/0002_package_download_url_and_downloads.sql'), 'utf8');
+const MIGRATION_LIKES_WEBSITE = readFileSync(join(ROOT, 'migrations/0003_package_likes_and_website.sql'), 'utf8');
 
 const SOURCE = 'thunderstore:valheim';
 const NOW = '2026-09-19T12:00:00.000Z';
@@ -83,6 +84,7 @@ describe('schema upgrade from a database without outbox.delivered_at', () => {
     const shim = legacyDatabase();
     shim.db.exec(MIGRATION);
     shim.db.exec(MIGRATION_DOWNLOAD_URL);
+    shim.db.exec(MIGRATION_LIKES_WEBSITE);
     shim.db.exec(SCHEMA);
     const store = new D1Store(shim.asD1());
 
@@ -155,5 +157,76 @@ describe('schema upgrade from a database without packages.download_url and packa
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
     expect(() => shim.db.exec(MIGRATION_DOWNLOAD_URL)).toThrow(/duplicate column/);
+  });
+});
+
+/** Database shape before `packages.likes` and `packages.website_url` existed: the current schema without those columns. */
+const SCHEMA_BEFORE_LIKES = SCHEMA.replace('  likes INTEGER,\n', '').replace('  website_url TEXT,\n', '');
+
+function databaseWithoutLikes(): D1Shim {
+  const shim = new D1Shim();
+  shim.db.exec(SCHEMA_BEFORE_LIKES);
+  const id = eventId(SOURCE, 'Owner-Mod', '1.0.0');
+  shim.db
+    .prepare('INSERT INTO packages (source, package_id, store, latest_version, name, owner, url, downloads, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(SOURCE, 'Owner-Mod', 'thunderstore', '1.0.0', 'Mod', 'Owner', 'https://thunderstore.invalid/Owner/Mod/', 7, NOW);
+  shim.db
+    .prepare('INSERT INTO events (id, source, package_id, kind, version_to, release_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(id, SOURCE, 'Owner-Mod', 'new', '1.0.0', 'owner|mod|1.0.0', NOW);
+  shim.db
+    .prepare('INSERT INTO subscriptions (id, guild_id, webhook_url, filter, mode, digest_interval_min, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run('sub1', 'g', 'https://discord.invalid/api/webhooks/1/tok', '{}', 'immediate', null, 1);
+  shim.db
+    .prepare('INSERT INTO outbox (id, subscription_id, event_id, attempts, next_attempt_at) VALUES (?, ?, ?, ?, ?)')
+    .run(outboxId('sub1', id), 'sub1', id, 0, NOW);
+  return shim;
+}
+
+describe('schema upgrade from a database without packages.likes and packages.website_url', () => {
+  it('the fixture really lacks both columns and the current queries fail on it', async () => {
+    expect(SCHEMA_BEFORE_LIKES).not.toMatch(/^ +likes INTEGER/m);
+    expect(SCHEMA_BEFORE_LIKES).not.toMatch(/^ +website_url TEXT/m);
+    await expect(new D1Store(databaseWithoutLikes().asD1()).takeDue(NOW, 10)).rejects.toThrow(/likes|website_url/);
+  });
+
+  it('the migration adds both nullable columns, keeps the data, and the current queries then work', async () => {
+    const shim = databaseWithoutLikes();
+    shim.db.exec(MIGRATION_LIKES_WEBSITE);
+    const info = (name: string) => shim.db.prepare('SELECT "notnull" AS required, type FROM pragma_table_info(\'packages\') WHERE name = ?').get(name);
+    expect(info('likes')).toEqual({ required: 0, type: 'INTEGER' });
+    expect(info('website_url')).toEqual({ required: 0, type: 'TEXT' });
+
+    const store = new D1Store(shim.asD1());
+    const [due] = await store.takeDue(NOW, 10);
+    expect(due!.event.pkg).toMatchObject({ packageId: 'Owner-Mod', downloads: 7, likes: null, websiteUrl: null });
+
+    await store.commit({
+      source: SOURCE,
+      packages: [{ ...due!.event.pkg, version: '1.1.0', likes: 12, websiteUrl: 'https://site.invalid/' }],
+      events: [],
+      outbox: [],
+      state: { id: SOURCE, cursor: null, etag: null, bootstrapped: true, lastOkAt: null },
+    });
+    expect((await store.takeDue(NOW, 10))[0]!.event.pkg).toMatchObject({ downloads: 7, likes: 12, websiteUrl: 'https://site.invalid/' });
+
+    await store.setEventDetails(due!.event.id, { changelog: 'n', changelogUrl: null, websiteUrl: 'https://later.invalid/' });
+    expect((await store.takeDue(NOW, 10))[0]!.event.pkg.websiteUrl).toBe('https://later.invalid/');
+  });
+
+  it('applies schema.sql cleanly afterwards, twice, and cannot be applied a second time itself', () => {
+    const shim = databaseWithoutLikes();
+    shim.db.exec(MIGRATION_LIKES_WEBSITE);
+    expect(() => shim.db.exec(SCHEMA)).not.toThrow();
+    expect(() => shim.db.exec(SCHEMA)).not.toThrow();
+    expect(() => shim.db.exec(MIGRATION_LIKES_WEBSITE)).toThrow(/duplicate column/);
+  });
+
+  it('applies to a database whose columns arrived through every earlier migration, in order', async () => {
+    const shim = legacyDatabase();
+    for (const migration of [MIGRATION, MIGRATION_DOWNLOAD_URL, MIGRATION_LIKES_WEBSITE]) shim.db.exec(migration);
+    expect(() => shim.db.exec(SCHEMA)).not.toThrow();
+    const columns = (shim.db.prepare("SELECT name FROM pragma_table_info('packages')").all() as { name: string }[]).map((r) => r.name);
+    expect(columns).toEqual(expect.arrayContaining(['download_url', 'downloads', 'likes', 'website_url']));
+    expect((await new D1Store(shim.asD1()).takeDue(NOW, 10))[0]!.event.pkg).toMatchObject({ likes: null, websiteUrl: null });
   });
 });

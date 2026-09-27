@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DiscordMessage } from '../core/types.ts';
+import { makeEvent, NOW } from '../render/__fixtures__/events.ts';
+import { renderImmediate } from '../render/index.ts';
 import { DiscordSender } from './discord-sender.ts';
 import { isDiscordWebhookUrl, isSnowflake } from './guards.ts';
 
@@ -120,6 +122,34 @@ describe('DiscordSender', () => {
       expect(await broken.sender.send(HOOK, WITH_BUTTONS)).toEqual({ ok: false, retryable: true, retryAfterSeconds: null, status: 503 });
       const rejected = senderWith(() => new Response('', { status: 400 }));
       expect(await rejected.sender.send(HOOK, WITH_BUTTONS)).toEqual({ ok: false, retryable: false, status: 400 });
+      expectNoSecretLeak();
+    });
+  });
+
+  describe('Components V2 messages', () => {
+    const V2 = renderImmediate(makeEvent({ kind: 'new', description: 'd', changelog: '- x', categories: ['Tools'], downloadUrl: 'https://x.io/d' }), { now: NOW });
+
+    it('sends the flag and the container as they are, with with_components=true and no content or embeds', async () => {
+      const { sender, calls } = senderWith(() => new Response(null, { status: 204 }));
+      expect(await sender.send(HOOK, V2)).toEqual({ ok: true });
+      expect(String(calls[0]![0])).toBe(`${HOOK}?wait=false&with_components=true`);
+      const body = JSON.parse(calls[0]![1]?.body as string) as Record<string, unknown>;
+      expect(body).toEqual(JSON.parse(JSON.stringify(V2)));
+      expect(body.flags).toBe(32768);
+      expect('content' in body).toBe(false);
+      expect('embeds' in body).toBe(false);
+      expect(body.allowed_mentions).toEqual({ parse: [] });
+    });
+
+    it('classifies failures like any other message and never logs the url', async () => {
+      const limited = senderWith(() => Response.json({ retry_after: 1.5 }, { status: 429 }));
+      expect(await limited.sender.send(HOOK, V2)).toEqual({ ok: false, retryable: true, retryAfterSeconds: 2, status: 429 });
+      const rejected = senderWith(() => new Response('', { status: 400 }));
+      expect(await rejected.sender.send(HOOK, V2)).toEqual({ ok: false, retryable: false, status: 400 });
+      const network = senderWith(() => {
+        throw new TypeError(`fetch failed ${HOOK}`);
+      });
+      expect(await network.sender.send(HOOK, V2)).toEqual({ ok: false, retryable: true, retryAfterSeconds: null, status: 0 });
       expectNoSecretLeak();
     });
   });

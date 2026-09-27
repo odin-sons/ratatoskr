@@ -2,7 +2,7 @@
 import { CLOUDFLARE, DEFAULT_DIGEST_INTERVAL_MIN, OUTBOX_MAX_ATTEMPTS } from '../core/constants.ts';
 import { parseFilter } from '../core/filter.ts';
 import { releaseKey } from '../core/ids.ts';
-import type { CommitBatch, Store } from '../core/ports.ts';
+import type { CommitBatch, EventDetails, Store } from '../core/ports.ts';
 import { sanitizeLogText } from '../core/report.ts';
 import type {
   DeliveryMode,
@@ -39,6 +39,8 @@ interface PackageCols {
   icon_url: string | null;
   download_url: string | null;
   downloads: number | null;
+  likes: number | null;
+  website_url: string | null;
   description: string | null;
   categories: string;
   size_bytes: number | null;
@@ -91,6 +93,8 @@ const PACKAGE_WRITE_COLUMNS = [
   'icon_url',
   'download_url',
   'downloads',
+  'likes',
+  'website_url',
   'description',
   'categories',
   'size_bytes',
@@ -165,6 +169,8 @@ const SQL_PURGE_DELIVERED = 'DELETE FROM outbox WHERE id IN (SELECT id FROM outb
 const SQL_MARK_FAILED_PREFIX = 'UPDATE outbox SET attempts = attempts + 1, next_attempt_at = ?, parked = MAX(parked, ?) WHERE delivered_at IS NULL AND id IN';
 const SQL_RESCHEDULE_PREFIX = 'UPDATE outbox SET next_attempt_at = ? WHERE delivered_at IS NULL AND parked = 0 AND id IN';
 const SQL_SET_CHANGELOG = 'UPDATE events SET changelog = ?, changelog_url = ? WHERE id = ?';
+const SQL_SET_WEBSITE =
+  'UPDATE packages SET website_url = ? WHERE source = (SELECT source FROM events WHERE id = ?) AND package_id = (SELECT package_id FROM events WHERE id = ?)';
 
 const KNOWN_VERSIONS_IDS_PER_QUERY = CLOUDFLARE.d1MaxBoundParams - 1;
 const RELEASE_KEYS_PER_QUERY = CLOUDFLARE.d1MaxBoundParams - 1;
@@ -198,6 +204,8 @@ function upsertExpression(column: string): string {
       return 'CASE WHEN excluded.latest_version <> packages.latest_version THEN excluded.download_url ELSE COALESCE(excluded.download_url, packages.download_url) END';
     case 'icon_url':
     case 'downloads':
+    case 'likes':
+    case 'website_url':
     case 'description':
     case 'size_bytes':
       return `COALESCE(excluded.${column}, packages.${column})`;
@@ -394,8 +402,13 @@ export class D1Store implements Store {
     return found;
   }
 
-  async setEventChangelog(eventId: string, changelog: string | null, changelogUrl: string | null): Promise<void> {
-    await this.db.prepare(SQL_SET_CHANGELOG).bind(changelog, changelogUrl, eventId).run();
+  async setEventDetails(eventId: string, details: EventDetails): Promise<void> {
+    const changelog = this.db.prepare(SQL_SET_CHANGELOG).bind(details.changelog, details.changelogUrl, eventId);
+    if (details.websiteUrl === null) {
+      await changelog.run();
+      return;
+    }
+    await this.db.batch([changelog, this.db.prepare(SQL_SET_WEBSITE).bind(details.websiteUrl, eventId, eventId)]);
   }
 }
 
@@ -426,6 +439,8 @@ function packageValues(p: PackageSnapshot): (string | number | null)[] {
     p.iconUrl,
     p.downloadUrl ?? null,
     p.downloads ?? null,
+    p.likes ?? null,
+    p.websiteUrl ?? null,
     p.description,
     JSON.stringify(p.categories),
     p.sizeBytes,
@@ -540,6 +555,8 @@ function mapEvent(row: EventJoinRow): ModEvent {
     iconUrl: row.p_icon_url,
     downloadUrl: row.p_download_url,
     downloads: row.p_downloads,
+    likes: row.p_likes,
+    websiteUrl: row.p_website_url,
     description: row.p_description,
     categories: parseCategories(row.p_categories),
     isNsfw: row.p_is_nsfw === 1,

@@ -29,6 +29,8 @@ function pkg(id: string, over: Partial<PackageSnapshot> = {}): PackageSnapshot {
     iconUrl: 'https://cdn.example/icon.png',
     downloadUrl: 'https://cdn.example/download.zip',
     downloads: 4321,
+    likes: 12,
+    websiteUrl: 'https://site.example/mod',
     description: 'A mod',
     categories: ['Tools', 'Misc'],
     isNsfw: false,
@@ -262,7 +264,7 @@ describe('commit', () => {
     expect(read()).toBe(850);
   });
 
-  it('binds at most 100 parameters per package statement with the 16 package columns', async () => {
+  it('binds at most 100 parameters per package statement with the 18 package columns', async () => {
     const pkgs = Array.from({ length: 13 }, (_, i) => pkg(`Owner-Mod${i}`));
     shim.preparedSql.length = 0;
     await store.commit(batch({ packages: pkgs }));
@@ -270,6 +272,16 @@ describe('commit', () => {
     expect(inserts).toHaveLength(3);
     for (const sql of inserts) expect((sql.match(/\?/g) ?? []).length).toBeLessThanOrEqual(100);
     expect((await store.getAllKnownVersions(SOURCE)).size).toBe(13);
+  });
+
+  it('writes 5 packages per statement: 18 columns x 5 rows = 90 parameters, 6 rows would be 108', async () => {
+    const insertsFor = async (n: number): Promise<number[]> => {
+      shim.preparedSql.length = 0;
+      await store.commit(batch({ packages: Array.from({ length: n }, (_, i) => pkg(`Owner-Mod${i}`)) }));
+      return shim.preparedSql.filter((sql) => sql.startsWith('INSERT INTO packages')).map((sql) => (sql.match(/\?/g) ?? []).length);
+    };
+    expect(await insertsFor(5)).toEqual([90]);
+    expect(await insertsFor(6)).toEqual([90, 18]);
   });
 
   it('tolerates duplicate package ids in one batch (last wins)', async () => {
@@ -520,7 +532,7 @@ describe('takeDue', () => {
   });
 });
 
-describe('markDelivered / markFailedMany / setEventChangelog', () => {
+describe('markDelivered / markFailedMany / setEventDetails', () => {
   it('markDelivered keeps the rows, stamps delivered_at and chunks large id lists', async () => {
     const pkgs = Array.from({ length: 250 }, (_, i) => pkg(`Owner-Mod${i}`));
     const events = pkgs.map((p) => ev(p));
@@ -556,13 +568,52 @@ describe('markDelivered / markFailedMany / setEventChangelog', () => {
     expect((shim.db.prepare('SELECT parked FROM outbox').get() as { parked: number }).parked).toBe(1);
   });
 
-  it('setEventChangelog updates the event', async () => {
+  it('setEventDetails updates the event, and the package website only when one is given', async () => {
+    const e = ev(pkg('A-One', { websiteUrl: null }));
+    await store.commit(batch({ packages: [e.pkg], events: [e] }));
+    const website = () => (shim.db.prepare('SELECT website_url FROM packages WHERE package_id = ?').get('A-One') as { website_url: string | null }).website_url;
+    await store.setEventDetails(e.id, { changelog: 'notes', changelogUrl: 'https://cl', websiteUrl: null });
+    expect(shim.db.prepare('SELECT changelog, changelog_url FROM events').get()).toEqual({ changelog: 'notes', changelog_url: 'https://cl' });
+    expect(website()).toBeNull();
+    await store.setEventDetails(e.id, { changelog: null, changelogUrl: null, websiteUrl: 'https://site.example/' });
+    expect(shim.db.prepare('SELECT changelog, changelog_url FROM events').get()).toEqual({ changelog: null, changelog_url: null });
+    expect(website()).toBe('https://site.example/');
+  });
+
+  it('setEventDetails is one statement without a website and one atomic batch with it', async () => {
     const e = ev(pkg('A-One'));
     await store.commit(batch({ packages: [e.pkg], events: [e] }));
-    await store.setEventChangelog(e.id, 'notes', 'https://cl');
-    expect(shim.db.prepare('SELECT changelog, changelog_url FROM events').get()).toEqual({ changelog: 'notes', changelog_url: 'https://cl' });
-    await store.setEventChangelog(e.id, null, null);
-    expect(shim.db.prepare('SELECT changelog, changelog_url FROM events').get()).toEqual({ changelog: null, changelog_url: null });
+    shim.batchSizes.length = 0;
+    await store.setEventDetails(e.id, { changelog: 'n', changelogUrl: null, websiteUrl: null });
+    expect(shim.batchSizes).toEqual([]);
+    await store.setEventDetails(e.id, { changelog: 'n', changelogUrl: null, websiteUrl: 'https://site.example/' });
+    expect(shim.batchSizes).toEqual([2]);
+  });
+
+  it('overwrites the stored likes with any new non-null value and keeps them for NULL', async () => {
+    const read = () => (shim.db.prepare('SELECT likes FROM packages WHERE package_id = ?').get('Owner-Name') as { likes: number | null }).likes;
+    await store.commit(batch({ packages: [pkg('Owner-Name', { likes: undefined })] }));
+    expect(read()).toBeNull();
+    await store.commit(batch({ packages: [pkg('Owner-Name', { version: '1.1.0', likes: 0 })] }));
+    expect(read()).toBe(0);
+    await store.commit(batch({ packages: [pkg('Owner-Name', { version: '1.2.0', likes: 900 })] }));
+    expect(read()).toBe(900);
+    await store.commit(batch({ packages: [pkg('Owner-Name', { version: '1.3.0', likes: null })] }));
+    expect(read()).toBe(900);
+    await store.commit(batch({ packages: [pkg('Owner-Name', { version: '1.4.0', likes: 850 })] }));
+    expect(read()).toBe(850);
+  });
+
+  it('keeps the stored website for a snapshot without one and replaces it with a new one', async () => {
+    const read = () => (shim.db.prepare('SELECT website_url FROM packages WHERE package_id = ?').get('Owner-Name') as { website_url: string | null }).website_url;
+    await store.commit(batch({ packages: [pkg('Owner-Name', { websiteUrl: undefined })] }));
+    expect(read()).toBeNull();
+    await store.commit(batch({ packages: [pkg('Owner-Name', { version: '1.1.0', websiteUrl: 'https://a.example/' })] }));
+    expect(read()).toBe('https://a.example/');
+    await store.commit(batch({ packages: [pkg('Owner-Name', { version: '1.2.0', websiteUrl: null })] }));
+    expect(read()).toBe('https://a.example/');
+    await store.commit(batch({ packages: [pkg('Owner-Name', { version: '1.3.0', websiteUrl: 'https://b.example/' })] }));
+    expect(read()).toBe('https://b.example/');
   });
 });
 
@@ -583,7 +634,8 @@ describe('EXPLAIN QUERY PLAN', () => {
     await store.markFailedMany([o.id], '2026-09-19T00:00:00.000Z', false);
     await store.rescheduleRows([o.id], '2026-09-19T00:00:00.000Z');
     await store.existingEventIds([e.id]);
-    await store.setEventChangelog(e.id, 'x', null);
+    await store.setEventDetails(e.id, { changelog: 'x', changelogUrl: null, websiteUrl: null });
+    await store.setEventDetails(e.id, { changelog: 'x', changelogUrl: null, websiteUrl: 'https://site.example/' });
     await store.markDelivered([o.id], '2026-09-19T00:00:00.000Z');
     await store.purgeDelivered('2026-09-20T00:00:00.000Z', 10);
 

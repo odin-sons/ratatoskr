@@ -16,8 +16,8 @@
       "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
     }
   ],
-  // Custom store emoji, e.g. {"thunderstore": "<:name:id>"}; keep real values in the git-ignored wrangler.local.jsonc.
-  "vars": { "STORE_EMOJIS": {} },
+  // LANGUAGE: en or ru. Custom emoji ({"thunderstore": "<:name:id>"}, RATATOSKR_EMOJI) belong in the git-ignored wrangler.local.jsonc.
+  "vars": { "STORE_EMOJIS": {}, "LANGUAGE": "en" },
   "observability": {
     "enabled": true
   }
