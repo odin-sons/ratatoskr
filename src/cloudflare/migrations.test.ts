@@ -9,6 +9,7 @@ import { D1Shim } from './testing/d1-shim.ts';
 const ROOT = join(import.meta.dirname, '../..');
 const SCHEMA = readFileSync(join(ROOT, 'schema.sql'), 'utf8');
 const MIGRATION = readFileSync(join(ROOT, 'migrations/0001_outbox_delivered_at.sql'), 'utf8');
+const MIGRATION_DOWNLOAD_URL = readFileSync(join(ROOT, 'migrations/0002_package_download_url_and_downloads.sql'), 'utf8');
 
 const SOURCE = 'thunderstore:valheim';
 const NOW = '2026-09-19T12:00:00.000Z';
@@ -81,6 +82,7 @@ describe('schema upgrade from a database without outbox.delivered_at', () => {
   it('keeps pending rows and lets the current queries work on the upgraded database', async () => {
     const shim = legacyDatabase();
     shim.db.exec(MIGRATION);
+    shim.db.exec(MIGRATION_DOWNLOAD_URL);
     shim.db.exec(SCHEMA);
     const store = new D1Store(shim.asD1());
 
@@ -95,5 +97,63 @@ describe('schema upgrade from a database without outbox.delivered_at', () => {
   it('a fresh install needs no migration', () => {
     const shim = new D1Shim();
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
+  });
+});
+
+/** Database shape before `packages.download_url` and `packages.downloads` existed: the current schema without those columns. */
+const SCHEMA_BEFORE_DOWNLOAD_URL = SCHEMA.replace('  download_url TEXT,\n', '').replace('  downloads INTEGER,\n', '');
+
+function databaseWithoutDownloadUrl(): D1Shim {
+  const shim = new D1Shim();
+  shim.db.exec(SCHEMA_BEFORE_DOWNLOAD_URL);
+  const id = eventId(SOURCE, 'Owner-Mod', '1.0.0');
+  shim.db
+    .prepare('INSERT INTO packages (source, package_id, store, latest_version, name, owner, url, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(SOURCE, 'Owner-Mod', 'thunderstore', '1.0.0', 'Mod', 'Owner', 'https://thunderstore.invalid/Owner/Mod/', NOW);
+  shim.db
+    .prepare('INSERT INTO events (id, source, package_id, kind, version_to, release_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(id, SOURCE, 'Owner-Mod', 'new', '1.0.0', 'owner|mod|1.0.0', NOW);
+  shim.db
+    .prepare('INSERT INTO subscriptions (id, guild_id, webhook_url, filter, mode, digest_interval_min, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run('sub1', 'g', 'https://discord.invalid/api/webhooks/1/tok', '{}', 'immediate', null, 1);
+  shim.db
+    .prepare('INSERT INTO outbox (id, subscription_id, event_id, attempts, next_attempt_at) VALUES (?, ?, ?, ?, ?)')
+    .run(outboxId('sub1', id), 'sub1', id, 0, NOW);
+  return shim;
+}
+
+describe('schema upgrade from a database without packages.download_url and packages.downloads', () => {
+  it('the fixture really lacks the column and the current queries fail on it', async () => {
+    expect(SCHEMA_BEFORE_DOWNLOAD_URL).not.toMatch(/^ +download_url TEXT/m);
+    expect(SCHEMA_BEFORE_DOWNLOAD_URL).not.toMatch(/^ +downloads INTEGER/m);
+    await expect(new D1Store(databaseWithoutDownloadUrl().asD1()).takeDue(NOW, 10)).rejects.toThrow(/download_url/);
+  });
+
+  it('the migration adds both nullable columns, keeps the data, and the current queries then work', async () => {
+    const shim = databaseWithoutDownloadUrl();
+    shim.db.exec(MIGRATION_DOWNLOAD_URL);
+    const downloads = shim.db.prepare("SELECT \"notnull\" AS required, type FROM pragma_table_info('packages') WHERE name = 'downloads'").get();
+    expect(downloads).toEqual({ required: 0, type: 'INTEGER' });
+    const column = (shim.db.prepare("SELECT \"notnull\" AS required FROM pragma_table_info('packages') WHERE name = 'download_url'").get() as { required: number } | undefined);
+    expect(column).toEqual({ required: 0 });
+    const store = new D1Store(shim.asD1());
+    const [due] = await store.takeDue(NOW, 10);
+    expect(due!.event.pkg).toMatchObject({ packageId: 'Owner-Mod', downloadUrl: null, downloads: null });
+    await store.commit({
+      source: SOURCE,
+      packages: [{ ...due!.event.pkg, version: '1.1.0', downloadUrl: 'https://cdn.invalid/mod.zip', downloads: 12 }],
+      events: [],
+      outbox: [],
+      state: { id: SOURCE, cursor: null, etag: null, bootstrapped: true, lastOkAt: null },
+    });
+    expect((await store.takeDue(NOW, 10))[0]!.event.pkg).toMatchObject({ downloadUrl: 'https://cdn.invalid/mod.zip', downloads: 12 });
+  });
+
+  it('applies schema.sql cleanly afterwards, twice, and cannot be applied a second time itself', () => {
+    const shim = databaseWithoutDownloadUrl();
+    shim.db.exec(MIGRATION_DOWNLOAD_URL);
+    expect(() => shim.db.exec(SCHEMA)).not.toThrow();
+    expect(() => shim.db.exec(SCHEMA)).not.toThrow();
+    expect(() => shim.db.exec(MIGRATION_DOWNLOAD_URL)).toThrow(/duplicate column/);
   });
 });

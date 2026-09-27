@@ -4,6 +4,7 @@ import { formatRunLog, sanitizeLogText } from '../core/report.ts';
 import { runReconcile, runTick } from '../core/tick.ts';
 import type { TickDeps, TickReport } from '../core/tick.ts';
 import type { AppConfig } from '../core/types.ts';
+import { parseStoreEmojis } from '../render/index.ts';
 import { createAdapters } from '../sources/index.ts';
 import { RECONCILE_CRONS, TICK_CRON } from './crons.ts';
 import { D1Store } from './d1-store.ts';
@@ -12,6 +13,8 @@ import { DiscordSender } from './discord-sender.ts';
 export interface Env {
   DB: D1Database;
   NEXUS_API_KEY?: string;
+  /** Custom emoji per store: an object, or a JSON string of one, `{"thunderstore":"<:name:id>", ...}`. */
+  STORE_EMOJIS?: string | Record<string, string>;
 }
 
 function buildDeps(env: Env): TickDeps {
@@ -23,6 +26,7 @@ function buildDeps(env: Env): TickDeps {
     adapters: createAdapters(appConfig, store),
     config: appConfig,
     secrets: { NEXUS_API_KEY: env.NEXUS_API_KEY },
+    storeEmojis: parseStoreEmojis(env.STORE_EMOJIS),
     fetch: globalThis.fetch.bind(globalThis),
     clock: { now: () => new Date() },
     reconcileRunsPerDay: RECONCILE_CRONS.length,

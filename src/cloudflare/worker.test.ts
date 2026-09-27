@@ -26,9 +26,9 @@ function ctxWithSpy(): { ctx: ExecutionContext; pending: Promise<unknown>[] } {
   return { ctx, pending };
 }
 
-async function run(cron: string): Promise<void> {
+async function run(cron: string, e: Env = env): Promise<void> {
   const { ctx, pending } = ctxWithSpy();
-  await worker.scheduled(controller(cron), env, ctx);
+  await worker.scheduled(controller(cron), e, ctx);
   await Promise.all(pending);
 }
 
@@ -47,12 +47,17 @@ const REPORT: TickReport = {
 
 let errors: string[];
 let logs: string[];
+let warns: string[];
 
 beforeEach(() => {
   runTick.mockReset().mockResolvedValue(REPORT);
   runReconcile.mockReset().mockResolvedValue(REPORT);
   errors = [];
   logs = [];
+  warns = [];
+  vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+    warns.push(args.map(String).join(' '));
+  });
   vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
     errors.push(args.map(String).join(' '));
   });
@@ -164,6 +169,48 @@ describe('worker', () => {
     }
   });
 
+  describe('STORE_EMOJIS', () => {
+    const TS = '<:thunderstore:123456789012345678>';
+    const HX = '<:hexium:123456789012345679>';
+
+    it('reaches the tick and reconcile deps from an object setting', async () => {
+      await run(TICK_CRON, { ...env, STORE_EMOJIS: { thunderstore: TS, hexium: HX } });
+      await run(RECONCILE_CRONS[0], { ...env, STORE_EMOJIS: { thunderstore: TS } });
+      expect(runTick.mock.calls[0]![0].storeEmojis).toEqual({ thunderstore: TS, hexium: HX });
+      expect(runReconcile.mock.calls[0]![0].storeEmojis).toEqual({ thunderstore: TS });
+      expect(warns).toEqual([]);
+    });
+
+    it('accepts a JSON string setting', async () => {
+      await run(TICK_CRON, { ...env, STORE_EMOJIS: JSON.stringify({ nexus: '<a:nexus:123456789012345680>' }) });
+      expect(runTick.mock.calls[0]![0].storeEmojis).toEqual({ nexus: '<a:nexus:123456789012345680>' });
+    });
+
+    it('means no emoji when absent or empty, without a warning', async () => {
+      await run(TICK_CRON);
+      await run(TICK_CRON, { ...env, STORE_EMOJIS: {} });
+      expect(runTick.mock.calls.map((c) => c[0].storeEmojis)).toEqual([{}, {}]);
+      expect(warns).toEqual([]);
+    });
+
+    it('ignores invalid entries with one warning naming only the key and still runs', async () => {
+      await run(TICK_CRON, { ...env, STORE_EMOJIS: { thunderstore: TS, hexium: ':hexium:' } });
+      expect(runTick).toHaveBeenCalledTimes(1);
+      expect(runTick.mock.calls[0]![0].storeEmojis).toEqual({ thunderstore: TS });
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toContain('hexium');
+      expect(warns[0]).not.toContain(':hexium:');
+    });
+
+    it('survives an unparsable setting', async () => {
+      await run(TICK_CRON, { ...env, STORE_EMOJIS: '{oops' });
+      expect(runTick).toHaveBeenCalledTimes(1);
+      expect(runTick.mock.calls[0]![0].storeEmojis).toEqual({});
+      expect(warns).toHaveLength(1);
+      expect(errors).toEqual([]);
+    });
+  });
+
   it('keeps wrangler.jsonc crons in sync with the code', () => {
     const raw = readFileSync(join(import.meta.dirname, '../../wrangler.jsonc'), 'utf8');
     const json = raw
@@ -176,5 +223,16 @@ describe('worker', () => {
     expect(wrangler.workers_dev).toBe(false);
     expect(wrangler.preview_urls).toBe(false);
     expect(wrangler.routes).toBeUndefined();
+  });
+
+  it('ships wrangler.jsonc with an empty STORE_EMOJIS var: real emoji ids are operator configuration', () => {
+    const raw = readFileSync(join(import.meta.dirname, '../../wrangler.jsonc'), 'utf8');
+    const json = raw
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n');
+    const wrangler = JSON.parse(json) as { vars?: Record<string, unknown> };
+    expect(wrangler.vars?.STORE_EMOJIS).toEqual({});
+    expect(raw).not.toMatch(/<a?:\w+:\d+>/);
   });
 });

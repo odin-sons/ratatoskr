@@ -82,6 +82,48 @@ describe('DiscordSender', () => {
     expect(String(calls[0]![0])).toBe(`${HOOK}?thread_id=42&wait=false`);
   });
 
+  describe('link buttons', () => {
+    const WITH_BUTTONS: DiscordMessage = {
+      content: 'hi',
+      components: [{ type: 1, components: [{ type: 2, style: 5, label: 'Mod page', url: 'https://thunderstore.io/c/valheim/p/A/B/' }] }],
+      allowed_mentions: { parse: [] },
+    };
+
+    it('adds with_components=true only when the payload carries components', async () => {
+      const { sender, calls } = senderWith(() => new Response(null, { status: 204 }));
+      await sender.send(HOOK, WITH_BUTTONS);
+      expect(String(calls[0]![0])).toBe(`${HOOK}?wait=false&with_components=true`);
+      expect(JSON.parse(calls[0]![1]?.body as string)).toEqual(WITH_BUTTONS);
+      await sender.send(HOOK, MESSAGE);
+      expect(String(calls[1]![0])).toBe(`${HOOK}?wait=false`);
+      await sender.send(HOOK, { ...MESSAGE, components: [] });
+      expect(String(calls[2]![0])).toBe(`${HOOK}?wait=false`);
+    });
+
+    it('keeps an existing query string and never adds the flag twice', async () => {
+      const { sender, calls } = senderWith(() => new Response(null, { status: 204 }));
+      await sender.send(`${HOOK}?thread_id=42&with_components=false`, WITH_BUTTONS);
+      expect(String(calls[0]![0])).toBe(`${HOOK}?thread_id=42&with_components=true&wait=false`);
+    });
+
+    it('still rejects a non-webhook url before any request and leaks nothing', async () => {
+      const { sender, calls } = senderWith(() => new Response(null, { status: 204 }));
+      expect(await sender.send('https://evil.example/api/webhooks/123456789012345678/x', WITH_BUTTONS)).toEqual({ ok: false, retryable: false, status: 0 });
+      expect(calls).toHaveLength(0);
+      expectNoSecretLeak();
+    });
+
+    it('classifies 429, 5xx and 4xx exactly as without components', async () => {
+      const limited = senderWith(() => Response.json({ retry_after: 1.5 }, { status: 429 }));
+      expect(await limited.sender.send(HOOK, WITH_BUTTONS)).toEqual({ ok: false, retryable: true, retryAfterSeconds: 2, status: 429 });
+      const broken = senderWith(() => new Response('', { status: 503 }));
+      expect(await broken.sender.send(HOOK, WITH_BUTTONS)).toEqual({ ok: false, retryable: true, retryAfterSeconds: null, status: 503 });
+      const rejected = senderWith(() => new Response('', { status: 400 }));
+      expect(await rejected.sender.send(HOOK, WITH_BUTTONS)).toEqual({ ok: false, retryable: false, status: 400 });
+      expectNoSecretLeak();
+    });
+  });
+
   it('treats 200 as ok', async () => {
     const { sender } = senderWith(() => new Response('{}', { status: 200 }));
     expect(await sender.send(HOOK, MESSAGE)).toEqual({ ok: true });

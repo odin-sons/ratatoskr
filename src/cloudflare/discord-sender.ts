@@ -27,6 +27,7 @@ export class DiscordSender implements Sender {
 
     const url = new URL(webhookUrl);
     url.searchParams.set('wait', 'false');
+    if (payload.components !== undefined && payload.components.length > 0) url.searchParams.set('with_components', 'true');
 
     let res: Response;
     try {

@@ -27,6 +27,8 @@ function pkg(id: string, over: Partial<PackageSnapshot> = {}): PackageSnapshot {
     version: '1.0.0',
     url: `https://thunderstore.io/c/valheim/p/${id}/`,
     iconUrl: 'https://cdn.example/icon.png',
+    downloadUrl: 'https://cdn.example/download.zip',
+    downloads: 4321,
     description: 'A mod',
     categories: ['Tools', 'Misc'],
     isNsfw: false,
@@ -215,19 +217,59 @@ describe('commit', () => {
     await store.commit(batch({ packages: [pkg('Owner-Name', { isNsfw: true, isDeprecated: true })] }));
     await store.commit(
       batch({
-        packages: [pkg('Owner-Name', { version: '2.0.0', iconUrl: null, description: null, sizeBytes: null, categories: [], isNsfw: false, isDeprecated: false })],
+        packages: [pkg('Owner-Name', { version: '2.0.0', iconUrl: null, downloadUrl: null, downloads: null, description: null, sizeBytes: null, categories: [], isNsfw: false, isDeprecated: false })],
       }),
     );
     const row = shim.db.prepare('SELECT * FROM packages WHERE package_id = ?').get('Owner-Name') as Record<string, unknown>;
     expect(row).toMatchObject({
       latest_version: '2.0.0',
       icon_url: 'https://cdn.example/icon.png',
+      download_url: null,
+      downloads: 4321,
       description: 'A mod',
       size_bytes: 1234,
       categories: '["Tools","Misc"]',
       is_nsfw: 1,
       is_deprecated: 1,
     });
+  });
+
+  it('keeps the download url only for the same version; a new version without one has none', async () => {
+    const read = () => (shim.db.prepare('SELECT download_url FROM packages WHERE package_id = ?').get('Owner-Name') as { download_url: string | null }).download_url;
+    await store.commit(batch({ packages: [pkg('Owner-Name', { downloadUrl: undefined })] }));
+    expect(read()).toBeNull();
+    await store.commit(batch({ packages: [pkg('Owner-Name', { version: '1.1.0', downloadUrl: 'https://cdn.example/a.zip' })] }));
+    expect(read()).toBe('https://cdn.example/a.zip');
+    await store.commit(batch({ packages: [pkg('Owner-Name', { version: '1.1.0', downloadUrl: null })] }));
+    expect(read()).toBe('https://cdn.example/a.zip');
+    await store.commit(batch({ packages: [pkg('Owner-Name', { version: '1.2.0', downloadUrl: null })] }));
+    expect(read()).toBeNull();
+    await store.commit(batch({ packages: [pkg('Owner-Name', { version: '1.3.0', downloadUrl: 'https://cdn.example/b.zip' })] }));
+    expect(read()).toBe('https://cdn.example/b.zip');
+  });
+
+  it('overwrites the stored download count with any new non-null value and keeps it for NULL', async () => {
+    const read = () => (shim.db.prepare('SELECT downloads FROM packages WHERE package_id = ?').get('Owner-Name') as { downloads: number | null }).downloads;
+    await store.commit(batch({ packages: [pkg('Owner-Name', { downloads: undefined })] }));
+    expect(read()).toBeNull();
+    await store.commit(batch({ packages: [pkg('Owner-Name', { version: '1.1.0', downloads: 0 })] }));
+    expect(read()).toBe(0);
+    await store.commit(batch({ packages: [pkg('Owner-Name', { version: '1.2.0', downloads: 900 })] }));
+    expect(read()).toBe(900);
+    await store.commit(batch({ packages: [pkg('Owner-Name', { version: '1.3.0', downloads: null })] }));
+    expect(read()).toBe(900);
+    await store.commit(batch({ packages: [pkg('Owner-Name', { version: '1.4.0', downloads: 850 })] }));
+    expect(read()).toBe(850);
+  });
+
+  it('binds at most 100 parameters per package statement with the 16 package columns', async () => {
+    const pkgs = Array.from({ length: 13 }, (_, i) => pkg(`Owner-Mod${i}`));
+    shim.preparedSql.length = 0;
+    await store.commit(batch({ packages: pkgs }));
+    const inserts = shim.preparedSql.filter((sql) => sql.startsWith('INSERT INTO packages'));
+    expect(inserts).toHaveLength(3);
+    for (const sql of inserts) expect((sql.match(/\?/g) ?? []).length).toBeLessThanOrEqual(100);
+    expect((await store.getAllKnownVersions(SOURCE)).size).toBe(13);
   });
 
   it('tolerates duplicate package ids in one batch (last wins)', async () => {

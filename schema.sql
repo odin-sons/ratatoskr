@@ -2,7 +2,8 @@
 -- ratatoskr D1 schema for a fresh install; re-applying it to a database it created is harmless.
 --   wrangler d1 execute ratatoskr --remote --file=./schema.sql
 -- It does not alter existing tables. A database created before `outbox.delivered_at` existed
--- needs migrations/0001_outbox_delivered_at.sql once, before this file.
+-- needs migrations/0001_outbox_delivered_at.sql once, and one created before `packages.download_url` and
+-- `packages.downloads` existed needs migrations/0002_package_download_url_and_downloads.sql once, before this file.
 
 CREATE TABLE IF NOT EXISTS sources (
   id TEXT PRIMARY KEY,
@@ -21,6 +22,8 @@ CREATE TABLE IF NOT EXISTS packages (
   owner TEXT NOT NULL,
   url TEXT NOT NULL,
   icon_url TEXT,
+  download_url TEXT,
+  downloads INTEGER,
   description TEXT,
   categories TEXT NOT NULL DEFAULT '[]',
   size_bytes INTEGER,

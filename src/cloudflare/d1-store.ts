@@ -37,6 +37,8 @@ interface PackageCols {
   owner: string;
   url: string;
   icon_url: string | null;
+  download_url: string | null;
+  downloads: number | null;
   description: string | null;
   categories: string;
   size_bytes: number | null;
@@ -87,6 +89,8 @@ const PACKAGE_WRITE_COLUMNS = [
   'owner',
   'url',
   'icon_url',
+  'download_url',
+  'downloads',
   'description',
   'categories',
   'size_bytes',
@@ -190,7 +194,10 @@ function multiRowValues(rows: number, columns: number): string {
 
 function upsertExpression(column: string): string {
   switch (column) {
+    case 'download_url':
+      return 'CASE WHEN excluded.latest_version <> packages.latest_version THEN excluded.download_url ELSE COALESCE(excluded.download_url, packages.download_url) END';
     case 'icon_url':
+    case 'downloads':
     case 'description':
     case 'size_bytes':
       return `COALESCE(excluded.${column}, packages.${column})`;
@@ -417,6 +424,8 @@ function packageValues(p: PackageSnapshot): (string | number | null)[] {
     p.owner,
     p.url,
     p.iconUrl,
+    p.downloadUrl ?? null,
+    p.downloads ?? null,
     p.description,
     JSON.stringify(p.categories),
     p.sizeBytes,
@@ -529,6 +538,8 @@ function mapEvent(row: EventJoinRow): ModEvent {
     version: row.e_version_to,
     url: row.p_url,
     iconUrl: row.p_icon_url,
+    downloadUrl: row.p_download_url,
+    downloads: row.p_downloads,
     description: row.p_description,
     categories: parseCategories(row.p_categories),
     isNsfw: row.p_is_nsfw === 1,
