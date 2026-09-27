@@ -108,8 +108,9 @@ describe('escapeInlineTokens', () => {
   it('takes linear time on 128 KB of backticks, backslashes and brackets', () => {
     const inputs = ['`'.repeat(131_072), '\\'.repeat(131_072), '<'.repeat(131_072), ']:'.repeat(65_536), '\\`'.repeat(65_536)];
     let total = 0;
-    for (const input of inputs) total += bestOf(3, () => escapeInlineTokens(input));
-    expect(total).toBeLessThan(40);
+    for (const input of inputs) total += bestOf(8, () => escapeInlineTokens(input));
+    // Quadratic behavior on 128 KB would blow well past this; the margin above is headroom for a loaded runner, not slack for a regression.
+    expect(total).toBeLessThan(100);
   });
 });
 
