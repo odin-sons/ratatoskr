@@ -527,13 +527,19 @@ describe('link sanitising', () => {
 });
 
 describe('properties', () => {
+  const unicode = fc
+    .array(fc.oneof(fc.integer({ min: 0, max: 0xd7ff }), fc.integer({ min: 0xe000, max: 0x10ffff })), { maxLength: 500 })
+    .map((codePoints) => String.fromCodePoint(...codePoints));
   const markdownish = fc
     .array(fc.oneof(fc.constantFrom('## 1.2.4\n', '# T\n', '### v1.2.4\n', '```\n', '~~~\n', '[a](http://x.y/z)', '![i](u)', '@everyone', '<@1>', '<b>', '\r\n', '\n', '- ', '[', '](', ')', '…'), fc.string({ maxLength: 20 })), { maxLength: 60 })
+    .map((parts) => parts.join(''));
+  const hostileSurrogates = fc
+    .array(fc.constantFrom('\uD800', '\uDBFF', '\uDC00', '\uDFFF', 'a', ' ', '\n'), { maxLength: 40 })
     .map((parts) => parts.join(''));
 
   it('output length never exceeds maxChars and the call never throws', () => {
     fc.assert(
-      fc.property(fc.oneof(fc.string({ unit: 'binary', maxLength: 500 }), markdownish), fc.integer({ min: 0, max: 400 }), fc.boolean(), (md, maxChars, withLink) => {
+      fc.property(fc.oneof(unicode, markdownish, hostileSurrogates), fc.integer({ min: 0, max: 400 }), fc.boolean(), (md, maxChars, withLink) => {
         const out = extractChangelog(md, '1.2.4', { maxChars, fullUrl: withLink ? FULL_URL : null });
         if (out !== null) {
           expect(out.length).toBeLessThanOrEqual(maxChars);

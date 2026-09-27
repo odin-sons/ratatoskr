@@ -85,8 +85,14 @@ describe('extractNexusChangelog', () => {
   });
 
   it('property: never throws and never exceeds maxChars', () => {
+    const unicode = fc
+      .array(fc.oneof(fc.integer({ min: 0, max: 0xd7ff }), fc.integer({ min: 0xe000, max: 0x10ffff })), { maxLength: 80 })
+      .map((codePoints) => String.fromCodePoint(...codePoints));
+    const hostileSurrogates = fc
+      .array(fc.constantFrom('\uD800', '\uDBFF', '\uDC00', '\uDFFF', 'a', ' ', '\n'), { maxLength: 80 })
+      .map((parts) => parts.join(''));
     fc.assert(
-      fc.property(fc.array(fc.string({ unit: 'binary', maxLength: 80 }), { maxLength: 30 }), fc.integer({ min: 0, max: 300 }), fc.boolean(), (lines, maxChars, withLink) => {
+      fc.property(fc.array(fc.oneof(unicode, hostileSurrogates), { maxLength: 30 }), fc.integer({ min: 0, max: 300 }), fc.boolean(), (lines, maxChars, withLink) => {
         const out = extractNexusChangelog({ '1.0.0': lines }, '1.0.0', { maxChars, fullUrl: withLink ? FULL_URL : null });
         if (out !== null) {
           expect(out.length).toBeLessThanOrEqual(maxChars);

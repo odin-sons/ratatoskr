@@ -277,8 +277,14 @@ describe('sanitizeUntrusted', () => {
   });
 
   it('property: within max, no raw mentions, no lone surrogates, never throws', () => {
+    const unicode = fc
+      .array(fc.oneof(fc.integer({ min: 0, max: 0xd7ff }), fc.integer({ min: 0xe000, max: 0x10ffff })))
+      .map((codePoints) => codePoints.map((codePoint) => String.fromCodePoint(codePoint)).join(''));
+    const hostileSurrogates = fc
+      .array(fc.constantFrom('\uD800', '\uDBFF', '\uDC00', '\uDFFF', 'a', ' ', '\n'), { maxLength: 60 })
+      .map((parts) => parts.join(''));
     fc.assert(
-      fc.property(fc.string({ unit: 'binary' }), fc.integer({ min: 0, max: 300 }), (text, max) => {
+      fc.property(fc.oneof(unicode, hostileSurrogates), fc.integer({ min: 0, max: 300 }), (text, max) => {
         const out = sanitizeUntrusted(text, max);
         expect(out.length).toBeLessThanOrEqual(max);
         expect(out).not.toMatch(/@(everyone|here)/i);

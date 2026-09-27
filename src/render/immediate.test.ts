@@ -369,9 +369,15 @@ describe('injection', () => {
 });
 
 describe('limits', () => {
+  const unicode = fc
+    .array(fc.oneof(fc.integer({ min: 0, max: 0xd7ff }), fc.integer({ min: 0xe000, max: 0x10ffff })), { maxLength: 60 })
+    .map((codePoints) => String.fromCodePoint(...codePoints));
+  const hostileSurrogates = fc
+    .array(fc.constantFrom('\uD800', '\uDBFF', '\uDC00', '\uDFFF', 'a', ' ', '\n'), { maxLength: 60 })
+    .map((parts) => parts.join(''));
   const trickyText = fc.oneof(
     { weight: 4, arbitrary: fc.string({ unit: 'grapheme', maxLength: 60 }) },
-    { weight: 2, arbitrary: fc.string({ unit: 'binary', maxLength: 60 }) },
+    { weight: 2, arbitrary: fc.oneof(unicode, hostileSurrogates) },
     { weight: 2, arbitrary: fc.constantFrom('@everyone', 'a]b(c)', '[x](http://evil)', '|', '\\', '- item', '<@123>', 'line\nbreak', '', '   ', '`code`', '> quote', '# head') },
     { weight: 1, arbitrary: fc.nat(700).map((n) => 'n'.repeat(n)) },
     { weight: 1, arbitrary: fc.constant('L'.repeat(8000)) },

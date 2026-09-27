@@ -117,8 +117,14 @@ describe('nested links never smuggle a non-http(s) target', () => {
 
   describe.each(ROUTES)('property via %s', (_name, route) => {
     it('no output holds a link target that is not http(s), over arbitrary text', () => {
+      const unicode = fc
+        .array(fc.oneof(fc.integer({ min: 0, max: 0xd7ff }), fc.integer({ min: 0xe000, max: 0x10ffff })), { maxLength: 200 })
+        .map((codePoints) => String.fromCodePoint(...codePoints));
+      const hostileSurrogates = fc
+        .array(fc.constantFrom('\uD800', '\uDBFF', '\uDC00', '\uDFFF', 'a', ' ', '\n'), { maxLength: 200 })
+        .map((parts) => parts.join(''));
       fc.assert(
-        fc.property(fc.oneof(fc.string({ unit: 'binary', maxLength: 200 }), fc.string({ unit: 'grapheme', maxLength: 100 })), (md) => {
+        fc.property(fc.oneof(unicode, hostileSurrogates, fc.string({ unit: 'grapheme', maxLength: 100 })), (md) => {
           expect(unsafeLinkTargets(route(md))).toEqual([]);
         }),
         { numRuns: 400 },

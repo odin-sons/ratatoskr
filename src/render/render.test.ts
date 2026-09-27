@@ -69,9 +69,16 @@ function expectEndsWithProjectLine(msg: DiscordMessage): void {
   expect(endsWithProjectField(msg)).toBe(true);
 }
 
+const unicode = fc
+  .array(fc.oneof(fc.integer({ min: 0, max: 0xd7ff }), fc.integer({ min: 0xe000, max: 0x10ffff })), { maxLength: 40 })
+  .map((codePoints) => String.fromCodePoint(...codePoints));
+const hostileSurrogates = fc
+  .array(fc.constantFrom('\uD800', '\uDBFF', '\uDC00', '\uDFFF', 'a', ' ', '\n'), { maxLength: 40 })
+  .map((parts) => parts.join(''));
+
 const trickyText = fc.oneof(
   { weight: 4, arbitrary: fc.string({ unit: 'grapheme', maxLength: 40 }) },
-  { weight: 2, arbitrary: fc.string({ unit: 'binary', maxLength: 40 }) },
+  { weight: 2, arbitrary: fc.oneof(unicode, hostileSurrogates) },
   {
     weight: 2,
     arbitrary: fc.constantFrom('@everyone', 'a]b(c)', '[x](http://evil)', '|', '||spoil||', '\\', '- item', '1. item', '<@123>', '<#456>', 'line\nbreak', '', '   ', '`code`', '> quote', '# head'),
