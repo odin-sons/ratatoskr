@@ -2,12 +2,14 @@
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
-const CHECKS = [
+const ALL_CHECKS = [
   { name: 'typecheck', args: ['typecheck'] },
   { name: 'lint', args: ['lint'] },
   { name: 'test', args: ['test'] },
   { name: 'validate-config', args: ['validate-config'] },
 ] as const;
+
+type CheckName = (typeof ALL_CHECKS)[number]['name'];
 
 interface CheckResult {
   name: string;
@@ -25,9 +27,15 @@ function runCheck(name: string, args: string[]): Promise<CheckResult> {
   });
 }
 
-/** Runs every check concurrently; prints each in a fixed order once all finish, so output never interleaves. */
-export async function runChecks(): Promise<number> {
-  const results = await Promise.all(CHECKS.map((c) => runCheck(c.name, [...c.args])));
+/**
+ * Runs the named checks (all of them by default) concurrently, printing each in a fixed order once all finish so
+ * output never interleaves. `test` carries CPU-time budget assertions against this project's real 10ms Workers
+ * limit; running it alongside typecheck/lint on a CPU-constrained runner starves it and makes those budgets flake,
+ * so CI keeps `test` in its own invocation instead of bundling it with the others.
+ */
+export async function runChecks(names: readonly CheckName[] = ALL_CHECKS.map((c) => c.name)): Promise<number> {
+  const checks = ALL_CHECKS.filter((c) => names.includes(c.name));
+  const results = await Promise.all(checks.map((c) => runCheck(c.name, [...c.args])));
   let status = 0;
   for (const result of results) {
     console.log(`\n--- ${result.name} ${result.code === 0 ? 'OK' : 'FAILED'} ---`);
@@ -38,5 +46,6 @@ export async function runChecks(): Promise<number> {
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  runChecks().then((code) => process.exit(code));
+  const requested = process.argv.slice(2) as CheckName[];
+  runChecks(requested.length > 0 ? requested : undefined).then((code) => process.exit(code));
 }

@@ -8,9 +8,16 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  static-checks:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
-      - run: pnpm check
+      - run: node --experimental-strip-types scripts/check.ts typecheck lint validate-config
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: pnpm test
