@@ -185,6 +185,8 @@ CREATE TABLE packages (
   icon_url TEXT,
   download_url TEXT,                -- direct download link for the Download button, nullable, sticky like icon_url
   downloads INTEGER,                -- total download count, nullable; the latest non-null value wins
+  likes INTEGER,                    -- like/rating count, nullable; the latest non-null value wins
+  website_url TEXT,                 -- author-supplied website, nullable; the latest non-null value wins
   categories TEXT,                  -- JSON array
   is_nsfw INTEGER NOT NULL DEFAULT 0,
   is_deprecated INTEGER NOT NULL DEFAULT 0,
@@ -248,10 +250,71 @@ A subscription whose stored `filter` is not valid JSON or has the wrong shape is
 skipped with a one-line warning naming only its id; it never stops the other
 subscriptions.
 
+### Subscription filter
+
+The `filter` JSON is a `SubscriptionFilter` (`src/core/types.ts`). Every key is
+optional and an absent or empty list imposes no restriction. The keys are ANDed:
+an event is delivered only if it passes every one that is set.
+
+| Key | Effect |
+|---|---|
+| `sources` | Restrict to these source ids (`store:community`). |
+| `kinds` | `new`, `update`, or both. |
+| `packages` | Allowlist. Only packages that match an entry are delivered. |
+| `excludePackages` | Denylist. Packages that match an entry are never delivered. Wins over every other key, including `packages` and `watchlist`. |
+| `allowNsfw` | NSFW is excluded unless this is exactly `true`. |
+| `includeCategories`, `excludeCategories` | Category restriction, case-insensitive. |
+| `watchlist` | Highlight only: a hit is shown in detail in a digest. Never restricts delivery. |
+| `dedupAcrossStores` | Collapse the same release seen on several stores (default `true`). Evaluated per subscription against the events that subscription's own filter accepts. |
+
+Deprecated packages are never reported as `update` events.
+
+Package entries (`packages`, `excludePackages`, `watchlist`) share one rule: an
+entry matches when, compared case-insensitively and exactly (no partial match),
+it equals the package id, the `Owner-Name` pair, or the bare owner name.
+
+Enforcement points:
+
+- Fan-out: `compileFilter` builds the lookup sets once per subscription per tick.
+  A check is O(1) per set (package keys are lowercased once per package and
+  reused across subscriptions, categories are O(categories of the package)), so the
+  fan-out costs O(events x subscriptions) cheap checks. Measured on Node:
+  about 40 to 70 ns per event x subscription pair at 10 and 50 subscriptions
+  with `packages`, `excludePackages` and `includeCategories` set (about 250 ns when only
+  one subscription pays for the per-package lowercasing).
+- Delivery: due rows are re-checked against the subscription's current filter
+  (see "Progressive delivery" below), so a filter change, `disable` or `remove`
+  takes effect for rows already queued.
+- Reading: the stores narrow the stored JSON with `parseFilter`
+  (`src/core/filter.ts`). A wrong type in any known key makes the subscription be
+  skipped, never treated as an open filter. Unknown keys are dropped.
+- Writing: `scripts/validate-config.ts` (`validateSubscription`,
+  `validateSubscriptionFilter`) rejects unknown keys and malformed values before
+  any SQL is printed. Subscription ids match `^[A-Za-z0-9_-]{1,64}$`.
+
+### Managing subscriptions
+
+Each subscription is one row, so several channels with independent filters are
+several rows. Two scripts print (never execute) the `wrangler d1 execute`
+commands:
+
+- `pnpm add-subscription`: a plain `INSERT`, so a duplicate `--id` fails on the
+  primary key instead of replacing a row. The filter comes from repeatable flags
+  (`--source`, `--kind`, `--package`, `--exclude-package`, `--category`,
+  `--exclude-category`, `--allow-nsfw`) or from raw JSON (`--filter`,
+  `--filter-file`), never both.
+- `pnpm subscriptions <list|disable|enable|remove|set-filter>`. `list` selects
+  `id, guild_id, mode, filter, enabled` and the webhook id only; the webhook token
+  is never selected, and a URL of an unexpected shape prints `(unrecognised)`.
+  `remove` deletes the subscription row first, then its undelivered outbox rows
+  (delivered rows age out through the normal purge). `set-filter` replaces the whole
+  filter and refuses to run without a filter flag.
+
 `schema.sql` creates a fresh database and does not alter existing tables. A change
 to an existing table ships as a numbered file in `migrations/`, applied once
 (`0001_outbox_delivered_at.sql` adds `outbox.delivered_at` and its indexes,
-`0002_package_download_url_and_downloads.sql` adds `packages.download_url` and `packages.downloads`); a test
+`0002_package_download_url_and_downloads.sql` adds `packages.download_url` and `packages.downloads`,
+`0003_package_likes_and_website.sql` adds `packages.likes` and `packages.website_url`); a test
 applies each migration over the previous schema shape and runs the current queries.
 
 ## Volume
@@ -286,6 +349,22 @@ digest never renders more messages than the budget still allows. Whatever does
 not fit is deferred to the next tick, not lost, except changelog excerpts, which
 are dropped (`changelogSkipped`).
 
+The changelog fetch is the per-event **details phase**: the adapter's `fetchChangelog` returns the
+excerpt, its URL and, when the package has no website yet, the package website. Thunderstore needs
+a second request for the website (its listing and `/versions/` carry none; Hexium's lookup already
+did), so an adapter declares `detailRequests` (2 for Thunderstore, else 1) and the tick selects, in
+order, at most `TICK_BUDGET.maxChangelogFetches` (12) events whose declared requests all fit in
+`remaining - SUBREQUEST_SEND_RESERVE`; the rest render without details and are not retried. A
+result with an excerpt, a URL or a website is stored with one `Store.setEventDetails` call (event
+columns, and the package's `website_url` when found). Arithmetic: with polls P, details D and sends S,
+S <= 24 (reserved), D <= min(12 x 2, 48 - P - 24), so P + D + S <= 48 for every P; the cap of 12
+events at the worst cost of 2 requests is exactly the 24 requests above the reserve
+(`MAX_DETAIL_REQUESTS_PER_EVENT` in `src/core/constants.ts`; `src/core/subrequest-budget.test.ts`
+checks the bound and that no selected event is served half). A request the budget still refuses
+(the wrapped `fetch` floor) leaves that event without the website, never without its changelog,
+because the changelog request goes first. Each job runs its two requests one after the other, so the
+six-connection cap holds.
+
 ## Digest rendering
 
 At this volume, one message per mod is unusable: 800 notifications a day is one
@@ -305,71 +384,128 @@ every two minutes. Default output is therefore a digest.
 Every text is untrusted upstream data: names, owners, versions and descriptions
 go through the escaping and mention-neutralising in `src/render/text.ts`; URLs are
 validated http(s) and percent-encoded; `allowed_mentions.parse` is always `[]`.
+Every user-visible string of the renderer comes from a catalog in `src/i18n` (see
+"Localisation"); the wording below is the English catalog.
 
-**Detailed embed** (new packages, watchlist hits, every immediate message). There
-is no embed `title`, `url` or `timestamp`; the description is
+**Header block** (shared by both message kinds). One block of Markdown:
 
 ```
-# [Name 1.2.2 -> 1.2.3](package url)                       h1 link; new packages: # [Name 1.0.0](url)
-{store emoji }⬆️ Updated mod by Owner · 94.2 MB · <t:UNIX:R>   🆕 New mod by Owner ... for new packages
-Also on [Hexium](url)                                       only when the release exists on other stores
+# {store emoji }[Name](package url)                 h1 link, no version; without a store emoji just the linked name
+⬆️ Updated by Owner · 1.2.2 → 1.2.3 · <t:UNIX:R>    🆕 New by Owner · 1.0.0 · <t:UNIX:R> for new packages
+ℹ️ 94.2 MB · Downloaded 12,345 times · 21 likes     each part only when known; the line is omitted when none is
+Also on [Hexium](url)                               only when the release exists on other stores
 (blank line)
-description excerpt                                         only when there is one
+**📜 Description**                                  only when there is an excerpt
+description excerpt                                 at most 350 characters
 ```
 
-followed by the fields, in this order: `Changelog` (full width, only when there is
-one), `Total downloads` (inline; `12,345`, grouped by a small manual function, `0`
-shown, omitted when the count is unknown or not a non-negative safe number),
-`Categories` (inline; escaped names, at most 8 entries of at most 32 characters and
-200 characters in total, a cut list ends with `…`, omitted when empty) and, last,
-the project field (below). The kind emoji are `KIND_EMOJI` in `src/render/layout.ts`
-(update: U+2B06 U+FE0F).
-
+- The kind emoji are `KIND_EMOJI` in `src/render/layout.ts` (update: U+2B06 U+FE0F);
+  the label emoji are `SECTION_EMOJI`. Owner is plain escaped text; a missing owner
+  drops "by Owner" (`Updated`), a missing timestamp drops its part of the line. An
+  update without an earlier version shows only the new one. Without a usable package
+  URL the title is not a link.
 - `<t:UNIX:R>` is a Discord relative timestamp (viewer-local; hovering shows the
   full local time). It uses `pkg.updatedAt`, then the event's `createdAt`, then the
   render time; the style letter is `DISCORD.timestampStyleRelative`.
-- Owner is plain escaped text; missing owner, size or timestamp drop their part of
-  the line. Without a usable package URL the heading is not a link.
-- The changelog field, the thumbnail and the store colour bar are as before. The
-  footer is only the store label (`Thunderstore`).
-- Immediate messages (`renderImmediate`) additionally carry one action row of
-  link buttons: `Mod page` (`pkg.url`) and `Download` (`pkg.downloadUrl`, only when
-  present). Only http(s) URLs without credentials, at most 512 characters (label at
-  most 80, at most 5 buttons) are kept; an invalid one drops its button and no
-  `components` field is sent when none remain. Non-application webhooks may send
-  non-interactive components when the request has `?with_components=true`, which
-  `DiscordSender` adds only when the payload has components. Digest messages
-  never carry buttons.
+- Downloads are shown from zero up; likes only above zero; both must be non-negative
+  safe numbers (the whole part is shown), else the part is omitted. Numbers are grouped
+  by a small manual function using the catalog's separator; sizes use the catalog's
+  units and decimal separator.
+- `Changelog`: the excerpt from the changelog module (final Markdown), re-fitted to
+  `CHANGELOG_DISPLAY_MAX` (500) characters in total: cut on a line boundary, else at a
+  word boundary, never inside a link, ending with `…` and one `[Full changelog](url)`
+  link in the catalog language that stays inside the budget (`finalizeExcerpt`). A link
+  in the body labelled like that link is degraded to plain text, so the trailing link
+  stays unique. Only shown when there is an excerpt.
+- `🗂️ Categories`: escaped names, at most 8 entries of at most 32 characters and 200
+  characters in total, a cut list ends with `…`, omitted when empty.
+
+**Immediate message** (`renderImmediate`, one event). A Discord Components V2
+message: `{ flags: 32768, allowed_mentions: { parse: [] }, components: [Container] }`
+with no `content` and no `embeds` (Discord rejects them next to the V2 flag). The
+container (type 17) has `accent_color` = the store colour and holds, separated by
+dividers (type 14):
+
+1. the header block, in a Section (type 9) whose accessory is a Thumbnail (type 11,
+   the package icon) when the icon URL is a usable http(s) URL without credentials,
+   else in a plain TextDisplay (type 10);
+2. `**Changelog**` and the excerpt, in a TextDisplay, only when there is one;
+3. `**🗂️ Categories**` and the list, in a TextDisplay, only when non-empty;
+4. an action row (type 1) of link buttons (type 2, style 5): `Mod page` (`pkg.url`; emoji
+   = the store's custom emoji, else a Unicode fallback per store), `Download`
+   (`pkg.downloadUrl`, U+2B07 U+FE0F), `Website` (`pkg.websiteUrl`, placed right after
+   Download) and always `ratatoskr`, the link to `PROJECT.repoUrl` with the emoji from
+   `RATATOSKR_EMOJI` or a squirrel. The source button is the AGPL notice: it is present
+   even when every other URL is invalid. Only http(s) URLs without credentials, at most
+   512 characters, whose host Discord accepts are kept (label at most 80, at most 5
+   buttons); an invalid URL drops its button. Discord answers 400 for a host without a real
+   top-level domain (`https://mysite`, `https://a.b`), so `hasDeliverableHost` (`src/text/url.ts`)
+   admits only an IPv4 literal or a dotted name of `[a-z0-9-]` labels ending in a letters-only
+   label of two or more letters or an `xn--` label; the Website URL is filtered by the same
+   rule before it is stored. A custom emoji becomes `{ id, name, animated }`; a Unicode one
+   `{ name }` only when it is a pictographic emoji (a non-emoji symbol makes Discord answer 400).
+   If Discord answers an immediate message with 400 anyway, the drain renders it once more
+   with only the mod page and source buttons (`optionalButtons: false`) and resends it; the
+   run report counts that as `degraded`, and when the resend fails too the row is parked.
+
+Discord limits for a V2 message (`DISCORD.componentsV2*`): 40 components in total (nested
+ones count), 4000 characters of text across all text displays. The renderer's caps
+(description 350, changelog 500, categories 200, also-on 300, title parts capped
+individually) keep the worst case near 2200 characters, and a property test with hostile
+input asserts both limits and the 6000/4000 sums. Non-application webhooks may send
+components only when the request has `?with_components=true`, which `DiscordSender` adds
+when the payload has components; the URL is never logged.
+
+**Detailed embed** (digest: new packages and watchlist hits). A classic embed with the
+header block as its description (so the h1 link title is its first line), the mod icon
+as `thumbnail`, the store colour bar, and no `title`, `url`, `timestamp` or footer. Its
+fields are `Changelog` (full width, only when there is one) and `🗂️ Categories`, then
+the project field (below): an embed holds at most three fields, so the 25-field and
+1024-character value limits cannot be hit.
 
 **Compact list embed** (digest updates). The first description line is the
-heading `{emoji }**Thunderstore** · 37 updates` (the count of that embed; a store
-split over several embeds gets one heading each), followed by one line per mod.
-Footers cannot render custom emoji or links, so list embeds have no footer.
+heading `{emoji }**Thunderstore** · 37 updates` (the count of that embed, with the
+localised plural; a store split over several embeds gets one heading each), followed by
+one line per mod. Footers cannot render custom emoji or links, so list embeds have no
+footer of their own.
 
-**Project link** (AGPL notice). The last field of the last embed of every message is
-non-inline, named with a zero-width space (Discord requires a non-empty name) and
-valued `-# [ratatoskr v0.1.0](https://github.com/odin-sons/ratatoskr)`, built from
-`PROJECT` (`PROJECT_FIELD` in `src/render/layout.ts`). It is not part of any
-description. A paged digest keeps its `(i/n)` suffix in the footer of the last embed
-(`Thunderstore · (2/3)` or just `(2/3)` when that embed is a list). The packer
-reserves room for the field and the suffix up front (`TEXT_BUDGET`); an embed holds at
-most three other fields, so the 25-field and 1024-character value limits cannot be
-hit, and the line can never be dropped or push a message beyond 6000 characters.
-Tests assert that every message ends with it, including pathological digests.
+**Project link** (AGPL notice in digests, which cannot carry buttons). The last field of the
+last embed of every digest message is non-inline, named with a zero-width space (Discord
+requires a non-empty name) and valued `-# [ratatoskr v0.1.0](https://github.com/odin-sons/ratatoskr)`,
+built from `PROJECT` (`PROJECT_FIELD` in `src/render/layout.ts`). It is not part of any
+description. A digest that spans several messages numbers them: the footer of the last embed
+of each message is only the localised `(i/n)` (`Messages.page`), and no other embed has a
+footer. The packer reserves room for the field and the footer up front (`TEXT_BUDGET`,
+`PAGE_SUFFIX_RESERVE`, whose fit for every catalog a test asserts), so the line can never be
+dropped or push a message beyond 6000 characters. Tests assert that every digest message
+ends with it, including pathological digests, in every language. Immediate messages have no
+project field; their `ratatoskr` button replaces it.
 
 **Store emoji.** The optional Worker setting `STORE_EMOJIS` (an object or JSON
 string keyed by store) holds full custom emoji markup, validated with
 `^<a?:[A-Za-z0-9_]{2,32}:[0-9]{17,20}>$`. It is parsed once per invocation
 (`parseStoreEmojis`; invalid entries are ignored with one warning naming only the
 keys), carried in `TickDeps`/`DrainDeps` to every render call, and re-validated by
-the renderer. A store without an entry shows no emoji.
+the renderer. It appears in the title of detailed messages, on the `Mod page` button and
+in compact list headings; a store without an entry shows no emoji in the title and a
+Unicode fallback on the button. `RATATOSKR_EMOJI` (a string, same validation, invalid
+value ignored with one warning naming only the key) is the source button's emoji.
+
+**Localisation.** `src/i18n` holds a typed catalog per language (`en.ts`, `ru.ts`); the
+`Messages` interface makes a missing key a compile error. Plural forms come from small
+hand-written rules per language (`plural.ts`, no `Intl`): English one/other, Russian
+one/few/many/other. The Worker setting `LANGUAGE` (default `en`; an unknown value falls
+back to `en` with one warning naming only the key) is parsed once per invocation
+(`parseLanguage`), carried in `TickDeps`/`DrainDeps` to every render call as
+`RenderOptions.locale` and resolved by `getMessages`. Log lines, adapter warnings and the run
+report stay English.
 
 ### Detailed events and changelogs
 
 An event is fetched with a changelog when at least one subscription receiving it
 shows it in detail: it is a new package, or a watchlist hit of a digest
 subscription, or the subscription is `immediate` (every immediate message is a
-detailed embed). The per-tick caps are unchanged: at most
+detailed message). The per-tick caps are unchanged: at most
 `maxChangelogFetches` fetches, always leaving the send reserve of the shared
 subrequest budget unspent; the remainder is rendered without a changelog and counted
 in `changelogSkipped`. Many mods ship no `CHANGELOG.md`; their field is simply
@@ -413,7 +549,7 @@ Failure handling in the drain:
   which the remaining rows wait for the next tick), parked without retry with the log
   line `outbox parked unrenderable event=<id>`, and the rest is delivered. A render
   error that no single entry reproduces fails the attempted prefix as a transient error.
-  An immediate row whose render throws is parked directly. A package row with corrupt
+  An immediate row whose render throws is parked directly. An immediate row that Discord rejects with 400 is first resent once without its Download and Website buttons (one log line, no URLs; `degraded` in the run report). A package row with corrupt
   `categories` JSON is read with no categories rather than failing the whole `takeDue`.
 
 Cost per digest:
@@ -427,6 +563,9 @@ backlog (two renders, 250 then 177 entries).
 Every number here is an external constraint. Put them in one constants module
 with this file cited. Message components (link buttons): at most 5 action rows and
 5 buttons per row, label at most 80 characters, URL at most 512 characters.
+Components V2 messages (flag 32768, immediate mode): 40 components in total including
+nested ones, 4000 characters of text across all text displays, no `content` and no
+`embeds`.
 
 | Limit | Value | Status |
 |---|---|---|
@@ -499,7 +638,8 @@ version, not a diff. To get the section for the published version:
    changelog. This is a nice-to-have, not a feature to fight for.
 
 Truncate to ~1000 characters on a line boundary, never mid-link, and append a
-link to the full changelog.
+link to the full changelog. The stored excerpt is re-fitted to 500 characters
+(`CHANGELOG_DISPLAY_MAX`) when a message is rendered; see "Message layout".
 
 A more exact approach — fetch the changelog for both the old and new version
 and diff the prefix — doubles requests for a rare gain. Keep it in mind, do not
@@ -525,7 +665,8 @@ Nexus needs none of this: `changelogs.json` is already keyed by version.
 
 Each scheduled run logs exactly one JSON line (`event: "run"`): cron, per-source
 `status`/`events`/`error`, `sent`, `failed`, `deferred` (work that runs later:
-sources not polled, outbox rows not attempted), `parked`, `filtered` (rows
+sources not polled, outbox rows not attempted), `parked`, `degraded` (immediate
+messages delivered only after a resend without optional buttons), `filtered` (rows
 dropped at delivery because the filter changed), `purged`, `changelogFetches`,
 `changelogSkipped` (dropped, never retried), `subrequests` and `elapsedMs`.
 Error texts are one line, capped at 200 characters, with any `scheme://` URL (any case)
@@ -538,8 +679,13 @@ No inbound endpoint means no slash commands. Configuration is `wrangler secret`
 and `wrangler d1 execute`. Accepted trade-off for a zero-surface deployment.
 
 Optional Worker variable `STORE_EMOJIS` (object or JSON string, keyed by store) sets
-custom store emoji; see "Message layout". Real ids belong in the operator's
-git-ignored `wrangler.local.jsonc`, never in the repository.
+custom store emoji, `RATATOSKR_EMOJI` (string) the emoji of the source button and
+`LANGUAGE` (`en` default, `ru`) the message language; see "Message layout". Real ids
+belong in the operator's git-ignored `wrangler.local.jsonc` or `.env`, never in the
+repository. `pnpm run deploy` reads `STORE_EMOJI_*`, `RATATOSKR_EMOJI` and `RATATOSKR_LANGUAGE`
+(not `LANGUAGE`, the POSIX locale variable) from `.env`, validates them (a bad value
+stops the deploy and is never echoed) and passes them as `--var` (`LANGUAGE:xx` for
+the language).
 
 Build-time validation: a schema in `scripts/`, run in CI and pre-deploy, types
 generated from it, **not bundled into the Worker**. Runtime input from D1 and

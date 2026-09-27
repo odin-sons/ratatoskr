@@ -4,6 +4,7 @@ import {
   buildInsertSql,
   buildWranglerCommand,
   parseCli,
+  planSubscription,
   shellDoubleQuote,
   sqlString,
 } from './add-subscription.ts';
@@ -87,5 +88,104 @@ describe('parseCli', () => {
   it('rejects conflicting webhook flags and invalid filter JSON', () => {
     expect(() => parseCli(['--webhook-url', 'x', '--webhook-url-env', 'H'], {})).toThrow();
     expect(() => parseCli(['--filter', '{'], {})).toThrow(/valid JSON/);
+  });
+});
+
+describe('parseCli --id', () => {
+  it('defaults to no id so a random one is generated', () => {
+    expect(parseCli([], {}).id).toBeUndefined();
+  });
+
+  it.each(['main', 'hexium-channel', 'Author_Mods', 'x'.repeat(64)])('accepts %s', (id) => {
+    expect(parseCli(['--id', id], {}).id).toBe(id);
+  });
+
+  it.each(['', 'a b', "a'b", 'a;b', 'a"b', '$(x)', 'x'.repeat(65), 'a/b', 'ä'])('rejects %j', (id) => {
+    expect(() => parseCli(['--id', id], {})).toThrow(/--id/);
+  });
+});
+
+describe('parseCli filter flags', () => {
+  it('builds the filter from repeatable flags', () => {
+    const o = parseCli(
+      [
+        '--source', 'hexium:valheim', '--source', 'nexus:valheim',
+        '--kind', 'update',
+        '--package', 'Owner-Name', '--package', 'Owner',
+        '--exclude-package', 'Noisy-Mod',
+        '--category', 'Tweaks', '--exclude-category', 'Cosmetics',
+        '--allow-nsfw',
+      ],
+      {},
+    );
+    expect(o.filter).toEqual({
+      sources: ['hexium:valheim', 'nexus:valheim'],
+      kinds: ['update'],
+      packages: ['Owner-Name', 'Owner'],
+      excludePackages: ['Noisy-Mod'],
+      includeCategories: ['Tweaks'],
+      excludeCategories: ['Cosmetics'],
+      allowNsfw: true,
+    });
+  });
+
+  it('still accepts raw JSON on its own', () => {
+    expect(parseCli(['--filter', '{"kinds":["new"]}'], {}).filter).toEqual({ kinds: ['new'] });
+  });
+
+  it('refuses to combine raw JSON with the filter flags', () => {
+    expect(() => parseCli(['--filter', '{}', '--package', 'A'], {})).toThrow(/--package/);
+    expect(() => parseCli(['--filter-file', 'f.json', '--allow-nsfw'], {})).toThrow(/--allow-nsfw/);
+    expect(() => parseCli(['--filter', '{}', '--filter-file', 'f.json'], {})).toThrow(/not both/);
+  });
+
+  it('rejects an unknown kind', () => {
+    expect(() => parseCli(['--kind', 'delete'], {})).toThrow(/--kind/);
+  });
+});
+
+describe('planSubscription', () => {
+  const opts = (argv: string[]) => parseCli(['--guild-id', '123456789012345678', '--webhook-url-env', 'HOOK', ...argv], { HOOK: WEBHOOK });
+  const newId = () => 'generated-id';
+
+  it('uses the given id, or a generated one', () => {
+    const named = planSubscription(opts(['--id', 'one-mod']), newId);
+    expect(named.ok && named.subscription.id).toBe('one-mod');
+    const anon = planSubscription(opts([]), newId);
+    expect(anon.ok && anon.subscription.id).toBe('generated-id');
+  });
+
+  it('emits a plain INSERT so a duplicate id fails instead of replacing', () => {
+    const plan = planSubscription(opts(['--id', 'one-mod', '--package', 'Owner-Name', '--kind', 'update']), newId);
+    if (!plan.ok) throw new Error('expected a plan');
+    expect(plan.sql).toMatch(/^INSERT INTO subscriptions /);
+    expect(plan.sql).not.toMatch(/OR REPLACE|OR IGNORE|ON CONFLICT|UPSERT/i);
+    expect(plan.sql).toContain(`'one-mod'`);
+    expect(plan.sql).toContain(`'{"kinds":["update"],"packages":["Owner-Name"]}'`);
+  });
+
+  it('escapes quotes in package names inside the SQL and the shell command', () => {
+    const plan = planSubscription(opts(['--package', "Bob's-Mod'; DROP TABLE subscriptions;--"]), newId);
+    if (!plan.ok) throw new Error('expected a plan');
+    expect(plan.sql).toContain(`"Bob''s-Mod''; DROP TABLE subscriptions;--"`);
+    const command = buildWranglerCommand(plan.sql, 'ratatoskr', false);
+    expect(command.startsWith('wrangler d1 execute ratatoskr --remote --command "INSERT INTO')).toBe(true);
+  });
+
+  it('reports invalid filter values without echoing the webhook URL', () => {
+    const plan = planSubscription(opts(['--source', 'nope', '--package', ' ']), newId);
+    if (plan.ok) throw new Error('expected errors');
+    const text = plan.errors.join(' | ');
+    expect(text).toMatch(/filter\.sources\[0\]/);
+    expect(text).toMatch(/filter\.packages\[0\]/);
+    expect(text).not.toContain(WEBHOOK);
+  });
+
+  it('reports a bad webhook URL without echoing it', () => {
+    const plan = planSubscription(parseCli(['--guild-id', '123456789012345678', '--webhook-url', 'https://evil.example/x'], {}), newId);
+    if (plan.ok) throw new Error('expected errors');
+    const text = plan.errors.join(' | ');
+    expect(text).toMatch(/webhookUrl/);
+    expect(text).not.toContain('evil.example');
   });
 });

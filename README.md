@@ -103,7 +103,9 @@ Until then, use the manual steps below.
 
    Upgrading an existing database: apply the files in `migrations/` you have not
    applied yet, in order, before `schema.sql`
-   (for example `wrangler d1 execute ratatoskr --remote --file=./migrations/0002_package_download_url_and_downloads.sql`).
+   (for example `wrangler d1 execute ratatoskr --remote --file=./migrations/0003_package_likes_and_website.sql`).
+   Apply each file once; the current ones are `0001_outbox_delivered_at.sql`,
+   `0002_package_download_url_and_downloads.sql` and `0003_package_likes_and_website.sql`.
    A database created from the current `schema.sql` needs none of them.
 
 4. Review `ratatoskr.config.json` (sources, game, User-Agent) and validate it.
@@ -147,7 +149,8 @@ Until then, use the manual steps below.
    To keep your real `database_id` out of git, copy `wrangler.jsonc` to
    `wrangler.local.jsonc` (git-ignored) and put the id there. `pnpm run deploy`
    uses that file when it exists and loads `.env`, so the optional store emoji
-   (`STORE_EMOJI_*`, see below) reach the Worker without being committed. Pass
+   (`STORE_EMOJI_*`), `RATATOSKR_EMOJI` and `RATATOSKR_LANGUAGE` (see below) reach the
+   Worker without being committed. Pass
    `-c wrangler.local.jsonc` to the other `wrangler` commands as well.
 
 ## Configuration
@@ -179,9 +182,11 @@ in CI) and not bundled into the Worker.
 
 ### Store emoji (`STORE_EMOJIS`)
 
-Optional. Messages can show a custom emoji per store at the start of the info
-line (`<emoji> Updated mod by ...`) and of each per-store digest heading. It is
-a Worker variable, an object (or a JSON string of one) keyed by store:
+Optional. Messages can show a custom emoji per store at the start of the title
+(`# <emoji> [Name](url)`), on the `Mod page` button and at the start of each
+per-store digest heading. Without one the title is just the linked name and the
+button uses a built-in Unicode emoji. It is a Worker variable, an object (or a
+JSON string of one) keyed by store:
 
 ```json
 {
@@ -200,27 +205,71 @@ a Worker variable, an object (or a JSON string of one) keyed by store:
 - Each value must match `<a?:[A-Za-z0-9_]{2,32}:[0-9]{17,20}>`. Invalid
   entries and unknown keys are ignored (one warning in the log names only the
   keys); a store without an entry shows no emoji.
-- `wrangler.jsonc` ships `"vars": { "STORE_EMOJIS": {} }`. The easy way to set
+- `wrangler.jsonc` ships `"vars": { "STORE_EMOJIS": {}, "LANGUAGE": "en" }`. The easy way to set
   it: put `STORE_EMOJI_THUNDERSTORE`, `STORE_EMOJI_HEXIUM` and `STORE_EMOJI_NEXUS`
   in the git-ignored `.env` (see `.env.example`); `pnpm run deploy` validates them
   and passes them to the Worker as `STORE_EMOJIS`. You can also set the variable
   in the git-ignored `wrangler.local.jsonc`. Do not commit your ids. Always
   deploy with `pnpm run deploy` on a machine that has your `.env`: a plain
   `wrangler deploy`, or a CI deploy without those variables, publishes the
-  config's empty `STORE_EMOJIS` and the emoji silently disappear.
+  config's empty `STORE_EMOJIS` and the emoji silently disappear. The same
+  goes for `RATATOSKR_LANGUAGE` and `RATATOSKR_EMOJI` below.
+
+### Source-link emoji (`RATATOSKR_EMOJI`)
+
+Optional. The `ratatoskr` button of an immediate message links to this
+project's source (the AGPL notice); it shows a squirrel by default. Set the
+Worker variable `RATATOSKR_EMOJI` to full custom emoji markup (same format and
+rules as `STORE_EMOJIS`) to use your own. An invalid value is ignored with one
+warning that names only the variable. Easiest: put `RATATOSKR_EMOJI` in the
+git-ignored `.env`; `pnpm run deploy` validates it and passes it to the Worker.
+
+### Language (`LANGUAGE`)
+
+Optional Worker variable, default `en`. Every text the bot writes into a
+message (labels, plural forms, button captions, number and size formats) comes
+from a catalog in `src/i18n`: `en` and `ru` exist. An unknown value falls back
+to `en` with one warning that names only the variable. `wrangler.jsonc` ships
+`"LANGUAGE": "en"`; the easy way to change it is `RATATOSKR_LANGUAGE=ru` in the
+git-ignored `.env`, which `pnpm run deploy` validates against the catalogs and
+passes to the Worker as `LANGUAGE` (a bad value stops the deploy). The `.env` key
+is not called `LANGUAGE` because that is the POSIX locale variable, which many
+shells already set. To add a language, add a
+`src/i18n/<code>.ts` that satisfies the `Messages` type (TypeScript fails if a
+key is missing) and register it in `src/i18n/index.ts`. Log lines, warnings and
+the run report stay English.
 
 ### Message format
 
-Immediate messages, new packages and watchlist hits are one embed: a linked h1
-title (`# [Name 1.2.2 -> 1.2.3](url)`), an info line (`⬆️ Updated mod by Owner ·
-94.2 MB · <relative time>`, or `🆕 New mod by ...`), the description excerpt,
-fields (an optional Changelog, Total downloads and Categories) and the store name in
-the footer. Immediate messages also carry link
-buttons (`Mod page`, and `Download` when the source provides a direct download
-URL); Discord only shows them because the bot sends `with_components=true`. Every
-message ends with a small `-# ratatoskr v<version>` line, the last field of its last
-embed, linking to the source repository (the AGPL notice). In immediate mode every update also gets a
-changelog excerpt, within the per-tick fetch cap; digest updates stay compact.
+An immediate message is one Discord Components V2 message: a container in the
+store's colour holding
+
+- the header: a linked h1 title (`# <store emoji> [Name](url)`), the kind line
+  (`⬆️ Updated by Owner · 1.2.2 → 1.2.3 · <relative time>`, or `🆕 New by
+  Owner · 1.0.0 · ...`), an info line (`ℹ️ 94.2 MB · Downloaded 12,345 times ·
+  21 likes`, each part only when known) and the description excerpt under a
+  `📜 Description` heading, with the mod icon as a thumbnail beside it;
+- a `Changelog` block (about 500 characters, ending with a link to the full
+  changelog) and a `🗂️ Categories` block, each only when there is something to show;
+- a row of link buttons: `Mod page`, `Download` and `Website` (each only when
+  the source provides a URL) and always `ratatoskr`, the link to this project's
+  source (the AGPL notice). Discord refuses a button whose host has no real
+  top-level domain (`https://mysite`), so such a URL gets no button; if Discord
+  rejects a message anyway, the bot resends it once with only `Mod page` and
+  `ratatoskr` before giving up (counted as `degraded` in the run log).
+
+In immediate mode every update also gets a changelog excerpt, within the
+per-tick fetch cap. Discord only accepts this format because the bot sends
+`with_components=true` and the Components V2 flag; such a message cannot carry
+`content` or embeds.
+
+Digests hold many mods per message, so they stay classic embeds (no buttons):
+new packages and watchlist hits are detailed embeds with the same header,
+`Changelog` and `🗂️ Categories` fields; updates are a compact list per store
+(`**Thunderstore** · 37 updates`). The last embed of every digest message ends
+with a small `-# ratatoskr v<version>` line linking to the source repository
+(the AGPL notice), and a digest that spans several messages numbers them in the
+last embed's footer.
 
 ### Subscriptions
 
@@ -229,26 +278,34 @@ Subscriptions live in the D1 `subscriptions` table and are created with
 Delivery options: `--mode immediate|digest` (default `digest`) and
 `--interval <minutes>` (5 to 1440, default 30, digest only).
 
-The filter is a JSON object, passed with `--filter '<json>'` or
-`--filter-file <path>`. Every field is optional; the empty filter `{}` matches
-everything except NSFW content.
+The filter is built from flags (`--source`, `--kind`, `--package`,
+`--exclude-package`, `--category`, `--exclude-category`, `--allow-nsfw`; the
+list flags can be repeated) or given as raw JSON with `--filter '<json>'` or
+`--filter-file <path>`. Flags and raw JSON cannot be combined. Every field is
+optional; the empty filter `{}` matches everything except NSFW content. All
+fields apply together (a package must pass every one that is set).
 
-| Field | Meaning |
-|---|---|
-| `sources` | Restrict to these source ids. Absent or empty means all. |
-| `kinds` | `"new"`, `"update"`, or both. Absent or empty means both. |
-| `allowNsfw` | NSFW content is excluded unless this is exactly `true`. |
-| `watchlist` | Case-insensitive full `Owner-Name` package ids or bare owner names. |
-| `includeCategories` | Only packages in these categories. |
-| `excludeCategories` | Drop packages in these categories. |
-| `dedupAcrossStores` | Collapse the same release seen on several stores into one item. Default `true`. |
+| Field | Flag | Meaning |
+|---|---|---|
+| `sources` | `--source` | Restrict to these source ids. Absent or empty means all. |
+| `kinds` | `--kind` | `"new"`, `"update"`, or both. Absent or empty means both. |
+| `packages` | `--package` | Allowlist: only these packages. Each entry is a full `Owner-Name` package id or a bare owner name, case-insensitive. Absent or empty means no restriction. |
+| `excludePackages` | `--exclude-package` | Never deliver these packages. Same entries and matching as `packages`; wins over every other field. |
+| `allowNsfw` | `--allow-nsfw` | NSFW content is excluded unless this is exactly `true`. |
+| `watchlist` | (JSON only) | Highlights these packages (same entries as `packages`) in digests with a detailed embed. It never restricts what is delivered; use `packages` for that. |
+| `includeCategories` | `--category` | Only packages in these categories. |
+| `excludeCategories` | `--exclude-category` | Drop packages in these categories. |
+| `dedupAcrossStores` | (JSON only) | Collapse the same release seen on several stores into one item. Default `true`. |
 
 Examples:
 
 ```sh
-# Watchlist: only these authors or packages, delivered immediately
+# Only these authors or packages, delivered immediately
 pnpm add-subscription --guild-id <id> --webhook-url-env DISCORD_WEBHOOK_URL \
-  --mode immediate \
+  --mode immediate --package Azumatt --package RandyKnapp-EpicLoot
+
+# Everything, but highlight these authors in the digest (watchlist does not restrict)
+pnpm add-subscription --guild-id <id> --webhook-url-env DISCORD_WEBHOOK_URL \
   --filter '{"watchlist":["Azumatt","RandyKnapp-EpicLoot"]}'
 
 # NSFW opt-in
@@ -260,6 +317,66 @@ pnpm add-subscription --guild-id <id> --webhook-url-env DISCORD_WEBHOOK_URL \
   --mode digest --interval 60 \
   --filter '{"sources":["thunderstore:valheim"],"kinds":["new"]}'
 ```
+
+### Several channels and targeted subscriptions
+
+Every subscription is its own row: one webhook (one channel), its own filter,
+mode and interval. Rows are independent, so you can add as many as you like and
+the same event can go to several channels. Create one webhook per channel, put
+each URL into its own variable in the git-ignored `.env` (see `.env.example`,
+which already lists `DISCORD_WEBHOOK_URL_HEXIUM` and `DISCORD_WEBHOOK_URL_NEXUS`),
+and give every subscription a readable `--id`. Inserting an id that already
+exists fails instead of replacing the row.
+
+```sh
+# One channel per store
+pnpm add-subscription --id thunderstore --guild-id <id> --webhook-url-env DISCORD_WEBHOOK_URL \
+  --source thunderstore:valheim
+pnpm add-subscription --id hexium --guild-id <id> --webhook-url-env DISCORD_WEBHOOK_URL_HEXIUM \
+  --source hexium:valheim
+pnpm add-subscription --id nexus --guild-id <id> --webhook-url-env DISCORD_WEBHOOK_URL_NEXUS \
+  --source nexus:valheim
+
+# A channel that only follows the updates of one mod (full Owner-Name package id)
+pnpm add-subscription --id epicloot-updates --guild-id <id> --webhook-url-env DISCORD_WEBHOOK_URL_EPICLOOT \
+  --mode immediate --package RandyKnapp-EpicLoot --kind update
+
+# A channel that follows one author (every mod and every event of that owner)
+pnpm add-subscription --id azumatt --guild-id <id> --webhook-url-env DISCORD_WEBHOOK_URL_AZUMATT \
+  --mode immediate --package Azumatt
+
+# Everything except one noisy mod (or all mods of one owner)
+pnpm add-subscription --id main --guild-id <id> --webhook-url-env DISCORD_WEBHOOK_URL \
+  --exclude-package SomeAuthor-NoisyMod
+```
+
+Every command prints a `wrangler d1 execute` command and runs nothing; review
+it, then run it. Package entries match the package id or the owner exactly
+(case-insensitive, no partial matches); when a package is both allowed and
+excluded, the exclusion wins. Because the sources are matched separately, a
+per-store channel receives the releases of its own store even when the same
+release is also on another store.
+
+Managing existing subscriptions works the same way, with `pnpm subscriptions`
+(it also only prints the command; add `--local` for the local database):
+
+```sh
+pnpm subscriptions list                       # id, guild, mode, filter, enabled, webhook id (never the token)
+pnpm subscriptions disable --id azumatt       # stop delivering, keep the row
+pnpm subscriptions enable  --id azumatt
+pnpm subscriptions set-filter --id main --exclude-package SomeAuthor-NoisyMod --exclude-package Other
+pnpm subscriptions remove  --id azumatt       # deletes the row and its undelivered queue entries
+```
+
+`set-filter` replaces the whole filter with the flags you pass (use
+`--filter '{}'` to clear it), so run `list` first to see the current one.
+`disable`, `enable` and `set-filter` are silent when the id does not exist (0
+rows changed in the wrangler output).
+
+The filter is checked twice: when an event is queued and again just before
+delivery against the subscription's current filter. After `set-filter`,
+`disable` or `remove`, anything already queued that no longer matches is
+dropped instead of being sent.
 
 ## Local development
 

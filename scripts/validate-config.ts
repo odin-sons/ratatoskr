@@ -17,6 +17,9 @@ const EVENT_KINDS: readonly EventKind[] = ['new', 'update'];
 const DELIVERY_MODES: readonly DeliveryMode[] = ['immediate', 'digest'];
 
 const COMMUNITY_RE = /^[a-z0-9][a-z0-9_-]*$/;
+/** Subscription ids end up in SQL and shell commands, so they stay in a plain-token alphabet. */
+export const SUBSCRIPTION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const PACKAGE_ENTRY_RE = /^[^\s\x00-\x1f\x7f][^\x00-\x1f\x7f]{0,127}$/;
 const SNOWFLAKE_RE = /^\d{17,20}$/;
 /** Discord webhook URL shape: https://discord.com/api/webhooks/<id>/<token>. */
 const WEBHOOK_URL_RE = /^https:\/\/(discord|discordapp)\.com\/api\/webhooks\/\d+\/[A-Za-z0-9_-]+$/;
@@ -32,6 +35,8 @@ const FILTER_KEYS = [
   'kinds',
   'allowNsfw',
   'watchlist',
+  'packages',
+  'excludePackages',
   'includeCategories',
   'excludeCategories',
   'dedupAcrossStores',
@@ -204,6 +209,12 @@ function validateFilter(raw: unknown, errors: string[]): SubscriptionFilter | un
     if (typeof v === 'boolean') filter[key] = v;
     else errors.push(`filter.${key}: must be a boolean`);
   }
+  for (const key of ['packages', 'excludePackages'] as const) {
+    const v = raw[key];
+    if (v === undefined) continue;
+    const list = stringArray(v, `filter.${key}`, errors, PACKAGE_ENTRY_RE);
+    if (list) filter[key] = list;
+  }
   for (const key of ['watchlist', 'includeCategories', 'excludeCategories'] as const) {
     const v = raw[key];
     if (v === undefined) continue;
@@ -213,6 +224,15 @@ function validateFilter(raw: unknown, errors: string[]): SubscriptionFilter | un
   return filter;
 }
 
+export function validateSubscriptionFilter(
+  raw: unknown,
+): { ok: true; filter: SubscriptionFilter } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const filter = validateFilter(raw, errors);
+  if (errors.length > 0 || !filter) return { ok: false, errors };
+  return { ok: true, filter };
+}
+
 export function validateSubscription(raw: unknown): SubscriptionResult {
   if (!isRecord(raw)) {
     return { ok: false, errors: ['subscription: must be an object'] };
@@ -220,8 +240,8 @@ export function validateSubscription(raw: unknown): SubscriptionResult {
   const errors: string[] = [];
   errors.push(...unknownKeys(raw, SUBSCRIPTION_KEYS, 'subscription'));
 
-  if (typeof raw.id !== 'string' || raw.id.trim() === '') {
-    errors.push('id: must be a non-empty string');
+  if (typeof raw.id !== 'string' || !SUBSCRIPTION_ID_RE.test(raw.id)) {
+    errors.push(`id: must match ${SUBSCRIPTION_ID_RE.source}`);
   }
   if (typeof raw.guildId !== 'string' || !SNOWFLAKE_RE.test(raw.guildId)) {
     errors.push('guildId: must be a numeric Discord snowflake (17-20 digits)');

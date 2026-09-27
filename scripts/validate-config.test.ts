@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { validateConfig, validateSubscription } from './validate-config.ts';
+import { validateConfig, validateSubscription, validateSubscriptionFilter } from './validate-config.ts';
 
 const UA = 'ratatoskr/0.1.0 (+https://github.com/odin-sons/ratatoskr; unofficial mod notifier)';
 
@@ -115,6 +115,8 @@ describe('validateSubscription', () => {
           kinds: ['new'],
           allowNsfw: true,
           watchlist: ['Owner-Name', 'SomeAuthor'],
+          packages: ['Owner-Name', 'SomeAuthor'],
+          excludePackages: ['Noisy-Mod'],
           includeCategories: ['Tools'],
           excludeCategories: ['Cosmetics'],
           dedupAcrossStores: false,
@@ -122,6 +124,19 @@ describe('validateSubscription', () => {
       }),
     );
     expect(r.ok).toBe(true);
+  });
+
+  it('keeps the package allowlist and exclusion in the validated subscription', () => {
+    const r = validateSubscription(subscription({ filter: { packages: ['A-B'], excludePackages: ['C'] } }));
+    expect(r.ok && r.subscription.filter).toEqual({ packages: ['A-B'], excludePackages: ['C'] });
+  });
+
+  it.each(['sub-1', 'a', 'Channel_2', 'x'.repeat(64), '3f2b8c1e-9d4a-4e7b-8a55-0c1d2e3f4a5b'])('accepts subscription id %s', (id) => {
+    expect(validateSubscription(subscription({ id })).ok).toBe(true);
+  });
+
+  it.each(['', ' ', 'a b', "a'b", 'a;b', 'a"b', 'x'.repeat(65), 'a\nb', 'ä', 5, undefined])('rejects subscription id %j', (id) => {
+    expect(subErrors(subscription({ id })).join('\n')).toMatch(/^id:/m);
   });
 
   it('accepts discordapp.com webhooks', () => {
@@ -166,6 +181,8 @@ describe('validateSubscription', () => {
           allowNsfw: 'true',
           watchlist: [1],
           sources: ['nope'],
+          packages: 'Owner-Name',
+          excludePackages: [1, ''],
           bogus: true,
         },
       }),
@@ -174,10 +191,38 @@ describe('validateSubscription', () => {
     expect(errors).toMatch(/filter\.allowNsfw/);
     expect(errors).toMatch(/filter\.watchlist\[0\]/);
     expect(errors).toMatch(/filter\.sources\[0\]/);
+    expect(errors).toMatch(/filter\.packages/);
+    expect(errors).toMatch(/filter\.excludePackages\[0\]/);
+    expect(errors).toMatch(/filter\.excludePackages\[1\]/);
     expect(errors).toMatch(/unknown key "bogus"/);
+  });
+
+  it.each(['a\nb', 'x'.repeat(129), ' lead'])('rejects a package entry %j', (entry) => {
+    expect(subErrors(subscription({ filter: { packages: [entry] } })).join('\n')).toMatch(/filter\.packages\[0\]/);
+    expect(subErrors(subscription({ filter: { excludePackages: [entry] } })).join('\n')).toMatch(/filter\.excludePackages\[0\]/);
   });
 
   it('rejects a non-object filter', () => {
     expect(subErrors(subscription({ filter: [] })).join('\n')).toMatch(/filter/);
+  });
+});
+
+describe('validateSubscriptionFilter', () => {
+  it('returns the narrowed filter', () => {
+    const r = validateSubscriptionFilter({ packages: ['A-B'], kinds: ['update'] });
+    expect(r).toEqual({ ok: true, filter: { kinds: ['update'], packages: ['A-B'] } });
+  });
+
+  it('reports every problem and never a filter', () => {
+    const r = validateSubscriptionFilter({ packages: [1], bogus: true });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.errors.join('\n')).toMatch(/filter\.packages\[0\]/);
+      expect(r.errors.join('\n')).toMatch(/unknown key "bogus"/);
+    }
+  });
+
+  it.each([null, [], 'x', 5])('rejects the non-object %j', (raw) => {
+    expect(validateSubscriptionFilter(raw).ok).toBe(false);
   });
 });
