@@ -2,8 +2,9 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { createInterface } from 'node:readline/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { DISCORD_CUSTOM_EMOJI } from '../src/core/constants.ts';
+import { DISCORD_CUSTOM_EMOJI, PROJECT } from '../src/core/constants.ts';
 import { isLanguage, LANGUAGES, type Language } from '../src/i18n/index.ts';
 import { buildDeployConfig, collectDatabaseId, CONFIG_FILE, stripLeadingSeparator, withGeneratedConfig } from './wrangler-config.ts';
 
@@ -65,13 +66,43 @@ export function buildDeployArgs(input: { env: Record<string, string | undefined>
   return { ok: true, args };
 }
 
-function main(): number {
+/** True when `--dry-run` is among the extra args a caller passed through to wrangler. */
+export function isDryRun(extraArgs: readonly string[]): boolean {
+  return extraArgs.includes('--dry-run');
+}
+
+/** CI already gates a real deploy on approving the `production` environment; a local run has no such gate. */
+export function requiresConfirmation(env: Record<string, string | undefined>): boolean {
+  return env.CI !== 'true' && env.GITHUB_ACTIONS !== 'true';
+}
+
+/**
+ * Blocks a real deploy unless confirmed at an interactive terminal or running where CI's own approval gate already
+ * covers it (see requiresConfirmation). Refuses outright without a TTY: an unattended invocation with no human to
+ * ask must fail closed, not proceed.
+ */
+async function confirmRealDeploy(): Promise<boolean> {
+  if (!requiresConfirmation(process.env)) return true;
+  if (process.stdin.isTTY !== true) {
+    console.error('deploy: refusing a real deploy without an interactive terminal and no CI environment detected.');
+    console.error('deploy: pass --dry-run to check safely, or run this from an interactive shell to confirm.');
+    return false;
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await rl.question(`About to deploy ${PROJECT.name} v${PROJECT.version} to production. Type "deploy" to continue: `);
+  rl.close();
+  return answer.trim() === 'deploy';
+}
+
+async function main(): Promise<number> {
   const databaseId = collectDatabaseId(process.env);
   const built = buildDeployArgs({ env: process.env });
   if (!databaseId.ok || !built.ok) {
     for (const error of [...(databaseId.ok ? [] : databaseId.errors), ...(built.ok ? [] : built.errors)]) console.error(`deploy: ${error}`);
     return 1;
   }
+  const extraArgs = stripLeadingSeparator(process.argv.slice(2));
+  if (!isDryRun(extraArgs) && !(await confirmRealDeploy())) return 1;
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   const config = buildDeployConfig(readFileSync(join(root, CONFIG_FILE), 'utf8'), databaseId.id);
   if (!config.ok) {
@@ -81,11 +112,11 @@ function main(): number {
   const [command, ...rest] = built.args;
   return withGeneratedConfig(root, config.text, (tempConfig) => {
     const wrangler = resolve(root, 'node_modules/wrangler/bin/wrangler.js');
-    const result = spawnSync(process.execPath, [wrangler, command!, '-c', tempConfig, ...rest, ...stripLeadingSeparator(process.argv.slice(2))], { stdio: 'inherit' });
+    const result = spawnSync(process.execPath, [wrangler, command!, '-c', tempConfig, ...rest, ...extraArgs], { stdio: 'inherit' });
     return result.status ?? 1;
   });
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  process.exit(main());
+  main().then((code) => process.exit(code));
 }

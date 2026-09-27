@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
 import { LANGUAGES } from '../src/i18n/index.ts';
-import { buildDeployArgs, collectLanguage, collectRatatoskrEmoji, collectStoreEmojis } from './deploy.ts';
+import { buildDeployArgs, collectLanguage, collectRatatoskrEmoji, collectStoreEmojis, isDryRun, requiresConfirmation } from './deploy.ts';
 
 const THUNDERSTORE = '<:thunderstore:123456789012345678>';
 const HEXIUM = '<:hexium:223456789012345678>';
@@ -58,6 +58,27 @@ describe('buildDeployArgs', () => {
   it('refuses to deploy with an invalid emoji value', () => {
     const result = buildDeployArgs({ env: { STORE_EMOJI_HEXIUM: 'nope' } });
     expect(result.ok).toBe(false);
+  });
+});
+
+describe('isDryRun', () => {
+  it('is true only when --dry-run is among the extra args', () => {
+    expect(isDryRun(['--dry-run'])).toBe(true);
+    expect(isDryRun(['d1', 'execute', '--dry-run'])).toBe(true);
+    expect(isDryRun([])).toBe(false);
+    expect(isDryRun(['--dry-run-ish'])).toBe(false);
+  });
+});
+
+describe('requiresConfirmation', () => {
+  it('is false in CI (the production environment reviewer already gates it)', () => {
+    expect(requiresConfirmation({ CI: 'true' })).toBe(false);
+    expect(requiresConfirmation({ GITHUB_ACTIONS: 'true' })).toBe(false);
+  });
+
+  it('is true for a plain local invocation', () => {
+    expect(requiresConfirmation({})).toBe(true);
+    expect(requiresConfirmation({ CI: 'false' })).toBe(true);
   });
 });
 
