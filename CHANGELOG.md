@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-09-29
+
+### Fixed
+
+- Hexium: an update to a package still on page 1 of the listing (still among the
+  most recently *created* packages, which can last hours or days after creation
+  regardless of how many times it's been updated since) had its full per-package
+  lookup skipped whenever the listing happened to deliver that same new version
+  this tick. The listing never carries a download link, so the update committed
+  with a null `download_url` — and since the store's package upsert replaces
+  `download_url` wholesale on a version change, it clobbered any previously-good
+  link too. The delivered-listing dedup now only excuses the lookup for a
+  package the store has never seen; a version change of an already-known
+  package always gets a full lookup.
+
 ## [1.1.1] - 2026-09-28
 
 ### Fixed

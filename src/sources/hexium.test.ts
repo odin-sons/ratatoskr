@@ -308,12 +308,25 @@ describe('HexiumAdapter.poll — index scan finds version changes', () => {
     expect(scanned.etag).toBe('"h1"');
   });
 
-  it('skips a candidate the listing already delivered at the same version', async () => {
+  it('skips a genuinely new package the listing already delivered at the same version', async () => {
     const line = '{"namespace":"GenesisMods","name":"zzzGenesisItemStacks","version_number":"2.1.0","file_format":"zip","file_size":10,"dependencies":[],"suggestions":[]}';
     const fake = routes({ index: line, lookup: answerAll() });
-    const res = ok(await adapterWith({ 'GenesisMods-zzzGenesisItemStacks': '2.0.0' }).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    const res = ok(await adapterWith({}).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
     expect(lookupCalls(fake)).toHaveLength(0);
-    expect(res.packages.find((p) => p.packageId === 'GenesisMods-zzzGenesisItemStacks')?.version).toBe('2.1.0');
+    const pkg = res.packages.find((p) => p.packageId === 'GenesisMods-zzzGenesisItemStacks');
+    expect(pkg?.version).toBe('2.1.0');
+    expect(pkg?.downloadUrl).toBeNull();
+  });
+
+  it('still looks up a known package whose new version the listing already delivered this tick', async () => {
+    // Regression: a package still on page 1 of the listing used to have its update
+    // short-circuited by the delivered-dedup, committing a null downloadUrl forever.
+    const line = '{"namespace":"GenesisMods","name":"zzzGenesisItemStacks","version_number":"2.1.0","file_format":"zip","file_size":10,"dependencies":[],"suggestions":[]}';
+    const fake = routes({ index: line, lookup: answerAll('2.1.0') });
+    const res = ok(await adapterWith({ 'GenesisMods-zzzGenesisItemStacks': '2.0.0' }).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    expect(lookupCalls(fake)).toHaveLength(1);
+    const withLink = res.packages.find((p) => p.packageId === 'GenesisMods-zzzGenesisItemStacks' && p.downloadUrl !== null);
+    expect(withLink).toMatchObject({ version: '2.1.0', downloadUrl: expect.stringContaining('hexium.gg') });
   });
 
   it('still looks a candidate up when the listing has it at another version', async () => {

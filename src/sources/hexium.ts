@@ -213,6 +213,15 @@ export class HexiumAdapter implements SourceAdapter {
     return pass;
   }
 
+  /**
+   * A listing-delivered version only excuses the lookup for a package the store has never
+   * seen (kind `new`, no download link needed urgently in the initial announcement per
+   * spec). A known package whose version changed always gets a full lookup, even when the
+   * listing happens to carry that same new version this tick — the listing snapshot never
+   * carries `download_url`, so skipping here would commit an `update` event with a null
+   * download link (and, since the package upsert replaces `download_url` wholesale on a
+   * version change, clobber any previously-good link too).
+   */
   private candidates(
     text: string,
     known: Map<string, string>,
@@ -222,7 +231,9 @@ export class HexiumAdapter implements SourceAdapter {
     const seen = new Set<string>();
     const scan = scanPackageIndex(text, (entry) => {
       const id = `${entry.namespace}-${entry.name}`;
-      if (known.get(id) === entry.version || delivered.get(id) === entry.version || seen.has(id)) return;
+      const knownVersion = known.get(id);
+      if (knownVersion === entry.version || seen.has(id)) return;
+      if (knownVersion === undefined && delivered.get(id) === entry.version) return;
       seen.add(id);
       candidates.push(entry);
     });

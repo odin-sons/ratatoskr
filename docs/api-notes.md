@@ -357,12 +357,26 @@ Rules for the snapshot built from it:
 - Every tick: listing page 1 (new packages, with flags).
 - Every `CADENCE.hexiumIndexEveryNthTick`-th tick: read the index once and compare each
   line's version with the stored versions (`store.getAllKnownVersions`). Candidates are
-  packages whose version differs and packages the store has never seen. Candidates the
-  listing already delivered at the same version need no lookup. At most
+  packages whose version differs and packages the store has never seen. At most
   `hexiumLookupsPerPoll` (15) candidates are looked up per poll, six at a time; the
   window of candidates advances by that amount per scan so packages that keep failing
   cannot starve the others; the poll is then reported incomplete and the rest are found
   again by the next scan.
+- **Listing-delivered dedup only excuses a genuinely new package.** A package the store
+  has never seen, whose index version the listing (page 1, this same tick) already
+  delivered at that exact version, needs no lookup — the listing-sourced `new` event
+  carries no download link, which is accepted (see "Update source" above: not urgent in
+  the initial announcement). A package the store already knows, whose version differs
+  from the stored one, **always** gets a full lookup, even when the listing happens to
+  carry that same new version this tick — a package can sit on page 1 (still among the
+  most recently *created*, see Listing) for hours or days after creation regardless of
+  how many times it has been updated since. The listing item never carries
+  `download_url`/`website_url`/`sizeBytes` (see Listing); skipping the lookup for an
+  `update` candidate on the strength of a listing hit would commit that event with those
+  fields null, and since the package upsert replaces `download_url` wholesale whenever
+  `latest_version` changes (not a `COALESCE`), it would also clobber any previously-good
+  link. Fixed 2026-09-29 — until then this cost the "Скачать" button on updates of any
+  package still on page 1, sometimes for its whole update history.
 - Cold start: the index seeds every package as a lean snapshot (index version, size,
   default flags, no metadata) in `hexiumSeedSlices` (8) stable slices, one per poll,
   slice = hash of `namespace-name` modulo 8. Seeded rows are never emitted; any later
