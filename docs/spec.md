@@ -210,6 +210,7 @@ CREATE TABLE subscriptions (
   id TEXT PRIMARY KEY,
   guild_id TEXT NOT NULL,
   webhook_url TEXT NOT NULL,
+  thread_id TEXT,                   -- forum post or channel thread, NULL for the parent channel
   filter TEXT NOT NULL,             -- JSON
   mode TEXT NOT NULL,               -- 'immediate' | 'digest'
   digest_interval_min INTEGER,
@@ -305,11 +306,26 @@ execute` commands:
   `--exclude-category`, `--allow-nsfw`) or from raw JSON (`--filter`,
   `--filter-file`), never both.
 - `pnpm subscriptions <list|disable|enable|remove|set-filter>`. `list` selects
-  `id, guild_id, mode, filter, enabled` and the webhook id only; the webhook token
-  is never selected, and a URL of an unexpected shape prints `(unrecognised)`.
+  `id, guild_id, mode, filter, enabled, thread_id` and the webhook id only; the
+  webhook token is never selected, and a URL of an unexpected shape prints
+  `(unrecognised)`.
   `remove` deletes the subscription row first, then its undelivered outbox rows
   (delivered rows age out through the normal purge). `set-filter` replaces the whole
   filter and refuses to run without a filter flag.
+
+`subscriptions.thread_id`, set by `--thread-id` on `pnpm add-subscription`,
+delivers into an existing forum post or channel thread instead of the
+webhook's parent channel — a documented Discord webhook-execute parameter,
+applied by `DiscordSender.send` (`src/cloudflare/discord-sender.ts`) as a
+`thread_id` query parameter at send time. This project never creates a
+thread; pointing a subscription at one that was deleted just fails delivery
+like any other bad destination.
+
+It is a column of its own, not folded into `webhook_url`: several
+subscriptions can share one real Discord webhook while targeting different
+threads, and `drain.ts`'s per-webhook rate limiting and retry/starvation
+grouping (`perWebhook`, `blocked`) key on `webhook_url` alone, which only
+stays correct if that string never varies by destination.
 
 `schema.sql` creates a fresh database and does not alter existing tables. A change
 to an existing table ships as a numbered file in `migrations/`, applied once

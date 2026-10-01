@@ -80,10 +80,10 @@ function count(shim: D1Shim, table: string): number {
   return (shim.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
 }
 
-function addSub(shim: D1Shim, id: string, over: { enabled?: number; filter?: string; mode?: string; interval?: number | null } = {}): void {
+function addSub(shim: D1Shim, id: string, over: { enabled?: number; filter?: string; mode?: string; interval?: number | null; threadId?: string | null } = {}): void {
   shim.db
-    .prepare('INSERT INTO subscriptions (id, guild_id, webhook_url, filter, mode, digest_interval_min, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .run(id, '123456789012345678', `https://discord.com/api/webhooks/123456789012345678/tok-${id}`, over.filter ?? '{}', over.mode ?? 'digest', over.interval === undefined ? 30 : over.interval, over.enabled ?? 1);
+    .prepare('INSERT INTO subscriptions (id, guild_id, webhook_url, thread_id, filter, mode, digest_interval_min, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(id, '123456789012345678', `https://discord.com/api/webhooks/123456789012345678/tok-${id}`, over.threadId ?? null, over.filter ?? '{}', over.mode ?? 'digest', over.interval === undefined ? 30 : over.interval, over.enabled ?? 1);
 }
 
 function createD1Env(): StoreContractEnv {
@@ -93,8 +93,8 @@ function createD1Env(): StoreContractEnv {
     store: new D1Store(contractShim.asD1()),
     addSubscription: async (sub) => {
       contractShim.db
-        .prepare('INSERT INTO subscriptions (id, guild_id, webhook_url, filter, mode, digest_interval_min, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(sub.id, sub.guildId, sub.webhookUrl, JSON.stringify(sub.filter), sub.mode, sub.digestIntervalMin, sub.enabled ? 1 : 0);
+        .prepare('INSERT INTO subscriptions (id, guild_id, webhook_url, thread_id, filter, mode, digest_interval_min, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(sub.id, sub.guildId, sub.webhookUrl, sub.threadId ?? null, JSON.stringify(sub.filter), sub.mode, sub.digestIntervalMin, sub.enabled ? 1 : 0);
     },
     setSubscriptionEnabled: async (id, enabled) => {
       contractShim.db.prepare('UPDATE subscriptions SET enabled = ? WHERE id = ?').run(enabled ? 1 : 0, id);
@@ -379,11 +379,22 @@ describe('D1 adapter', () => {
           id: 's1',
           guildId: '123456789012345678',
           webhookUrl: 'https://discord.com/api/webhooks/123456789012345678/tok-s1',
+          threadId: null,
           filter: { kinds: ['new'], allowNsfw: true },
           mode: 'digest',
           digestIntervalMin: 30,
           enabled: true,
         },
+      ]);
+    });
+
+    it('carries a thread id through, and reports null when the subscription has none', async () => {
+      addSub(shim, 's1', { threadId: '222233334444555566' });
+      addSub(shim, 's2');
+      const subs = await store.listSubscriptions();
+      expect(subs.map((s) => [s.id, s.threadId])).toEqual([
+        ['s1', '222233334444555566'],
+        ['s2', null],
       ]);
     });
   });

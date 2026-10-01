@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { DEFAULT_DIGEST_INTERVAL_MIN } from '../src/core/constants.ts';
 import type { Subscription } from '../src/core/types.ts';
 import { FILTER_FLAG_OPTIONS, FILTER_FLAGS_NOTE, FILTER_FLAGS_USAGE, resolveFilter, type FilterFlagValues } from './filter-flags.ts';
-import { SUBSCRIPTION_ID_RE, validateSubscription } from './validate-config.ts';
+import { SNOWFLAKE_RE, SUBSCRIPTION_ID_RE, validateSubscription } from './validate-config.ts';
 
 const DEFAULT_DATABASE = 'ratatoskr';
 
@@ -19,6 +19,9 @@ Options:
   --guild-id <id>            Discord guild id (numeric snowflake). Required.
   --webhook-url-env <VAR>    Read the webhook URL from this environment variable.
   --webhook-url <url>        Webhook URL as an argument (ends up in shell history).
+  --thread-id <id>           Deliver into this existing forum post or channel thread instead
+                             of the webhook's parent channel (numeric snowflake). The thread
+                             must already exist; this never creates one.
   --id <name>                Subscription id, [A-Za-z0-9_-]{1,64} (default: random UUID).
                              Inserting an id that already exists fails; nothing is replaced.
   --mode <mode>              immediate | digest (default: digest)
@@ -38,6 +41,7 @@ export interface CliOptions {
   id?: string;
   guildId?: string;
   webhookUrl?: string;
+  threadId?: string;
   mode: string;
   interval: number;
   filter: unknown;
@@ -58,11 +62,12 @@ export function sqlString(value: string): string {
 /** A plain INSERT: a duplicate id must fail loudly, never replace an existing subscription. */
 export function buildInsertSql(sub: Subscription): string {
   return (
-    'INSERT INTO subscriptions (id, guild_id, webhook_url, filter, mode, digest_interval_min, enabled) VALUES (' +
+    'INSERT INTO subscriptions (id, guild_id, webhook_url, thread_id, filter, mode, digest_interval_min, enabled) VALUES (' +
     [
       sqlString(sub.id),
       sqlString(sub.guildId),
       sqlString(sub.webhookUrl),
+      sub.threadId ? sqlString(sub.threadId) : 'NULL',
       sqlString(JSON.stringify(sub.filter)),
       sqlString(sub.mode),
       String(sub.digestIntervalMin),
@@ -89,6 +94,7 @@ export function parseCli(argv: string[], env: Record<string, string | undefined>
       'guild-id': { type: 'string' },
       'webhook-url': { type: 'string' },
       'webhook-url-env': { type: 'string' },
+      'thread-id': { type: 'string' },
       id: { type: 'string' },
       mode: { type: 'string', default: 'digest' },
       interval: { type: 'string', default: String(DEFAULT_DIGEST_INTERVAL_MIN) },
@@ -106,6 +112,9 @@ export function parseCli(argv: string[], env: Record<string, string | undefined>
   if (values.id !== undefined && !SUBSCRIPTION_ID_RE.test(values.id)) {
     throw new Error(`--id must match ${SUBSCRIPTION_ID_RE.source}`);
   }
+  if (values['thread-id'] !== undefined && !SNOWFLAKE_RE.test(values['thread-id'])) {
+    throw new Error('--thread-id must be a numeric Discord snowflake (17-20 digits)');
+  }
 
   let webhookUrl = values['webhook-url'];
   const envName = values['webhook-url-env'];
@@ -120,6 +129,7 @@ export function parseCli(argv: string[], env: Record<string, string | undefined>
     id: values.id,
     guildId: values['guild-id'],
     webhookUrl,
+    threadId: values['thread-id'],
     mode: values.mode as string,
     interval: Number(values.interval),
     filter: resolveFilter(values as FilterFlagValues),
@@ -135,6 +145,7 @@ export function planSubscription(opts: CliOptions, newId: () => string): Subscri
     id: opts.id ?? newId(),
     guildId: opts.guildId,
     webhookUrl: opts.webhookUrl,
+    threadId: opts.threadId,
     filter: opts.filter,
     mode: opts.mode,
     digestIntervalMin: opts.interval,

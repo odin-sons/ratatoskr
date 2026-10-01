@@ -137,11 +137,11 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
       });
 
       it('joins the subscription and the event for rendering', async () => {
-        const { store } = await setup([makeSubscription({ id: SUB, mode: 'digest', filter: { allowNsfw: true }, digestIntervalMin: 15 })]);
+        const { store } = await setup([makeSubscription({ id: SUB, mode: 'digest', filter: { allowNsfw: true }, digestIntervalMin: 15, threadId: '222233334444555566' })]);
         const e = event(1, { kind: 'update', versionFrom: '0.9.0', changelog: 'notes', changelogUrl: 'https://cl.invalid/x' });
         await store.commit(batch([e], [row(SUB, e)]));
         const [due] = await store.takeDue(NOW, 10);
-        expect(due!.subscription).toMatchObject({ id: SUB, mode: 'digest', filter: { allowNsfw: true }, digestIntervalMin: 15, enabled: true });
+        expect(due!.subscription).toMatchObject({ id: SUB, mode: 'digest', filter: { allowNsfw: true }, digestIntervalMin: 15, enabled: true, threadId: '222233334444555566' });
         expect(due!.event).toMatchObject({
           id: e.id,
           kind: 'update',

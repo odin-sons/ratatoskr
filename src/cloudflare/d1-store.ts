@@ -65,6 +65,7 @@ interface SubscriptionCols {
   id: string;
   guild_id: string;
   webhook_url: string;
+  thread_id: string | null;
   filter: string;
   mode: string;
   digest_interval_min: number | null;
@@ -143,6 +144,7 @@ const SUBSCRIPTION_READ_COLUMNS: readonly (keyof SubscriptionCols)[] = [
   'id',
   'guild_id',
   'webhook_url',
+  'thread_id',
   'filter',
   'mode',
   'digest_interval_min',
@@ -503,6 +505,7 @@ function mapSubscription(row: SubscriptionCols): Subscription | null {
     id: row.id,
     guildId: row.guild_id,
     webhookUrl: row.webhook_url,
+    threadId: row.thread_id,
     filter,
     mode: row.mode as DeliveryMode,
     digestIntervalMin: row.digest_interval_min ?? DEFAULT_DIGEST_INTERVAL_MIN,

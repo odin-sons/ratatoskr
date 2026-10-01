@@ -18,7 +18,7 @@ export class DiscordSender implements Sender {
     this.timeoutMs = timeoutMs;
   }
 
-  async send(webhookUrl: string, payload: DiscordMessage): Promise<SendResult> {
+  async send(webhookUrl: string, payload: DiscordMessage, threadId?: string | null): Promise<SendResult> {
     const hook = parseDiscordWebhookUrl(webhookUrl);
     if (hook === null) {
       console.warn('discord send rejected: not a discord webhook url');
@@ -26,6 +26,7 @@ export class DiscordSender implements Sender {
     }
 
     const url = new URL(webhookUrl);
+    if (threadId) url.searchParams.set('thread_id', threadId);
     url.searchParams.set('wait', 'false');
     if (payload.components !== undefined && payload.components.length > 0) url.searchParams.set('with_components', 'true');
 

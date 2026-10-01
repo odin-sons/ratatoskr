@@ -449,6 +449,31 @@ describe('drainOutbox', () => {
     expect((await drain(h)).sent).toBe(3);
   });
 
+  it('shares the per-webhook cap between subscriptions that target different threads of the same webhook', async () => {
+    const h = makeHarness();
+    const webhookUrl = 'https://discord.invalid/api/webhooks/1/tok';
+    await enqueue(h, makeSubscription({ id: 'parent', webhookUrl, mode: 'immediate' }), evs(DISCORD.webhookRequestsPer2s, 'A'));
+    await enqueue(h, makeSubscription({ id: 'thread', webhookUrl, threadId: '222233334444555566', mode: 'immediate' }), evs(DISCORD.webhookRequestsPer2s, 'B'));
+    const report = await drain(h);
+    // One real Discord webhook, so the two subscriptions share one DISCORD.webhookRequestsPer2s budget, not one each.
+    expect(report.sent).toBe(DISCORD.webhookRequestsPer2s);
+    expect(report.deferred).toBe(DISCORD.webhookRequestsPer2s);
+    expect(h.sender.calls).toHaveLength(DISCORD.webhookRequestsPer2s);
+  });
+
+  it('a retryable failure on one thread blocks the rest of the same webhook for the tick, whichever thread', async () => {
+    const h = makeHarness();
+    const webhookUrl = 'https://discord.invalid/api/webhooks/1/tok';
+    h.sender.enqueue(serverError());
+    await enqueue(h, makeSubscription({ id: 'thread-a', webhookUrl, threadId: '222233334444555566', mode: 'immediate' }), evs(1, 'A'));
+    await enqueue(h, makeSubscription({ id: 'thread-b', webhookUrl, threadId: '333344445555666677', mode: 'immediate' }), evs(1, 'B'));
+    const report = await drain(h);
+    expect(report.sent).toBe(0);
+    expect(report.failed).toBe(1);
+    expect(report.deferred).toBe(1);
+    expect(h.sender.calls).toHaveLength(1);
+  });
+
   it('caps total Discord sends per tick and reports the remainder as deferred', async () => {
     const h = makeHarness();
     const subs = Array.from({ length: 10 }, (_, i) =>

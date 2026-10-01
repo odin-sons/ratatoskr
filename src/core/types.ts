@@ -110,6 +110,8 @@ export interface Subscription {
   id: string;
   guildId: string;
   webhookUrl: string;
+  /** Deliver into this existing forum post or channel thread instead of the webhook's parent channel. */
+  threadId?: string | null;
   filter: SubscriptionFilter;
   mode: DeliveryMode;
   /** Only meaningful for `digest`. Default 30. */

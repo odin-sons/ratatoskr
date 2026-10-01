@@ -21,7 +21,7 @@ const COMMUNITY_RE = /^[a-z0-9][a-z0-9_-]*$/;
 export const SUBSCRIPTION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 // eslint-disable-next-line no-control-regex -- rejects raw control bytes in a package-list entry
 const PACKAGE_ENTRY_RE = /^[^\s\x00-\x1f\x7f][^\x00-\x1f\x7f]{0,127}$/;
-const SNOWFLAKE_RE = /^\d{17,20}$/;
+export const SNOWFLAKE_RE = /^\d{17,20}$/;
 /** Discord webhook URL shape: https://discord.com/api/webhooks/<id>/<token>. */
 const WEBHOOK_URL_RE = /^https:\/\/(discord|discordapp)\.com\/api\/webhooks\/\d+\/[A-Za-z0-9_-]+$/;
 const REPO_URL_RE = /https?:\/\/[^\s)]+/;
@@ -47,6 +47,7 @@ const SUBSCRIPTION_KEYS = [
   'id',
   'guildId',
   'webhookUrl',
+  'threadId',
   'filter',
   'mode',
   'digestIntervalMin',
@@ -251,6 +252,9 @@ export function validateSubscription(raw: unknown): SubscriptionResult {
   if (typeof raw.webhookUrl !== 'string' || !WEBHOOK_URL_RE.test(raw.webhookUrl)) {
     errors.push('webhookUrl: must look like https://discord.com/api/webhooks/<id>/<token>');
   }
+  if (raw.threadId !== undefined && raw.threadId !== null && (typeof raw.threadId !== 'string' || !SNOWFLAKE_RE.test(raw.threadId))) {
+    errors.push('threadId: must be a numeric Discord snowflake (17-20 digits)');
+  }
   if (typeof raw.mode !== 'string' || !(DELIVERY_MODES as readonly string[]).includes(raw.mode)) {
     errors.push(`mode: must be one of ${DELIVERY_MODES.join(', ')}`);
   }
@@ -277,6 +281,7 @@ export function validateSubscription(raw: unknown): SubscriptionResult {
       id: raw.id as string,
       guildId: raw.guildId as string,
       webhookUrl: raw.webhookUrl as string,
+      threadId: (raw.threadId as string | null | undefined) ?? null,
       filter,
       mode: raw.mode as DeliveryMode,
       digestIntervalMin: interval as number,

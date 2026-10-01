@@ -255,12 +255,12 @@ async function deliverImmediate(drain: Drain, sub: Subscription, entry: Collapse
     await parkUnrenderable(drain, [entry]);
     return;
   }
-  let failure = await sendAll(drain, sub.webhookUrl, [message]);
+  let failure = await sendAll(drain, sub.webhookUrl, [message], sub.threadId);
   if (failure !== null) {
     const reduced = reducedMessage(drain, sub, entry.delivery.event, message, failure);
     if (reduced !== null) {
       drain.report.failed -= 1;
-      failure = await sendAll(drain, sub.webhookUrl, [reduced]);
+      failure = await sendAll(drain, sub.webhookUrl, [reduced], sub.threadId);
       if (failure === null) {
         drain.report.degraded += 1;
         console.warn(`outbox degraded immediate message event=${sanitizeLogText(entry.delivery.event.id)}: sent without optional buttons`);
@@ -337,7 +337,7 @@ async function deliverDigest(drain: Drain, sub: Subscription, kept: CollapsedDel
 
   const sentRows = live.slice(0, found.fit.count).flatMap((k) => k.rows);
   drain.report.deferred += rowCount(live) - sentRows.length;
-  const failure = await sendAll(drain, sub.webhookUrl, found.fit.messages);
+  const failure = await sendAll(drain, sub.webhookUrl, found.fit.messages, sub.threadId);
   if (failure === null) await markDelivered(drain, sentRows.map((r) => r.id));
   else await failRows(drain, sentRows, failure, sub.webhookUrl);
 }
@@ -436,8 +436,11 @@ function isolatePoison(
   return { poison, truncated };
 }
 
-/** Sends in order, stopping at the first failure; returns it, or `null` when every message was accepted. */
-async function sendAll(drain: Drain, webhook: string, messages: DiscordMessage[]): Promise<SendFailure | null> {
+/**
+ * Sends in order, stopping at the first failure; returns it, or `null` when every message was accepted.
+ * `perWebhook`/`blocked` key on `webhook` alone — never fold `threadId` into that key.
+ */
+async function sendAll(drain: Drain, webhook: string, messages: DiscordMessage[], threadId?: string | null): Promise<SendFailure | null> {
   const { sender, budget } = drain.deps;
   for (const message of messages) {
     let result: SendResult;
@@ -447,7 +450,7 @@ async function sendAll(drain: Drain, webhook: string, messages: DiscordMessage[]
       attempted = false;
     } else {
       try {
-        result = await sender.send(webhook, message);
+        result = await sender.send(webhook, message, threadId);
       } catch {
         result = TRANSIENT_FAILURE;
       }

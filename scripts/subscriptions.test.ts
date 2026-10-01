@@ -22,11 +22,12 @@ function freshDb(): DatabaseSync {
   return db;
 }
 
-function addSub(db: DatabaseSync, id: string, webhook = HOOK, filter = '{}', enabled = 1): void {
-  db.prepare('INSERT INTO subscriptions (id, guild_id, webhook_url, filter, mode, digest_interval_min, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+function addSub(db: DatabaseSync, id: string, webhook = HOOK, filter = '{}', enabled = 1, threadId: string | null = null): void {
+  db.prepare('INSERT INTO subscriptions (id, guild_id, webhook_url, thread_id, filter, mode, digest_interval_min, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
     id,
     '123456789012345678',
     webhook,
+    threadId,
     filter,
     'digest',
     30,
@@ -54,12 +55,24 @@ describe('list SQL', () => {
     addSub(db, 'main', HOOK, '{"kinds":["new"]}');
     addSub(db, 'other', 'https://discordapp.com/api/webhooks/987654321098765432/anotherTOKEN-9', '{}', 0);
     const rows = db.prepare(buildListSql()).all() as Record<string, unknown>[];
-    expect(rows.map((r) => Object.keys(r))).toEqual([['id', 'guild_id', 'mode', 'filter', 'enabled', 'webhook'], ['id', 'guild_id', 'mode', 'filter', 'enabled', 'webhook']]);
+    expect(rows.map((r) => Object.keys(r))).toEqual([
+      ['id', 'guild_id', 'mode', 'filter', 'enabled', 'thread_id', 'webhook'],
+      ['id', 'guild_id', 'mode', 'filter', 'enabled', 'thread_id', 'webhook'],
+    ]);
     expect(rows.map((r) => r.id)).toEqual(['main', 'other']);
-    expect(rows[0]).toMatchObject({ mode: 'digest', filter: '{"kinds":["new"]}', enabled: 1 });
+    expect(rows[0]).toMatchObject({ mode: 'digest', filter: '{"kinds":["new"]}', enabled: 1, thread_id: null });
     expect(JSON.stringify(rows)).not.toContain(TOKEN);
     expect(JSON.stringify(rows)).not.toContain('anotherTOKEN');
     expect(String(rows[0]!.webhook)).toContain('123456789012345678');
+  });
+
+  it('shows the thread id of a subscription that targets one, without disturbing the masked webhook', () => {
+    const db = freshDb();
+    addSub(db, 'threaded', HOOK, '{}', 1, '222233334444555566');
+    const rows = db.prepare(buildListSql()).all() as Record<string, unknown>[];
+    expect(rows[0]).toMatchObject({ thread_id: '222233334444555566' });
+    expect(String(rows[0]!.webhook)).toContain('123456789012345678');
+    expect(JSON.stringify(rows)).not.toContain(TOKEN);
   });
 
   it.each([

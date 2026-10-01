@@ -108,7 +108,8 @@ Until then, use the manual steps below.
    applied yet, in order, before `schema.sql`
    (for example `pnpm run wrangler d1 execute ratatoskr --remote --file=./migrations/0003_package_likes_and_website.sql`).
    Apply each file once; the current ones are `0001_outbox_delivered_at.sql`,
-   `0002_package_download_url_and_downloads.sql` and `0003_package_likes_and_website.sql`.
+   `0002_package_download_url_and_downloads.sql`, `0003_package_likes_and_website.sql`
+   and `0004_subscription_thread_id.sql`.
    A database created from the current `schema.sql` needs none of them.
 
 4. Review `ratatoskr.config.json` (sources, game, User-Agent) and validate it.
@@ -343,6 +344,22 @@ pnpm add-subscription --guild-id <id> --webhook-url-env DISCORD_WEBHOOK_URL \
   --filter '{"sources":["thunderstore:valheim"],"kinds":["new"]}'
 ```
 
+### Forum posts and channel threads
+
+`--thread-id <id>` delivers into an existing forum post or text-channel thread
+instead of the webhook's parent channel — a numeric Discord snowflake, the same
+id you'd copy from the thread's own URL. The webhook still lives on the parent
+(forum or text) channel; only where each subscription's messages land changes.
+The thread must already exist: this project never creates one, and a subscription
+pointed at a deleted or archived-forever thread just fails delivery like any other
+bad destination (see "Managing subscriptions" in `docs/spec.md`).
+
+```sh
+# Deliver into one forum post instead of the forum channel itself
+pnpm add-subscription --guild-id <id> --webhook-url-env DISCORD_WEBHOOK_URL \
+  --thread-id 222233334444555566 --filter '{"sources":["hexium:valheim"]}'
+```
+
 ### Several channels and targeted subscriptions
 
 Every subscription is its own row: one webhook (one channel), its own filter,
@@ -386,7 +403,7 @@ Managing existing subscriptions works the same way, with `pnpm subscriptions`
 (it also only prints the command; add `--local` for the local database):
 
 ```sh
-pnpm subscriptions list                       # id, guild, mode, filter, enabled, webhook id (never the token)
+pnpm subscriptions list                       # id, guild, mode, filter, enabled, thread id, webhook id (never the token)
 pnpm subscriptions disable --id azumatt       # stop delivering, keep the row
 pnpm subscriptions enable  --id azumatt
 pnpm subscriptions set-filter --id main --exclude-package SomeAuthor-NoisyMod --exclude-package Other

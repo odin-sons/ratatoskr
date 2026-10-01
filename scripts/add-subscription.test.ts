@@ -40,8 +40,12 @@ describe('sqlString', () => {
 describe('buildInsertSql', () => {
   it('produces the expected statement', () => {
     expect(buildInsertSql(sub({ filter: { allowNsfw: true } }))).toBe(
-      `INSERT INTO subscriptions (id, guild_id, webhook_url, filter, mode, digest_interval_min, enabled) VALUES ('sub-1', '123456789012345678', '${WEBHOOK}', '{"allowNsfw":true}', 'digest', 30, 1);`,
+      `INSERT INTO subscriptions (id, guild_id, webhook_url, thread_id, filter, mode, digest_interval_min, enabled) VALUES ('sub-1', '123456789012345678', '${WEBHOOK}', NULL, '{"allowNsfw":true}', 'digest', 30, 1);`,
     );
+  });
+
+  it('quotes a thread id when one is set', () => {
+    expect(buildInsertSql(sub({ threadId: '222233334444555566' }))).toContain(`'${WEBHOOK}', '222233334444555566', '{}'`);
   });
 
   it('escapes single quotes inside filter JSON', () => {
@@ -102,6 +106,20 @@ describe('parseCli --id', () => {
 
   it.each(['', 'a b', "a'b", 'a;b', 'a"b', '$(x)', 'x'.repeat(65), 'a/b', 'ä'])('rejects %j', (id) => {
     expect(() => parseCli(['--id', id], {})).toThrow(/--id/);
+  });
+});
+
+describe('parseCli --thread-id', () => {
+  it('accepts a numeric snowflake', () => {
+    expect(parseCli(['--thread-id', '222233334444555566'], {}).threadId).toBe('222233334444555566');
+  });
+
+  it('defaults to no thread id, delivering to the webhook\'s own channel', () => {
+    expect(parseCli([], {}).threadId).toBeUndefined();
+  });
+
+  it.each(['', 'abc', '123', '1'.repeat(21), '12345678901234567 ', '-12345678901234567'])('rejects %j', (threadId) => {
+    expect(() => parseCli(['--thread-id', threadId], {})).toThrow(/--thread-id/);
   });
 });
 
@@ -179,6 +197,21 @@ describe('planSubscription', () => {
     expect(text).toMatch(/filter\.sources\[0\]/);
     expect(text).toMatch(/filter\.packages\[0\]/);
     expect(text).not.toContain(WEBHOOK);
+  });
+
+  it('carries the thread id into the subscription and the SQL when given', () => {
+    const plan = planSubscription(opts(['--thread-id', '222233334444555566']), newId);
+    if (!plan.ok) throw new Error('expected a plan');
+    expect(plan.subscription.webhookUrl).toBe(WEBHOOK);
+    expect(plan.subscription.threadId).toBe('222233334444555566');
+    expect(plan.sql).toContain(`'${WEBHOOK}', '222233334444555566'`);
+  });
+
+  it('stores a NULL thread id when none is given', () => {
+    const plan = planSubscription(opts([]), newId);
+    if (!plan.ok) throw new Error('expected a plan');
+    expect(plan.subscription.threadId).toBeNull();
+    expect(plan.sql).toContain(`'${WEBHOOK}', NULL`);
   });
 
   it('reports a bad webhook URL without echoing it', () => {
