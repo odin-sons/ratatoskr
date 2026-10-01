@@ -15,7 +15,7 @@ const USAGE = `Usage: pnpm subscriptions <command> [options]
 Prints the wrangler command for a subscription change. Nothing is executed.
 
 Commands:
-  list                       Show id, guild, mode, filter, enabled and the webhook id (never its token)
+  list                       Show id, guild, mode, filter, enabled, thread id and the webhook id (never its token)
   disable --id <name>        Stop delivering to this subscription; keeps its row and filter
   enable --id <name>         Resume a disabled subscription
   remove --id <name>         Delete the subscription and its pending deliveries
@@ -47,17 +47,17 @@ export type CommandPlan = { ok: true; command: string } | { ok: false; errors: s
 const WEBHOOK_PATH = '/api/webhooks/';
 
 /**
- * Selects the webhook id only, and only when the URL has the expected shape.
- * The token is never selected; anything unexpected prints "(unrecognised)".
+ * Selects the webhook id and thread id, and only when the URL has the expected shape. The token
+ * is never selected; anything unexpected prints "(unrecognised)".
  */
 export function buildListSql(): string {
   const rest = `CASE WHEN instr(webhook_url, '${WEBHOOK_PATH}') > 0 THEN substr(webhook_url, instr(webhook_url, '${WEBHOOK_PATH}') + ${WEBHOOK_PATH.length}) ELSE '' END`;
   const webhookId = `CASE WHEN instr(rest, '/') > 0 THEN substr(rest, 1, instr(rest, '/') - 1) ELSE '' END`;
   return (
-    'SELECT id, guild_id, mode, filter, enabled, ' +
+    'SELECT id, guild_id, mode, filter, enabled, thread_id, ' +
     `CASE WHEN wid != '' AND wid NOT GLOB '*[^0-9]*' THEN '...${WEBHOOK_PATH}' || wid || '/<token hidden>' ELSE '(unrecognised)' END AS webhook ` +
-    `FROM (SELECT id, guild_id, mode, filter, enabled, ${webhookId} AS wid FROM ` +
-    `(SELECT id, guild_id, mode, filter, enabled, ${rest} AS rest FROM subscriptions)) ORDER BY id;`
+    `FROM (SELECT id, guild_id, mode, filter, enabled, thread_id, ${webhookId} AS wid FROM ` +
+    `(SELECT id, guild_id, mode, filter, enabled, thread_id, ${rest} AS rest FROM subscriptions)) ORDER BY id;`
   );
 }
 

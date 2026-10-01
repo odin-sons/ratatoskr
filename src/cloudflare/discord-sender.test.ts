@@ -84,6 +84,18 @@ describe('DiscordSender', () => {
     expect(String(calls[0]![0])).toBe(`${HOOK}?thread_id=42&wait=false`);
   });
 
+  it('delivers into a forum post or thread when the subscription targets one', async () => {
+    const { sender, calls } = senderWith(() => new Response(null, { status: 204 }));
+    expect(await sender.send(HOOK, MESSAGE, '222233334444555566')).toEqual({ ok: true });
+    expect(String(calls[0]![0])).toBe(`${HOOK}?thread_id=222233334444555566&wait=false`);
+  });
+
+  it.each([undefined, null, ''])('omits thread_id when not given (%j)', async (threadId) => {
+    const { sender, calls } = senderWith(() => new Response(null, { status: 204 }));
+    await sender.send(HOOK, MESSAGE, threadId);
+    expect(String(calls[0]![0])).toBe(`${HOOK}?wait=false`);
+  });
+
   describe('link buttons', () => {
     const WITH_BUTTONS: DiscordMessage = {
       content: 'hi',

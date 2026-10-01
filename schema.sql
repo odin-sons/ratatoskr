@@ -4,7 +4,8 @@
 -- It does not alter existing tables. A database created before `outbox.delivered_at` existed
 -- needs migrations/0001_outbox_delivered_at.sql once, and one created before `packages.download_url` and
 -- `packages.downloads` existed needs migrations/0002_package_download_url_and_downloads.sql once, and one created before
--- `packages.likes` and `packages.website_url` existed needs migrations/0003_package_likes_and_website.sql once, before this file.
+-- `packages.likes` and `packages.website_url` existed needs migrations/0003_package_likes_and_website.sql once, and one
+-- created before `subscriptions.thread_id` existed needs migrations/0004_subscription_thread_id.sql once, before this file.
 
 CREATE TABLE IF NOT EXISTS sources (
   id TEXT PRIMARY KEY,
@@ -55,6 +56,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   id TEXT PRIMARY KEY,
   guild_id TEXT NOT NULL,
   webhook_url TEXT NOT NULL,
+  thread_id TEXT,
   filter TEXT NOT NULL DEFAULT '{}',
   mode TEXT NOT NULL DEFAULT 'digest' CHECK (mode IN ('immediate', 'digest')),
   digest_interval_min INTEGER,
@@ -77,12 +79,26 @@ CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox (next_attempt_at) WHERE 
 CREATE INDEX IF NOT EXISTS idx_outbox_delivered ON outbox (delivered_at) WHERE delivered_at IS NOT NULL;
 
 -- Example subscription (one per Discord channel webhook). Keep the webhook URL secret.
--- INSERT INTO subscriptions (id, guild_id, webhook_url, filter, mode, digest_interval_min)
+-- INSERT INTO subscriptions (id, guild_id, webhook_url, thread_id, filter, mode, digest_interval_min)
 -- VALUES (
 --   'my-guild-main',
 --   '123456789012345678',
 --   'https://discord.com/api/webhooks/123456789012345678/YOUR_WEBHOOK_TOKEN',
+--   NULL,
 --   '{"sources":["thunderstore:valheim"],"kinds":["new","update"],"allowNsfw":false,"dedupAcrossStores":true}',
+--   'digest',
+--   30
+-- );
+
+-- Same webhook, but this subscription delivers into one of its existing forum posts instead of
+-- the parent channel (pnpm add-subscription --thread-id <id> sets this for you).
+-- INSERT INTO subscriptions (id, guild_id, webhook_url, thread_id, filter, mode, digest_interval_min)
+-- VALUES (
+--   'my-guild-forum-post',
+--   '123456789012345678',
+--   'https://discord.com/api/webhooks/123456789012345678/YOUR_WEBHOOK_TOKEN',
+--   '222233334444555566',
+--   '{"sources":["hexium:valheim"]}',
 --   'digest',
 --   30
 -- );

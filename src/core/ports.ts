@@ -97,7 +97,8 @@ export type SendResult =
   | { ok: false; retryable: false; status: number };
 
 export interface Sender {
-  send(webhookUrl: string, payload: DiscordMessage): Promise<SendResult>;
+  /** `threadId` delivers into an existing forum post or channel thread instead of the webhook's parent channel. */
+  send(webhookUrl: string, payload: DiscordMessage, threadId?: string | null): Promise<SendResult>;
 }
 
 // ---------------------------------------------------------------------------

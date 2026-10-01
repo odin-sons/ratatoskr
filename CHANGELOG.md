@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.1.2] - 2026-09-29
+## [1.2.1] - 2026-10-01
 
 ### Fixed
 
@@ -21,6 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   link too. The delivered-listing dedup now only excuses the lookup for a
   package the store has never seen; a version change of an already-known
   package always gets a full lookup.
+
+## [1.2.0] - 2026-10-01
+
+### Added
+
+- `pnpm add-subscription --thread-id <id>` delivers into an existing forum
+  post or text-channel thread instead of the webhook's parent channel.
+  `pnpm subscriptions list` now also shows each subscription's thread id.
+  The thread must already exist; this never creates one.
 
 ## [1.1.1] - 2026-09-28
 

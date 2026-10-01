@@ -11,6 +11,7 @@ const SCHEMA = readFileSync(join(ROOT, 'schema.sql'), 'utf8');
 const MIGRATION = readFileSync(join(ROOT, 'migrations/0001_outbox_delivered_at.sql'), 'utf8');
 const MIGRATION_DOWNLOAD_URL = readFileSync(join(ROOT, 'migrations/0002_package_download_url_and_downloads.sql'), 'utf8');
 const MIGRATION_LIKES_WEBSITE = readFileSync(join(ROOT, 'migrations/0003_package_likes_and_website.sql'), 'utf8');
+const MIGRATION_THREAD_ID = readFileSync(join(ROOT, 'migrations/0004_subscription_thread_id.sql'), 'utf8');
 
 const SOURCE = 'thunderstore:valheim';
 const NOW = '2026-09-19T12:00:00.000Z';
@@ -85,6 +86,7 @@ describe('schema upgrade from a database without outbox.delivered_at', () => {
     shim.db.exec(MIGRATION);
     shim.db.exec(MIGRATION_DOWNLOAD_URL);
     shim.db.exec(MIGRATION_LIKES_WEBSITE);
+    shim.db.exec(MIGRATION_THREAD_ID);
     shim.db.exec(SCHEMA);
     const store = new D1Store(shim.asD1());
 
@@ -223,10 +225,58 @@ describe('schema upgrade from a database without packages.likes and packages.web
 
   it('applies to a database whose columns arrived through every earlier migration, in order', async () => {
     const shim = legacyDatabase();
-    for (const migration of [MIGRATION, MIGRATION_DOWNLOAD_URL, MIGRATION_LIKES_WEBSITE]) shim.db.exec(migration);
+    for (const migration of [MIGRATION, MIGRATION_DOWNLOAD_URL, MIGRATION_LIKES_WEBSITE, MIGRATION_THREAD_ID]) shim.db.exec(migration);
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
     const columns = (shim.db.prepare("SELECT name FROM pragma_table_info('packages')").all() as { name: string }[]).map((r) => r.name);
     expect(columns).toEqual(expect.arrayContaining(['download_url', 'downloads', 'likes', 'website_url']));
     expect((await new D1Store(shim.asD1()).takeDue(NOW, 10))[0]!.event.pkg).toMatchObject({ likes: null, websiteUrl: null });
+  });
+});
+
+/** Database shape before `subscriptions.thread_id` existed: the current schema without that column. */
+const SCHEMA_BEFORE_THREAD_ID = SCHEMA.replace('  thread_id TEXT,\n', '');
+
+function databaseWithoutThreadId(): D1Shim {
+  const shim = new D1Shim();
+  shim.db.exec(SCHEMA_BEFORE_THREAD_ID);
+  const id = eventId(SOURCE, 'Owner-Mod', '1.0.0');
+  shim.db
+    .prepare('INSERT INTO packages (source, package_id, store, latest_version, name, owner, url, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(SOURCE, 'Owner-Mod', 'thunderstore', '1.0.0', 'Mod', 'Owner', 'https://thunderstore.invalid/Owner/Mod/', NOW);
+  shim.db
+    .prepare('INSERT INTO events (id, source, package_id, kind, version_to, release_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(id, SOURCE, 'Owner-Mod', 'new', '1.0.0', 'owner|mod|1.0.0', NOW);
+  shim.db
+    .prepare('INSERT INTO subscriptions (id, guild_id, webhook_url, filter, mode, digest_interval_min, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run('sub1', 'g', 'https://discord.invalid/api/webhooks/1/tok', '{}', 'immediate', null, 1);
+  shim.db
+    .prepare('INSERT INTO outbox (id, subscription_id, event_id, attempts, next_attempt_at) VALUES (?, ?, ?, ?, ?)')
+    .run(outboxId('sub1', id), 'sub1', id, 0, NOW);
+  return shim;
+}
+
+describe('schema upgrade from a database without subscriptions.thread_id', () => {
+  it('the fixture really lacks the column and the current queries fail on it', async () => {
+    expect(SCHEMA_BEFORE_THREAD_ID).not.toMatch(/^ +thread_id TEXT/m);
+    await expect(new D1Store(databaseWithoutThreadId().asD1()).takeDue(NOW, 10)).rejects.toThrow(/thread_id/);
+  });
+
+  it('the migration adds the nullable column, keeps the data, and the current queries then work', async () => {
+    const shim = databaseWithoutThreadId();
+    shim.db.exec(MIGRATION_THREAD_ID);
+    const column = shim.db.prepare("SELECT \"notnull\" AS required, type FROM pragma_table_info('subscriptions') WHERE name = 'thread_id'").get();
+    expect(column).toEqual({ required: 0, type: 'TEXT' });
+
+    const store = new D1Store(shim.asD1());
+    const [due] = await store.takeDue(NOW, 10);
+    expect(due!.subscription).toMatchObject({ id: 'sub1', threadId: null });
+  });
+
+  it('applies schema.sql cleanly afterwards, twice, and cannot be applied a second time itself', () => {
+    const shim = databaseWithoutThreadId();
+    shim.db.exec(MIGRATION_THREAD_ID);
+    expect(() => shim.db.exec(SCHEMA)).not.toThrow();
+    expect(() => shim.db.exec(SCHEMA)).not.toThrow();
+    expect(() => shim.db.exec(MIGRATION_THREAD_ID)).toThrow(/duplicate column/);
   });
 });

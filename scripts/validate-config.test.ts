@@ -159,8 +159,31 @@ describe('validateSubscription', () => {
     'https://discord.com.evil.example/api/webhooks/1/x',
     'https://discord.com/api/webhooks/1/x?wait=true',
     'https://discord.com/api/webhooks/1/x y',
+    'https://discord.com/api/webhooks/1/x?thread_id=123',
+    'https://discord.com/api/webhooks/1/x?thread_id=abc',
+    'https://discord.com/api/webhooks/1/x?thread_id=222233334444555566&extra=1',
+    'https://discord.com/api/webhooks/1/x?thread_id=',
   ])('rejects webhook %s', (url) => {
     expect(subErrors(subscription({ webhookUrl: url })).join('\n')).toMatch(/webhookUrl/);
+  });
+
+  it('defaults threadId to null, delivering to the webhook\'s own channel', () => {
+    const r = validateSubscription(subscription());
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.subscription.threadId).toBeNull();
+  });
+
+  it('accepts a thread id and keeps the webhook URL untouched', () => {
+    const r = validateSubscription(subscription({ threadId: '222233334444555566' }));
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.subscription.threadId).toBe('222233334444555566');
+      expect(r.subscription.webhookUrl).toBe(WEBHOOK);
+    }
+  });
+
+  it.each(['', '123', 'abc', '1'.repeat(21), 5, true])('rejects thread id %j', (threadId) => {
+    expect(subErrors(subscription({ threadId })).join('\n')).toMatch(/threadId/);
   });
 
   it('rejects non-numeric guild ids', () => {

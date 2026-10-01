@@ -51,6 +51,7 @@ export function fixedClock(iso: string = FIXED_NOW_ISO): Clock {
 export interface SentCall {
   webhookUrl: string;
   payload: DiscordMessage;
+  threadId?: string | null;
 }
 
 export const SEND_OK: SendResult = { ok: true };
@@ -76,8 +77,8 @@ export class FakeSender implements Sender {
     return this;
   }
 
-  async send(webhookUrl: string, payload: DiscordMessage): Promise<SendResult> {
-    const call = { webhookUrl, payload };
+  async send(webhookUrl: string, payload: DiscordMessage, threadId?: string | null): Promise<SendResult> {
+    const call = { webhookUrl, payload, threadId };
     const index = this.calls.length;
     this.calls.push(call);
     const result = this.queue.shift() ?? this.fallback(call, index);
