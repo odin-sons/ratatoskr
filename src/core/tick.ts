@@ -7,6 +7,7 @@ import {
   DELIVERED_RETENTION_DAYS,
   MS_PER_DAY,
   OUTBOX_PURGE_BATCH,
+  SOURCE_STATE_REFRESH_MS,
   SUBREQUEST_SEND_RESERVE,
   TICK_BUDGET,
 } from './constants.ts';
@@ -227,6 +228,14 @@ async function guarded(run: Run, adapter: SourceAdapter, kind: 'tick' | 'reconci
   }
 }
 
+/** True when `next` moves neither the cursor nor `bootstrapped` and `prev` was written less than `SOURCE_STATE_REFRESH_MS` ago. */
+function isRedundantStateWrite(prev: SourceState | null, next: SourceState, nowMs: number): boolean {
+  if (prev === null || !prev.bootstrapped || !next.bootstrapped || prev.cursor !== next.cursor) return false;
+  if (prev.etag === next.etag && prev.lastOkAt === next.lastOkAt) return true;
+  const writtenAt = prev.lastOkAt === null ? Number.NaN : Date.parse(prev.lastOkAt);
+  return nowMs - writtenAt < SOURCE_STATE_REFRESH_MS;
+}
+
 async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'reconcile'): Promise<SourceOutcome> {
   const { deps, now, nowIso } = run;
   const { store } = deps;
@@ -255,7 +264,10 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
     const result = await adapter.poll(ctx);
     if (result.status === 'skipped') return { report: { status: 'skipped', events: 0 }, jobs: [], fetched: false };
     if (result.status === 'not-modified') {
-      if (state !== null) await store.touchSource({ ...state, etag: result.etag ?? state.etag, lastOkAt: nowIso });
+      if (state !== null) {
+        const touched = { ...state, etag: result.etag ?? state.etag, lastOkAt: nowIso };
+        if (!isRedundantStateWrite(state, touched, now.getTime())) await store.touchSource(touched);
+      }
       return { report: { status: 'not-modified', events: 0 }, jobs: [], fetched: true };
     }
     snapshots = result.packages;
@@ -290,6 +302,9 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
         ? new Map<string, string>()
         : await store.getKnownVersions(id, [...new Set(snapshots.map((s) => s.packageId))]);
   const { events: detected } = diffSnapshots(known, snapshots, now);
+  if (detected.length === 0 && isRedundantStateWrite(state, nextState, now.getTime())) {
+    return { report: { status: 'ok', events: 0, ...warned }, jobs: [], fetched: true };
+  }
   const seen = detected.length === 0 ? new Set<string>() : await store.existingEventIds(detected.map((e) => e.id));
   const events = seen.size === 0 ? detected : detected.filter((e) => !seen.has(e.id));
   const { rows, detailedEventIds } = await fanOut(events, run.subs, store, now);

@@ -46,6 +46,16 @@ describe('runReconcile', () => {
     expect(h.store.sources.get(TS)).toMatchObject({ cursor: 'cur', etag: 'etag', lastOkAt: '2026-09-19T11:00:00.000Z', bootstrapped: true });
   });
 
+  it('writes nothing when it finds nothing', async () => {
+    const adapter = new FakeAdapter({ id: TS }, { reconcilable: true });
+    const h = makeHarness({ adapters: [adapter] });
+    bootstrap(h, TS, { 'A-One': '1.0.0' });
+    adapter.reconcileResult = [snap('A-One', '1.0.0')];
+    await runReconcile(h.deps, scheduled, 0);
+    expect(h.store.commitCount).toBe(0);
+    expect(h.store.touchCount).toBe(0);
+  });
+
   it('does not run for a source that is not bootstrapped yet: seeding belongs to polling', async () => {
     const adapter = new FakeAdapter({ id: TS }, { reconcilable: true });
     const h = makeHarness({ adapters: [adapter], subscriptions: [makeSubscription()] });

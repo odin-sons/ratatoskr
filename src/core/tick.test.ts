@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { FakeAdapter, FIXED_NOW_ISO, clientError, makeEvent, makeSnapshot, makeSubscription, okPoll, rateLimited } from '../testing/fakes.ts';
 import { makeHarness, type Harness } from '../testing/harness.ts';
-import { DISCORD, TICK_BUDGET } from './constants.ts';
+import { DISCORD, SOURCE_STATE_REFRESH_MS, TICK_BUDGET } from './constants.ts';
 import { eventId, outboxId } from './ids.ts';
 import { renderDigest, renderImmediate } from '../render/index.ts';
 import { runTick } from './tick.ts';
@@ -227,6 +227,74 @@ describe('runTick: isolation and statuses', () => {
     expect(report.sources[TS]!.status).toBe('not-modified');
     expect(h.store.sources.get(TS)).toMatchObject({ cursor: 'c0', etag: 'e9', lastOkAt: FIXED_NOW_ISO, bootstrapped: true });
     expect(h.store.commitCount).toBe(0);
+  });
+
+  describe('source state writes', () => {
+    const FRESH = new Date(scheduled - 5 * 60_000).toISOString();
+    const STALE = new Date(scheduled - SOURCE_STATE_REFRESH_MS - 1).toISOString();
+
+    function freshHarness(lastOkAt: string) {
+      const adapter = new FakeAdapter({ id: TS });
+      const h = makeHarness({ adapters: [adapter] });
+      bootstrap(h, TS, {});
+      h.store.sources.set(TS, { id: TS, cursor: 'c0', etag: 'e0', bootstrapped: true, lastOkAt });
+      return { adapter, h };
+    }
+
+    it('skips the write when a recent state row differs only by validator and last_ok_at', async () => {
+      const { adapter, h } = freshHarness(FRESH);
+      adapter.enqueue({ status: 'not-modified', etag: 'e1' });
+      await runTick(h.deps, scheduled);
+      expect(h.store.touchCount).toBe(0);
+      expect(h.store.sources.get(TS)).toMatchObject({ etag: 'e0', lastOkAt: FRESH });
+    });
+
+    it('refreshes the state row once it is older than the refresh interval', async () => {
+      const { adapter, h } = freshHarness(STALE);
+      adapter.enqueue({ status: 'not-modified', etag: 'e1' });
+      await runTick(h.deps, scheduled);
+      expect(h.store.touchCount).toBe(1);
+      expect(h.store.sources.get(TS)).toMatchObject({ etag: 'e1', lastOkAt: FIXED_NOW_ISO });
+    });
+
+    it.each([[null], ['not a date']])('writes when the stored last_ok_at is %j', async (lastOkAt) => {
+      const { adapter, h } = freshHarness(FRESH);
+      h.store.sources.set(TS, { id: TS, cursor: 'c0', etag: 'e0', bootstrapped: true, lastOkAt });
+      adapter.enqueue({ status: 'not-modified', etag: 'e0' });
+      await runTick(h.deps, scheduled);
+      expect(h.store.touchCount).toBe(1);
+    });
+
+    it('commits nothing for a poll that found nothing and moved nothing', async () => {
+      const { adapter, h } = freshHarness(FRESH);
+      adapter.enqueue(okPoll([], { cursor: 'c0', etag: 'e1' }));
+      const report = await runTick(h.deps, scheduled);
+      expect(report.sources[TS]).toEqual({ status: 'ok', events: 0 });
+      expect(h.store.commitCount).toBe(0);
+    });
+
+    it('still commits a poll that moved the cursor, or a stale one that found nothing', async () => {
+      const moved = freshHarness(FRESH);
+      moved.adapter.enqueue(okPoll([], { cursor: 'c1', etag: 'e0' }));
+      await runTick(moved.h.deps, scheduled);
+      expect(moved.h.store.commitCount).toBe(1);
+      expect(moved.h.store.sources.get(TS)).toMatchObject({ cursor: 'c1' });
+
+      const stale = freshHarness(STALE);
+      stale.adapter.enqueue(okPoll([], { cursor: 'c0', etag: 'e0' }));
+      await runTick(stale.h.deps, scheduled);
+      expect(stale.h.store.commitCount).toBe(1);
+      expect(stale.h.store.sources.get(TS)).toMatchObject({ lastOkAt: FIXED_NOW_ISO });
+    });
+
+    it('always commits when events were found, whatever the age of the state row', async () => {
+      const { adapter, h } = freshHarness(FRESH);
+      h.store.seedPackages(TS, { 'A-One': '1.0.0' });
+      adapter.enqueue(okPoll([snap('A-One', '1.1.0')], { cursor: 'c0', etag: 'e0' }));
+      await runTick(h.deps, scheduled);
+      expect(h.store.commitCount).toBe(1);
+      expect(h.store.events.size).toBe(1);
+    });
   });
 
   it('writes nothing for a skipped source', async () => {

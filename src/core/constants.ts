@@ -49,6 +49,16 @@ export const CLOUDFLARE = {
 } as const;
 
 /**
+ * D1 on the Workers Free plan. Source: developers.cloudflare.com/d1/platform/limits and
+ * developers.cloudflare.com/workers/platform/pricing (D1). The size limit is per database (500 MB), not per account.
+ */
+export const D1_FREE = {
+  rowsReadPerDay: 5_000_000,
+  rowsWrittenPerDay: 100_000,
+  maxDatabaseBytes: 500_000_000,
+} as const;
+
+/**
  * Per-tick caps per category. Their sum can exceed `CLOUDFLARE.subrequestsPerInvocation`;
  * the shared `SubrequestBudget` (core/budget.ts) enforces the real limit and
  * whatever exceeds a cap or the budget is deferred to the next tick.
@@ -60,6 +70,9 @@ export const TICK_BUDGET = {
   /** Outbox rows taken per drain. */
   maxOutboxRows: 400,
 } as const;
+
+/** A source's state row is rewritten at most this often when only its validator or `last_ok_at` would change. */
+export const SOURCE_STATE_REFRESH_MS = 3_600_000;
 
 /** Subrequests kept unspent as headroom below the platform limit. */
 export const SUBREQUEST_SAFETY_MARGIN = 2;

@@ -35,6 +35,7 @@ export class MemoryStore implements Store {
   private commitFailures: Error[] = [];
 
   commitCount = 0;
+  touchCount = 0;
 
   /** The next `commit` throws before applying anything. */
   failNextCommit(err: Error = new Error('simulated commit failure')): void {
@@ -102,6 +103,7 @@ export class MemoryStore implements Store {
   }
 
   async touchSource(state: SourceState): Promise<void> {
+    this.touchCount += 1;
     const existing = this.sources.get(state.id);
     if (!existing) return;
     this.sources.set(state.id, { ...existing, etag: state.etag, lastOkAt: state.lastOkAt });
