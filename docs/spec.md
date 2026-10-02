@@ -801,11 +801,16 @@ number here, and update its date when you do.
    `https://valheim.hexium.gg/api/experimental/package-index/` or
    `SELECT COUNT(*) FROM packages WHERE source = 'hexium:valheim'`.
 2. **D1 free-tier limits** (5M rows read and 100k rows written per day; exceeding
-   them errors until 00:00 UTC). Real usage is not measured. From the cadence
-   constants, the Hexium index scan alone reads every stored Hexium version on each of
-   its 96 scans a day: about 0.15M rows a day at 1500 packages, about 0.34M at the
-   cap. Comfortable, but check the Cloudflare D1 analytics after any change that adds
-   a per-tick scan of a growing table.
+   them errors until 00:00 UTC). Measured on 2026-10-02 with the D1 dashboard and
+   `wrangler d1 insights`, 20.75 hours into the UTC day: 191.65k rows read and 8.16k
+   rows written, about 220k (4.4 %) and 9.4k (9.4 %) for the full day. One query
+   makes up 83 % of the reads: `SELECT package_id, latest_version FROM packages WHERE
+   source = ?`, the Hexium known-versions read, 107 runs of about 1,490 rows. At the
+   3,500-line cap it reads 346,500 rows a day (6.9 %). Writes are mostly outbox and
+   event inserts plus a source-state upsert on every tick (865 a day; PR #5 cuts it).
+   The Hexium lookup fix in PR #1 adds a known-versions read of at most 20 ids on each
+   of the roughly 192 non-scan ticks (about 4k rows a day); re-check the analytics
+   once it ships, and after any change that adds a per-tick scan of a growing table.
 3. **A parked outbox row is never retried.** A non-retryable Discord answer parks it
    for good. On 2026-10-01 the first send to a freshly created forum thread was parked
    this way (cause not established); the same message sent by hand minutes later was
