@@ -88,9 +88,9 @@ function pickWindow<T>(items: T[], cap: number, rotation: number): T[] {
 
 export class HexiumAdapter implements SourceAdapter {
   readonly config: SourceConfig;
-  private readonly store: Pick<Store, 'getAllKnownVersions'>;
+  private readonly store: Pick<Store, 'getAllKnownVersions' | 'getKnownVersions'>;
 
-  constructor(config: SourceConfig, store: Pick<Store, 'getAllKnownVersions'>) {
+  constructor(config: SourceConfig, store: Pick<Store, 'getAllKnownVersions' | 'getKnownVersions'>) {
     this.config = config;
     this.store = store;
   }
@@ -122,7 +122,8 @@ export class HexiumAdapter implements SourceAdapter {
     if (!scanDue) {
       if (listing === 'not-modified') return { status: 'not-modified', etag: state.etag };
       const warnings = this.reportSkipped({ ...noSkipped(), listingItems: listingSkipped });
-      return { status: 'ok', packages: listing.packages, cursor: state.cursor, etag: listing.etag, complete: true, ...withWarnings(warnings) };
+      const lookedUp = await this.lookUpListedUpdates(ctx, listing.packages);
+      return { status: 'ok', packages: listing.packages.concat(lookedUp), cursor: state.cursor, etag: listing.etag, complete: true, ...withWarnings(warnings) };
     }
 
     const delivered = listing === 'not-modified' ? [] : listing.packages;
@@ -149,6 +150,24 @@ export class HexiumAdapter implements SourceAdapter {
       complete,
       ...withWarnings(warnings),
     };
+  }
+
+  /** Full lookups for known packages whose version the listing changed; the listing item has no download link. */
+  private async lookUpListedUpdates(ctx: PollContext, listed: PackageSnapshot[]): Promise<PackageSnapshot[]> {
+    if (listed.length === 0) return [];
+    try {
+      const known = await this.store.getKnownVersions(this.config.id, listed.map((p) => p.packageId));
+      const changed: IndexEntry[] = [];
+      for (const p of listed) {
+        const stored = known.get(p.packageId);
+        if (stored !== undefined && stored !== p.version) changed.push({ namespace: p.owner, name: p.name, version: p.version, sizeBytes: null });
+      }
+      if (changed.length === 0) return [];
+      return (await this.lookUp(ctx, changed, SOURCE_BUDGET.hexiumListingLookupsPerTick, 0)).packages;
+    } catch (err) {
+      console.warn(`[${this.config.id}] listing update lookups failed, listing only: ${describeError(err)}`);
+      return [];
+    }
   }
 
   private async fetchIndex(ctx: PollContext): Promise<string> {
@@ -222,7 +241,10 @@ export class HexiumAdapter implements SourceAdapter {
     const seen = new Set<string>();
     const scan = scanPackageIndex(text, (entry) => {
       const id = `${entry.namespace}-${entry.name}`;
-      if (known.get(id) === entry.version || delivered.get(id) === entry.version || seen.has(id)) return;
+      const knownVersion = known.get(id);
+      if (knownVersion === entry.version || seen.has(id)) return;
+      // Only a never-seen package already announced by the listing skips its lookup; a known one always gets it.
+      if (knownVersion === undefined && delivered.get(id) === entry.version) return;
       seen.add(id);
       candidates.push(entry);
     });

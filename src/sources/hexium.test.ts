@@ -82,7 +82,10 @@ function makeCtx(fake: FakeFetch, over: Partial<PollContext> = {}): PollContext 
 
 function adapterWith(known: Record<string, string> | Map<string, string> = {}): HexiumAdapter {
   const map = known instanceof Map ? known : new Map(Object.entries(known));
-  return new HexiumAdapter(config, { getAllKnownVersions: async () => map });
+  return new HexiumAdapter(config, {
+    getAllKnownVersions: async () => map,
+    getKnownVersions: async (_source, ids) => new Map(ids.flatMap((id) => (map.has(id) ? [[id, map.get(id)!] as const] : []))),
+  });
 }
 
 function ok(r: PollResult): Extract<PollResult, { status: 'ok' }> {
@@ -161,13 +164,62 @@ describe('HexiumAdapter.poll — listing (every tick)', () => {
   });
 
   it('rejects a hostile community slug without touching the network', async () => {
-    const evil = new HexiumAdapter({ ...config, community: 'x.evil.test/' }, { getAllKnownVersions: async () => new Map() });
+    const evil = new HexiumAdapter({ ...config, community: 'x.evil.test/' }, { getAllKnownVersions: async () => new Map(), getKnownVersions: async () => new Map() });
     for (const s of [state, null]) {
       const fake = routes();
       await expect(evil.poll(makeCtx(fake, { state: s }))).resolves.toEqual({ status: 'skipped' });
       expect(fake.calls).toHaveLength(0);
     }
     await expect(evil.reconcile!(makeCtx(routes()))).rejects.toThrow();
+  });
+});
+
+describe('HexiumAdapter.poll — listing-delivered updates on ticks without an index scan', () => {
+  const state = makeState({ cursor: null, etag: '"h1"' });
+  const genesis = 'GenesisMods-zzzGenesisItemStacks';
+
+  it('looks up a known package whose version the listing changed, so the update carries a download link', async () => {
+    const fake = routes({ lookup: answerAll('2.1.0') });
+    const res = ok(await adapterWith({ [genesis]: '2.0.0' }).poll(makeCtx(fake, { tickIndex: 1, state })));
+    expect(lookupCalls(fake)).toHaveLength(1);
+    const withLink = res.packages.find((p) => p.packageId === genesis && p.downloadUrl !== null);
+    expect(withLink).toMatchObject({ version: '2.1.0', downloadUrl: expect.stringContaining('hexium.gg') });
+  });
+
+  it('does not look up a new package or one whose version did not change', async () => {
+    for (const known of [{}, { [genesis]: '2.1.0' }] as Record<string, string>[]) {
+      const fake = routes({ lookup: answerAll('2.1.0') });
+      await adapterWith(known).poll(makeCtx(fake, { tickIndex: 1, state }));
+      expect(lookupCalls(fake)).toHaveLength(0);
+    }
+  });
+
+  it('caps the lookups per tick and keeps the listing snapshot of the rest', async () => {
+    const body = JSON.parse(listingFixture) as { packages: Record<string, unknown>[] };
+    const template = body.packages[0]!;
+    body.packages = Array.from({ length: 12 }, (_, i) => ({ ...template, owner: `Owner${i}`, name: `Package${i}`, version_number: '2.0.0' }));
+    const known = Object.fromEntries(body.packages.map((p) => [`${String(p.owner)}-${String(p.name)}`, '1.0.0']));
+    const fake = routes({ listing: JSON.stringify(body), lookup: answerAll('2.0.0') });
+    const res = ok(await adapterWith(known).poll(makeCtx(fake, { tickIndex: 1, state })));
+    expect(lookupCalls(fake)).toHaveLength(SOURCE_BUDGET.hexiumListingLookupsPerTick);
+    expect(res.packages).toHaveLength(12 + SOURCE_BUDGET.hexiumListingLookupsPerTick);
+  });
+
+  it('keeps the listing snapshot when the lookup fails', async () => {
+    const res = ok(await adapterWith({ [genesis]: '2.0.0' }).poll(makeCtx(routes(), { tickIndex: 1, state })));
+    expect(res.packages.find((p) => p.packageId === genesis)?.version).toBe('2.1.0');
+    expect(res.packages).toHaveLength(4);
+  });
+
+  it('returns the listing alone when the store read fails', async () => {
+    const broken = new HexiumAdapter(config, {
+      getAllKnownVersions: async () => new Map(),
+      getKnownVersions: async () => {
+        throw new Error('d1 down');
+      },
+    });
+    const res = ok(await broken.poll(makeCtx(routes(), { tickIndex: 1, state })));
+    expect(res.packages).toHaveLength(4);
   });
 });
 
@@ -308,12 +360,23 @@ describe('HexiumAdapter.poll — index scan finds version changes', () => {
     expect(scanned.etag).toBe('"h1"');
   });
 
-  it('skips a candidate the listing already delivered at the same version', async () => {
+  it('skips a genuinely new package the listing already delivered at the same version', async () => {
     const line = '{"namespace":"GenesisMods","name":"zzzGenesisItemStacks","version_number":"2.1.0","file_format":"zip","file_size":10,"dependencies":[],"suggestions":[]}';
     const fake = routes({ index: line, lookup: answerAll() });
-    const res = ok(await adapterWith({ 'GenesisMods-zzzGenesisItemStacks': '2.0.0' }).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    const res = ok(await adapterWith({}).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
     expect(lookupCalls(fake)).toHaveLength(0);
-    expect(res.packages.find((p) => p.packageId === 'GenesisMods-zzzGenesisItemStacks')?.version).toBe('2.1.0');
+    const pkg = res.packages.find((p) => p.packageId === 'GenesisMods-zzzGenesisItemStacks');
+    expect(pkg?.version).toBe('2.1.0');
+    expect(pkg?.downloadUrl).toBeNull();
+  });
+
+  it('still looks up a known package whose new version the listing already delivered this tick', async () => {
+    const line = '{"namespace":"GenesisMods","name":"zzzGenesisItemStacks","version_number":"2.1.0","file_format":"zip","file_size":10,"dependencies":[],"suggestions":[]}';
+    const fake = routes({ index: line, lookup: answerAll('2.1.0') });
+    const res = ok(await adapterWith({ 'GenesisMods-zzzGenesisItemStacks': '2.0.0' }).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+    expect(lookupCalls(fake)).toHaveLength(1);
+    const withLink = res.packages.find((p) => p.packageId === 'GenesisMods-zzzGenesisItemStacks' && p.downloadUrl !== null);
+    expect(withLink).toMatchObject({ version: '2.1.0', downloadUrl: expect.stringContaining('hexium.gg') });
   });
 
   it('still looks a candidate up when the listing has it at another version', async () => {

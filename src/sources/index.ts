@@ -5,7 +5,7 @@ import { HexiumAdapter } from './hexium.ts';
 import { NexusAdapter } from './nexus.ts';
 import { ThunderstoreAdapter } from './thunderstore.ts';
 
-export function adapterFor(store: Pick<Store, 'getAllKnownVersions'>, source: SourceConfig): SourceAdapter {
+export function adapterFor(store: Pick<Store, 'getAllKnownVersions' | 'getKnownVersions'>, source: SourceConfig): SourceAdapter {
   switch (source.store) {
     case 'thunderstore':
       return new ThunderstoreAdapter(source);
@@ -17,7 +17,7 @@ export function adapterFor(store: Pick<Store, 'getAllKnownVersions'>, source: So
 }
 
 /** Adapters for enabled sources only. */
-export function createAdapters(config: AppConfig, store: Pick<Store, 'getAllKnownVersions'>): SourceAdapter[] {
+export function createAdapters(config: AppConfig, store: Pick<Store, 'getAllKnownVersions' | 'getKnownVersions'>): SourceAdapter[] {
   return config.sources.filter((s) => s.enabled).map((s) => adapterFor(store, s));
 }
 

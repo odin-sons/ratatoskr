@@ -314,6 +314,10 @@ an incremental design that does not read the whole index every scan.
   live on 2026-09-27.
 - Any differing version is announced as `update` by the core diff, including an older
   one served by a stale listing or lookup.
+- A listing-delivered update whose lookup fails, is rate-limited or falls beyond the
+  per-tick cap is committed from the listing snapshot, without `download_url`, and stays
+  that way: the stored version then equals the index version, so no later scan looks the
+  package up again. A listing that runs ahead of the index has the same effect.
 - Bursty scans (up to 15 lookups plus the listing and index reads) can leave few
   subrequests for changelog fetches; the changelogs of that tick are skipped and not
   retried.
@@ -359,12 +363,21 @@ Rules for the snapshot built from it:
 - Every tick: listing page 1 (new packages, with flags).
 - Every `CADENCE.hexiumIndexEveryNthTick`-th tick: read the index once and compare each
   line's version with the stored versions (`store.getAllKnownVersions`). Candidates are
-  packages whose version differs and packages the store has never seen. Candidates the
-  listing already delivered at the same version need no lookup. At most
+  packages whose version differs and packages the store has never seen. At most
   `hexiumLookupsPerPoll` (15) candidates are looked up per poll, six at a time; the
   window of candidates advances by that amount per scan so packages that keep failing
   cannot starve the others; the poll is then reported incomplete and the rest are found
   again by the next scan.
+- **Listing-delivered dedup only excuses a genuinely new package.** A package the store
+  has never seen, already delivered by the listing at the index version, needs no lookup
+  (the `new` event carries no download link; accepted, see "Update source"). A known
+  package whose version changed always gets a lookup on a scan tick, even when page 1
+  carries the same version: the listing item has no `download_url`, and the package
+  upsert replaces `download_url` wholesale on a version change (not a `COALESCE`).
+  Ticks without a scan do the same for the listing page: known packages whose listing
+  version differs from the stored one (`store.getKnownVersions` over the page's ids, 20 rows)
+  get a lookup, at most `hexiumListingLookupsPerTick` (6). Beyond the cap, or when a lookup
+  fails, the listing snapshot is committed as is, without a download link.
 - Cold start: the index seeds every package as a lean snapshot (index version, size,
   default flags, no metadata) in `hexiumSeedSlices` (8) stable slices, one per poll,
   slice = hash of `namespace-name` modulo 8. Seeded rows are never emitted; any later

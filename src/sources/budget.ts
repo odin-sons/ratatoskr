@@ -8,6 +8,8 @@ export const SOURCE_BUDGET = {
   hexiumSeedSlices: 8,
   /** Per-package lookups (one subrequest each) per Hexium index scan; the rest are found again by the next scan. */
   hexiumLookupsPerPoll: 15,
+  /** Per-package lookups per Hexium tick that is not an index scan, for known packages whose version the listing changed. */
+  hexiumListingLookupsPerTick: 6,
   hexiumLookupsPerReconcile: 20,
   nexusMetadataLookups: 5,
 } as const;
