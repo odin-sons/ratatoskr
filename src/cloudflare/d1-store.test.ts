@@ -638,24 +638,35 @@ describe('D1 adapter', () => {
   describe('EXPLAIN QUERY PLAN', () => {
     it('every query the store issues is index-backed (no SCAN)', async () => {
       addSub(shim, 'sub1');
+      const called = new Set<string>();
+      const spy = new Proxy(store, {
+        get(target, name, receiver) {
+          const member = Reflect.get(target, name, receiver) as unknown;
+          if (typeof member !== 'function') return member;
+          return (...args: unknown[]) => {
+            called.add(String(name));
+            return (member as (...a: unknown[]) => unknown).apply(target, args);
+          };
+        },
+      });
       const p = pkg('Owner-Name');
       const e = ev(p);
       const o = ob('sub1', e);
-      await store.getSourceState(SOURCE);
-      await store.commit(batch({ packages: [p], events: [e], outbox: [o] }));
-      await store.touchSource(state());
-      await store.getKnownVersions(SOURCE, ['Owner-Name']);
-      await store.getAllKnownVersions(SOURCE);
-      await store.listSubscriptions();
-      await store.recentEventsByReleaseKeys(['k'], '2026-01-01T00:00:00.000Z');
-      await store.takeDue('2026-09-19T00:00:00.000Z', 10);
-      await store.markFailedMany([o.id], '2026-09-19T00:00:00.000Z', false);
-      await store.rescheduleRows([o.id], '2026-09-19T00:00:00.000Z');
-      await store.existingEventIds([e.id]);
-      await store.setEventDetails(e.id, { changelog: 'x', changelogUrl: null, websiteUrl: null });
-      await store.setEventDetails(e.id, { changelog: 'x', changelogUrl: null, websiteUrl: 'https://site.example/' });
-      await store.markDelivered([o.id], '2026-09-19T00:00:00.000Z');
-      await store.purgeDelivered('2026-09-20T00:00:00.000Z', 10);
+      await spy.getSourceState(SOURCE);
+      await spy.commit(batch({ packages: [p], events: [e], outbox: [o] }));
+      await spy.touchSource(state());
+      await spy.getKnownVersions(SOURCE, ['Owner-Name']);
+      await spy.getAllKnownVersions(SOURCE);
+      await spy.listSubscriptions();
+      await spy.recentEventsByReleaseKeys(['k'], '2026-01-01T00:00:00.000Z');
+      await spy.takeDue('2026-09-19T00:00:00.000Z', 10);
+      await spy.markFailedMany([o.id], '2026-09-19T00:00:00.000Z', false);
+      await spy.rescheduleRows([o.id], '2026-09-19T00:00:00.000Z');
+      await spy.existingEventIds([e.id]);
+      await spy.setEventDetails(e.id, { changelog: 'x', changelogUrl: null, websiteUrl: null });
+      await spy.setEventDetails(e.id, { changelog: 'x', changelogUrl: null, websiteUrl: 'https://site.example/' });
+      await spy.markDelivered([o.id], '2026-09-19T00:00:00.000Z');
+      await spy.purgeDelivered('2026-09-20T00:00:00.000Z', 10);
 
       const distinct = [...new Set(shim.preparedSql)];
       expect(distinct.length).toBeGreaterThanOrEqual(12);
@@ -669,6 +680,9 @@ describe('D1 adapter', () => {
         }
       }
       expect(failures).toEqual([]);
+
+      const methods = Object.getOwnPropertyNames(D1Store.prototype).filter((name) => name !== 'constructor');
+      expect(methods.filter((name) => !called.has(name))).toEqual([]);
     });
 
     it('takeDue drives off the partial due index without a sort', async () => {
