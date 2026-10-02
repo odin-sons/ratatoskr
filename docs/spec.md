@@ -88,7 +88,8 @@ Hexium therefore runs on a **split cadence**:
   community entry or a `has_nsfw_content` other than boolean `false` means NSFW,
   a non-boolean `is_deprecated` quarantines the candidate (a listing item and a lookup alike). A package the
   store has never seen and the listing already delivered at the same version needs no
-  lookup. A known package whose version changed always gets one on a scan tick.
+  lookup. A known package whose version changed always gets one: on a scan tick via the index, on other ticks via
+  the listing page (at most 6 per tick).
 
 Updates on Hexium arrive with up to 15 minutes of latency, plus one scan
 interval per 15 pending changes. That is acceptable for a digest that fires

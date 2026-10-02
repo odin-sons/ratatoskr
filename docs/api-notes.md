@@ -368,7 +368,10 @@ Rules for the snapshot built from it:
   package whose version changed always gets a lookup on a scan tick, even when page 1
   carries the same version: the listing item has no `download_url`, and the package
   upsert replaces `download_url` wholesale on a version change (not a `COALESCE`).
-  Known gap: on non-scan ticks a listing-delivered update is committed without lookup.
+  Ticks without a scan do the same for the listing page: known packages whose listing
+  version differs from the stored one (`store.getKnownVersions` over the page's ids, 20 rows)
+  get a lookup, at most `hexiumListingLookupsPerTick` (6). Beyond the cap, or when a lookup
+  fails, the listing snapshot is committed as is, without a download link.
 - Cold start: the index seeds every package as a lean snapshot (index version, size,
   default flags, no metadata) in `hexiumSeedSlices` (8) stable slices, one per poll,
   slice = hash of `namespace-name` modulo 8. Seeded rows are never emitted; any later

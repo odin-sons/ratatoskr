@@ -6,7 +6,7 @@ import { adapterFor, createAdapters } from './index.ts';
 import { NexusAdapter } from './nexus.ts';
 import { ThunderstoreAdapter } from './thunderstore.ts';
 
-const store = { getAllKnownVersions: async () => new Map<string, string>() };
+const store = { getAllKnownVersions: async () => new Map<string, string>(), getKnownVersions: async () => new Map<string, string>() };
 
 const sources: SourceConfig[] = [
   { id: 'thunderstore:valheim', store: 'thunderstore', community: 'valheim', enabled: true },
