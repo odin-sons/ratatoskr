@@ -363,20 +363,12 @@ Rules for the snapshot built from it:
   cannot starve the others; the poll is then reported incomplete and the rest are found
   again by the next scan.
 - **Listing-delivered dedup only excuses a genuinely new package.** A package the store
-  has never seen, whose index version the listing (page 1, this same tick) already
-  delivered at that exact version, needs no lookup — the listing-sourced `new` event
-  carries no download link, which is accepted (see "Update source" above: not urgent in
-  the initial announcement). A package the store already knows, whose version differs
-  from the stored one, **always** gets a full lookup, even when the listing happens to
-  carry that same new version this tick — a package can sit on page 1 (still among the
-  most recently *created*, see Listing) for hours or days after creation regardless of
-  how many times it has been updated since. The listing item never carries
-  `download_url`/`website_url`/`sizeBytes` (see Listing); skipping the lookup for an
-  `update` candidate on the strength of a listing hit would commit that event with those
-  fields null, and since the package upsert replaces `download_url` wholesale whenever
-  `latest_version` changes (not a `COALESCE`), it would also clobber any previously-good
-  link. Fixed 2026-09-29 — until then this cost the "Скачать" button on updates of any
-  package still on page 1, sometimes for its whole update history.
+  has never seen, already delivered by the listing at the index version, needs no lookup
+  (the `new` event carries no download link; accepted, see "Update source"). A known
+  package whose version changed always gets a lookup on a scan tick, even when page 1
+  carries the same version: the listing item has no `download_url`, and the package
+  upsert replaces `download_url` wholesale on a version change (not a `COALESCE`).
+  Known gap: on non-scan ticks a listing-delivered update is committed without lookup.
 - Cold start: the index seeds every package as a lean snapshot (index version, size,
   default flags, no metadata) in `hexiumSeedSlices` (8) stable slices, one per poll,
   slice = hash of `namespace-name` modulo 8. Seeded rows are never emitted; any later

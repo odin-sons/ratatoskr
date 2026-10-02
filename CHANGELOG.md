@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `download_url` wholesale on a version change, it clobbered any previously-good
   link too. The delivered-listing dedup now only excuses the lookup for a
   package the store has never seen; a version change of an already-known
-  package always gets a full lookup.
+  package always gets a full lookup on scan ticks.
 
 ## [1.2.0] - 2026-10-01
 
