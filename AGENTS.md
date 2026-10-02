@@ -28,8 +28,10 @@ These are not preferences. Violating them breaks the deployment target.
 - 6 simultaneous outgoing connections
 - 100,000 requests/day, 128 MB memory
 - Cron triggers: 1 minute granularity, 5 per account, **no retries on failure**
-- D1 free: 5 GB, 5M rows read/day, 100k rows written/day. Since 2026-09-01
-  exceeding these returns errors until 00:00 UTC, not a soft counter.
+- D1 free: 500 MB per database (5 GB per account), 5M rows read/day, 100k rows
+  written/day. Since 2026-09-01 exceeding the daily limits returns errors until
+  00:00 UTC, not a soft counter. A full database rejects writes ("Exceeded
+  maximum DB size") until rows are deleted.
 
 **Therefore:**
 
