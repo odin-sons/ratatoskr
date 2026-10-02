@@ -1,0 +1,66 @@
+name: Bug report
+description: Something the bot does that it should not, or fails to do.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never paste a webhook URL, an API key, a Cloudflare token or the contents of your `.env`. The bot removes URLs and webhook paths from its `event: "run"` log line before writing it; read the line for anything that looks like a token before you paste it. Output from a terminal or a dashboard gets no such cleaning.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The `ratatoskr vX.Y.Z` text at the end of every bot message, or `version` in `package.json`.
+      placeholder: "1.2.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Pick the closest one. "Not sure" is fine.
+      options:
+        - Thunderstore source
+        - Hexium source
+        - Nexus source
+        - Message rendering
+        - Delivery to Discord
+        - Subscriptions and filters
+        - Deployment and scripts
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and when. A Discord message link or a mod name helps.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Leave empty if you cannot reproduce it on demand.
+  - type: textarea
+    id: log
+    attributes:
+      label: Run log lines
+      description: 'Optional. One or more `event: "run"` lines from around the time of the problem. Skip this when no log line shows the problem, and say so in "What happened".'
+      render: json
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before you submit
+      options:
+        - label: I checked that nothing I pasted contains a webhook URL, an API key or a token.
+          required: true
+        - label: I searched the open and closed issues for the same problem.
+          required: true

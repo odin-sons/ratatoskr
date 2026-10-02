@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/odin-sons/ratatoskr/security/advisories/new
+    about: A private report for anything that exposes a secret or lets someone post as the bot.
+  - name: Ask a question
+    url: https://github.com/odin-sons/ratatoskr/discussions
+    about: Setup help, "is this expected?" and anything that is not a defect or a proposal.

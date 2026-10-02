@@ -1,0 +1,30 @@
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+  categories:
+    - title: Breaking changes
+      labels:
+        - breaking
+    - title: Features
+      labels:
+        - feat
+        - enhancement
+    - title: Fixes
+      labels:
+        - fix
+        - bug
+    - title: Performance
+      labels:
+        - perf
+    - title: Documentation
+      labels:
+        - docs
+    - title: Maintenance
+      labels:
+        - chore
+        - ci
+        - test
+    - title: Other changes
+      labels:
+        - "*"

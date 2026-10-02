@@ -1,0 +1,32 @@
+name: Task
+description: Planned maintenance work, refactoring or infrastructure with no user-visible defect.
+labels: []
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What changes and why.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: Checkable outcomes, one per line.
+      placeholder: |
+        - `pnpm check` passes
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Design choices, measurements, related issues and pull requests.
+  - type: input
+    id: milestone
+    attributes:
+      label: Milestone
+      description: The release this belongs to.
+      placeholder: v1.3.0
