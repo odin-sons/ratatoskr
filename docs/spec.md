@@ -784,3 +784,30 @@ Still open:
 2. Measured CPU per tick — needs a real deployment to confirm the 10 ms budget.
 3. Nexus response shapes are unverified (no API key during development).
 4. Persisting `alsoOn` for a release already delivered on another store.
+
+### Watch list
+
+Time-bound risks and limits nobody has measured yet. Re-measure before trusting a
+number here, and update its date when you do.
+
+1. **Hexium index cap (3500 lines).** 1490 lines on 2026-10-02 (1318 on 2026-09-26,
+   1113 on 2026-09-20), growing 29 to 34 per day, so the cap is reached between
+   2026-11-30 and 2026-12-11. Past it the index scan is skipped: updates to Hexium
+   packages the store already knows stop being detected (new packages still are) and
+   the only sign is a warning in the run log. Decide before mid-November 2026: ask
+   Hexium for a server-side sorted or filtered listing, build an incremental scan, or
+   raise the cap with a fresh CPU measurement (4000 lines was rejected at 4.8 ms, see
+   `docs/api-notes.md`). Re-measure with the line count of
+   `https://valheim.hexium.gg/api/experimental/package-index/` or
+   `SELECT COUNT(*) FROM packages WHERE source = 'hexium:valheim'`.
+2. **D1 free-tier limits** (5M rows read and 100k rows written per day; exceeding
+   them errors until 00:00 UTC). Real usage is not measured. From the cadence
+   constants, the Hexium index scan alone reads every stored Hexium version on each of
+   its 96 scans a day: about 0.15M rows a day at 1500 packages, about 0.34M at the
+   cap. Comfortable, but check the Cloudflare D1 analytics after any change that adds
+   a per-tick scan of a growing table.
+3. **A parked outbox row is never retried.** A non-retryable Discord answer parks it
+   for good. On 2026-10-01 the first send to a freshly created forum thread was parked
+   this way (cause not established); the same message sent by hand minutes later was
+   accepted. After adding a subscription, check
+   `SELECT COUNT(*) FROM outbox WHERE parked = 1` and re-queue what was lost.

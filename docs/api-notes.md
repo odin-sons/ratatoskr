@@ -298,8 +298,10 @@ lines, the sticky regex 0.9, and the remaining ~1.5 ms is the `Map` lookup of th
 freshly built `namespace-name` id.
 
 **Growth.** The package count rose from 1113 (2026-09-20) to 1318 (2026-09-26): about
-34 packages per day. The 3500-line cap is reached in about 64 days from 2026-09-26
-(around 2026-11-29); the warning above appears the first day the index exceeds it.
+34 packages per day. **[live]** (2026-10-02) the Valheim index has 1490 lines (400 bytes
+per line, 596 KB), 29 per day since 2026-09-26. The 3500-line cap is therefore reached
+between 2026-11-30 (34 per day) and 2026-12-11 (29 per day); the warning above appears
+the first day the index exceeds it.
 Past that point the CPU budget no longer allows a full scan per tick; the durable fix
 is a server-side sorted or filtered listing (worth asking Hexium for, see Listing) or
 an incremental design that does not read the whole index every scan.
