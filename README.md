@@ -1,5 +1,12 @@
 # ratatoskr
 
+[![Tests](https://img.shields.io/github/check-runs/odin-sons/ratatoskr/main?nameFilter=test&label=tests)](https://github.com/odin-sons/ratatoskr/actions/workflows/ci.yml)
+[![Typecheck, lint, config](https://img.shields.io/github/check-runs/odin-sons/ratatoskr/main?nameFilter=static-checks&label=typecheck%20%2B%20lint)](https://github.com/odin-sons/ratatoskr/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/odin-sons/ratatoskr)](https://github.com/odin-sons/ratatoskr/releases)
+[![License: AGPL-3.0-or-later](https://img.shields.io/github/license/odin-sons/ratatoskr)](LICENSE)
+[![Conventional Commits](https://img.shields.io/badge/Conventional%20Commits-1.0.0-fe5196)](https://www.conventionalcommits.org/)
+[![Cloudflare Workers free plan](https://img.shields.io/badge/Cloudflare%20Workers-free%20plan-f38020)](docs/spec.md)
+
 A Discord bot that reports new and updated game mods from Thunderstore, Hexium
 and Nexus Mods. It runs entirely on the Cloudflare Workers free plan, triggered
 by cron, with no inbound HTTP routes. Each operator deploys their own instance
@@ -441,7 +448,8 @@ Other commands:
 pnpm test              # vitest
 pnpm typecheck
 pnpm validate-config
-pnpm check             # all three
+pnpm lint
+pnpm check             # typecheck, lint, tests and config validation
 ```
 
 ## Troubleshooting
