@@ -165,6 +165,18 @@ this optional per subscription — some channels will want the raw per-store fee
 Sketch, not final. Indexes are load-bearing: D1 free allows 5M row reads per
 day and a full scan on `events` is the only realistic way to reach it. Every
 query must show `SEARCH … USING INDEX` under `EXPLAIN QUERY PLAN`.
+`src/cloudflare/d1-store.test.ts` enforces this for every `D1Store` method (a method the
+test does not exercise fails it), and `src/core/d1-budget.test.ts` derives the worst-case
+daily reads and writes from the cadence constants and bounds them against the free limits.
+
+**Read budget guard (10 %).** The Hexium known-versions read returns one row per stored Hexium
+package on every index scan (96 a day) and every reconcile run (3 a day), so its worst case is
+`(96 + 3) x HEXIUM_INDEX_MAX_LINES` rows a day. `d1-budget.test.ts` requires that to stay within 10 %
+of the daily row-read limit (500,000 of 5,000,000), which leaves the rest of the workload, manual
+queries and growth clear of the limit. At the 3,500-line cap it is 346,500 (6.9 %), so the cap can
+rise to about 5,000 lines before the test fails. Raising the cap or the scan cadence beyond that is a
+deliberate decision: re-measure CPU (see `docs/api-notes.md`), then change the share here and in the
+test in the same commit.
 
 ```sql
 CREATE TABLE sources (
@@ -172,7 +184,7 @@ CREATE TABLE sources (
   cursor TEXT,                      -- ISO-8601 or opaque
   etag TEXT,
   bootstrapped INTEGER NOT NULL DEFAULT 0,
-  last_ok_at TEXT
+  last_ok_at TEXT                   -- last state write; at most SOURCE_STATE_REFRESH_MS stale, read only by the refresh check
 );
 
 CREATE TABLE packages (
@@ -349,9 +361,13 @@ Quota usage at 800 events/day, two guilds:
 | Resource | Free limit | Used | Share |
 |---|---|---|---|
 | Worker requests | 100,000/day | 288 | 0.3 % |
-| D1 rows written | 100,000/day | ~4,000 | 4 % |
-| D1 rows read | 5,000,000/day | ~50,000 | 1 % |
+| D1 rows written | 100,000/day | ~9,000 | 9 % |
+| D1 rows read | 5,000,000/day | ~220,000 | 4 % |
 | External subrequests | 50/invocation | ≤ 48, enforced | — |
+
+D1 figures are measured on the live database (2026-10-02, extrapolated to a full UTC day; the D1
+dashboard and `pnpm run wrangler d1 insights <database name>`). About 83 % of the reads are one query,
+the Hexium known-versions read behind each index scan.
 
 Quotas are not the constraint. CPU time and Discord readability are.
 

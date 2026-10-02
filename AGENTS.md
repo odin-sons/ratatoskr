@@ -44,6 +44,8 @@ These are not preferences. Violating them breaks the deployment target.
   free.
 - Budget every tick: cap listing fetches, changelog fetches and Discord sends
   per invocation, defer the remainder to the next tick (backpressure).
+- Keep D1 daily reads and writes within the budget guards in `docs/spec.md`
+  ("D1 schema"); `pnpm check` enforces them.
 - Advance a source cursor only after its events are committed to D1, in one
   transaction. Cron has no retries; a crash between read and write silently
   loses updates.
