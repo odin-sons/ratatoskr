@@ -5,8 +5,9 @@ import { fileURLToPath } from 'node:url';
 import { buildWranglerCommand, sqlString } from './add-subscription.ts';
 import { FILTER_FLAG_OPTIONS, FILTER_FLAGS_NOTE, FILTER_FLAGS_USAGE, resolveFilter, type FilterFlagValues } from './filter-flags.ts';
 import { SUBSCRIPTION_ID_RE, validateSubscriptionFilter } from './validate-config.ts';
+import { defaultDatabaseName, isValidDatabaseName } from './wrangler-config.ts';
 
-const DEFAULT_DATABASE = 'ratatoskr';
+const defaultDatabase = (): string => defaultDatabaseName(process.env);
 const COMMANDS = ['list', 'disable', 'enable', 'remove', 'set-filter'] as const;
 type Command = (typeof COMMANDS)[number];
 
@@ -24,7 +25,7 @@ Commands:
 Options:
   --id <name>                Subscription id, [A-Za-z0-9_-]{1,64}
 ${FILTER_FLAGS_USAGE}
-  --database <name>          D1 database name (default: ${DEFAULT_DATABASE})
+  --database <name>          D1 database name (default: ${defaultDatabase()}; D1_DATABASE_NAME in .env sets it)
   --local                    Target the local D1 database instead of --remote
   --sql-only                 Print only the SQL statement(s)
   --help                     Show this help
@@ -92,12 +93,13 @@ export function parseCli(argv: string[]): SubscriptionsCli {
     options: {
       id: { type: 'string' },
       ...FILTER_FLAG_OPTIONS,
-      database: { type: 'string', default: DEFAULT_DATABASE },
+      database: { type: 'string', default: defaultDatabase() },
       local: { type: 'boolean', default: false },
       'sql-only': { type: 'boolean', default: false },
       help: { type: 'boolean', default: false },
     },
   });
+  if (!isValidDatabaseName(values.database as string)) throw new Error('--database must be 1-63 letters, digits, hyphens or underscores, starting with a letter or digit');
   const base = { database: values.database as string, local: values.local as boolean, sqlOnly: values['sql-only'] as boolean };
   if (values.help) return { command: 'help', ...base };
 

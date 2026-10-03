@@ -1,6 +1,6 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- ratatoskr D1 schema for a fresh install; re-applying it to a database it created is harmless.
---   wrangler d1 execute ratatoskr --remote --file=./schema.sql
+--   wrangler d1 execute <database name> --remote --file=./schema.sql
 -- It does not alter existing tables. A database created before `outbox.delivered_at` existed
 -- needs migrations/0001_outbox_delivered_at.sql once, and one created before `packages.download_url` and
 -- `packages.downloads` existed needs migrations/0002_package_download_url_and_downloads.sql once, and one created before

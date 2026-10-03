@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildInsertSql,
   buildWranglerCommand,
@@ -71,7 +71,27 @@ describe('buildWranglerCommand', () => {
   });
 });
 
+beforeEach(() => vi.stubEnv('D1_DATABASE_NAME', ''));
+afterEach(() => vi.unstubAllEnvs());
+
 describe('parseCli', () => {
+  it('defaults --database to ratatoskr, or to D1_DATABASE_NAME when set, and lets the flag win', () => {
+    const args = ['--guild-id', '1', '--webhook-url', WEBHOOK];
+    expect(parseCli(args, {}).database).toBe('ratatoskr');
+    vi.stubEnv('D1_DATABASE_NAME', 'ratatoskr-skyrim');
+    expect(parseCli(args, {}).database).toBe('ratatoskr-skyrim');
+    expect(parseCli([...args, '--database', 'other'], {}).database).toBe('other');
+  });
+
+  it('refuses a --database that is not a plain database name, since it is printed into a shell command', () => {
+    const args = ['--guild-id', '1', '--webhook-url', WEBHOOK];
+    for (const bad of ['x; rm -rf ~', '$(id)', 'my db', '-flag', '../db']) {
+      expect(() => parseCli([...args, '--database', bad], {}), bad).toThrow('--database');
+    }
+    vi.stubEnv('D1_DATABASE_NAME', 'bad name');
+    expect(() => parseCli(args, {})).toThrow('--database');
+  });
+
   it('reads the webhook URL from an environment variable', () => {
     const o = parseCli(['--guild-id', '1', '--webhook-url-env', 'HOOK'], { HOOK: WEBHOOK });
     expect(o.webhookUrl).toBe(WEBHOOK);

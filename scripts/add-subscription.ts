@@ -7,8 +7,9 @@ import { DEFAULT_DIGEST_INTERVAL_MIN } from '../src/core/constants.ts';
 import type { Subscription } from '../src/core/types.ts';
 import { FILTER_FLAG_OPTIONS, FILTER_FLAGS_NOTE, FILTER_FLAGS_USAGE, resolveFilter, type FilterFlagValues } from './filter-flags.ts';
 import { SNOWFLAKE_RE, SUBSCRIPTION_ID_RE, validateSubscription } from './validate-config.ts';
+import { defaultDatabaseName, isValidDatabaseName } from './wrangler-config.ts';
 
-const DEFAULT_DATABASE = 'ratatoskr';
+const defaultDatabase = (): string => defaultDatabaseName(process.env);
 
 const USAGE = `Usage: pnpm add-subscription --guild-id <id> (--webhook-url-env <VAR> | --webhook-url <url>) [options]
 
@@ -27,7 +28,7 @@ Options:
   --mode <mode>              immediate | digest (default: digest)
   --interval <minutes>       Digest interval, 5..1440 (default: ${DEFAULT_DIGEST_INTERVAL_MIN})
 ${FILTER_FLAGS_USAGE}
-  --database <name>          D1 database name (default: ${DEFAULT_DATABASE})
+  --database <name>          D1 database name (default: ${defaultDatabase()}; D1_DATABASE_NAME in .env sets it)
   --local                    Target the local D1 database instead of --remote
   --sql-only                 Print only the SQL statement
   --help                     Show this help
@@ -99,7 +100,7 @@ export function parseCli(argv: string[], env: Record<string, string | undefined>
       mode: { type: 'string', default: 'digest' },
       interval: { type: 'string', default: String(DEFAULT_DIGEST_INTERVAL_MIN) },
       ...FILTER_FLAG_OPTIONS,
-      database: { type: 'string', default: DEFAULT_DATABASE },
+      database: { type: 'string', default: defaultDatabase() },
       local: { type: 'boolean', default: false },
       'sql-only': { type: 'boolean', default: false },
       help: { type: 'boolean', default: false },
@@ -124,6 +125,8 @@ export function parseCli(argv: string[], env: Record<string, string | undefined>
       throw new Error(`environment variable ${envName} is not set`);
     }
   }
+
+  if (!isValidDatabaseName(values.database as string)) throw new Error('--database must be 1-63 letters, digits, hyphens or underscores, starting with a letter or digit');
 
   return {
     id: values.id,

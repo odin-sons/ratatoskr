@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
-import { buildDeployConfig, collectDatabaseId, stripLeadingSeparator, withGeneratedConfig } from './wrangler-config.ts';
+import { buildDeployConfig, collectDatabaseId, collectInstanceNames, defaultDatabaseName, stripLeadingSeparator, withGeneratedConfig } from './wrangler-config.ts';
 
 const ID = 'deadbeef-dead-beef-dead-beefdeadbeef';
 
@@ -29,6 +30,110 @@ describe('collectDatabaseId', () => {
         expect(result.errors.join(' ')).not.toContain(bad);
       }
     }
+  });
+});
+
+describe('collectInstanceNames', () => {
+  it('keeps the committed defaults when both variables are unset or blank', () => {
+    const defaults = { ok: true, names: { workerName: 'ratatoskr', databaseName: 'ratatoskr' } };
+    expect(collectInstanceNames({})).toEqual(defaults);
+    expect(collectInstanceNames({ WORKER_NAME: '', D1_DATABASE_NAME: '   ' })).toEqual(defaults);
+  });
+
+  it('accepts valid names, trimmed', () => {
+    expect(collectInstanceNames({ WORKER_NAME: ' ratatoskr-skyrim ', D1_DATABASE_NAME: 'Ratatoskr_Skyrim-2' })).toEqual({
+      ok: true,
+      names: { workerName: 'ratatoskr-skyrim', databaseName: 'Ratatoskr_Skyrim-2' },
+    });
+  });
+
+  it('refuses names Cloudflare would reject or that could break out of the config, naming the variable but not the value', () => {
+    const workers = ['Ratatoskr', 'rata_toskr', '-ratatoskr', 'ratatoskr-', 'a'.repeat(64), 'rata toskr', 'x"y', `x${String.fromCharCode(92)}y`];
+    const databases = ['_db', 'a'.repeat(64), 'my db', 'x"y', 'db;DROP', '../db'];
+    for (const bad of workers) {
+      const result = collectInstanceNames({ WORKER_NAME: bad });
+      expect(result.ok, bad).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.join(' ')).toContain('WORKER_NAME');
+        expect(result.errors.join(' ')).not.toContain(bad);
+      }
+    }
+    for (const bad of databases) {
+      const result = collectInstanceNames({ D1_DATABASE_NAME: bad });
+      expect(result.ok, bad).toBe(false);
+      if (!result.ok) expect(result.errors.join(' ')).toContain('D1_DATABASE_NAME');
+    }
+  });
+
+  it('reports both variables when both are bad', () => {
+    const result = collectInstanceNames({ WORKER_NAME: 'Bad Name', D1_DATABASE_NAME: 'bad name' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors).toHaveLength(2);
+  });
+});
+
+describe('defaultDatabaseName', () => {
+  it('is D1_DATABASE_NAME when set, else ratatoskr', () => {
+    expect(defaultDatabaseName({})).toBe('ratatoskr');
+    expect(defaultDatabaseName({ D1_DATABASE_NAME: '  ' })).toBe('ratatoskr');
+    expect(defaultDatabaseName({ D1_DATABASE_NAME: ' my-db ' })).toBe('my-db');
+  });
+});
+
+describe('buildDeployConfig names', () => {
+  const FULL = [
+    '{',
+    '  "name": "ratatoskr",',
+    '  "d1_databases": [{ "binding": "DB", "database_name": "ratatoskr", "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID" }]',
+    '}',
+    '',
+  ].join('\n');
+
+  it('leaves both names alone for the defaults', () => {
+    const result = buildDeployConfig(FULL, ID);
+    expect(result).toEqual({ ok: true, text: FULL.replace('REPLACE_WITH_YOUR_D1_DATABASE_ID', ID) });
+  });
+
+  it('renames the Worker and the database, and only those fields', () => {
+    const result = buildDeployConfig(FULL, ID, { workerName: 'ratatoskr-skyrim', databaseName: 'ratatoskr_skyrim' });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.text).toContain('"name": "ratatoskr-skyrim"');
+      expect(result.text).toContain('"database_name": "ratatoskr_skyrim"');
+      expect(result.text).toContain('"binding": "DB"');
+      expect(result.text).toContain(ID);
+    }
+  });
+
+  it('renames one and keeps the other', () => {
+    const result = buildDeployConfig(FULL, ID, { workerName: 'second', databaseName: 'ratatoskr' });
+    expect(result.ok && result.text.includes('"name": "second"') && result.text.includes('"database_name": "ratatoskr"')).toBe(true);
+  });
+
+  it('refuses to rename when the default text appears more than once, such as in a comment', () => {
+    const commented = ['// e.g. "name": "ratatoskr"', FULL].join('\n');
+    const result = buildDeployConfig(commented, ID, { workerName: 'second', databaseName: 'ratatoskr' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.join(' ')).toContain('found 2');
+  });
+
+  it('renames exactly the Worker and the database in the committed wrangler.jsonc', () => {
+    const committed = readFileSync(join(import.meta.dirname, '../wrangler.jsonc'), 'utf8');
+    const result = buildDeployConfig(committed, ID, { workerName: 'second-instance', databaseName: 'second_db' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.text.match(/"name": "second-instance"/g)).toHaveLength(1);
+    expect(result.text.match(/"database_name": "second_db"/g)).toHaveLength(1);
+    const before = committed.split('\n').filter((line) => line.includes('"ratatoskr"')).length;
+    expect(before).toBe(2);
+    expect(result.text.split('\n').filter((line) => line.includes('"ratatoskr"'))).toHaveLength(0);
+  });
+
+  it('refuses to rename a field the committed config no longer carries at its default', () => {
+    const edited = FULL.replace('"name": "ratatoskr"', '"name": "mine"');
+    const result = buildDeployConfig(edited, ID, { workerName: 'second', databaseName: 'ratatoskr' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.join(' ')).toContain('"name"');
   });
 });
 

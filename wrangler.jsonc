@@ -12,7 +12,7 @@
     {
       "binding": "DB",
       "database_name": "ratatoskr",
-      // PLACEHOLDER: run `wrangler d1 create ratatoskr` and paste the returned id here.
+      // PLACEHOLDER: run `wrangler d1 create <name>` (default name: ratatoskr) and put the returned id into .env as D1_DATABASE_ID.
       "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
     }
   ],

@@ -787,7 +787,9 @@ text is English; it is addressed to the operator, not to the channel's readers.
 No inbound endpoint means no slash commands. Configuration is `wrangler secret`
 and `wrangler d1 execute`. Accepted trade-off for a zero-surface deployment.
 
-Optional Worker secret `ALERT_WEBHOOK_URL` (see "Limit alerts"). Optional Worker variable `STORE_EMOJIS` (object or JSON string, keyed by store) sets
+Optional deploy-time names `WORKER_NAME` and `D1_DATABASE_NAME` (default `ratatoskr`)
+let several instances share one Cloudflare account; `scripts/wrangler-config.ts` writes them into the
+throwaway config next to the real `database_id`. Optional Worker secret `ALERT_WEBHOOK_URL` (see "Limit alerts"). Optional Worker variable `STORE_EMOJIS` (object or JSON string, keyed by store) sets
 custom store emoji, `RATATOSKR_EMOJI` (string) the emoji of the trailing source subtext and
 `LANGUAGE` (`en` default, `ru`) the message language; see "Message layout". Real ids
 belong in the operator's git-ignored `.env`, never in the repository:

@@ -16,7 +16,7 @@
     "lint": "eslint .",
     "validate-config": "node --experimental-strip-types scripts/validate-config.ts",
     "add-subscription": "node --env-file-if-exists=.env --experimental-strip-types scripts/add-subscription.ts",
-    "subscriptions": "node --experimental-strip-types scripts/subscriptions.ts",
+    "subscriptions": "node --env-file-if-exists=.env --experimental-strip-types scripts/subscriptions.ts",
     "check": "node --experimental-strip-types scripts/check.ts",
     "deploy": "node --env-file-if-exists=.env --experimental-strip-types scripts/deploy.ts",
     "wrangler": "node --env-file-if-exists=.env --experimental-strip-types scripts/wrangler.ts"

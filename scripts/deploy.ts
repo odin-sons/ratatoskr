@@ -6,9 +6,9 @@ import { createInterface } from 'node:readline/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DISCORD_CUSTOM_EMOJI, PROJECT } from '../src/core/constants.ts';
 import { isLanguage, LANGUAGES, type Language } from '../src/i18n/index.ts';
-import { buildDeployConfig, collectDatabaseId, CONFIG_FILE, stripLeadingSeparator, withGeneratedConfig } from './wrangler-config.ts';
+import { buildDeployConfig, collectDatabaseId, collectInstanceNames, CONFIG_FILE, stripLeadingSeparator, withGeneratedConfig } from './wrangler-config.ts';
 
-export { buildDeployConfig, collectDatabaseId } from './wrangler-config.ts';
+export { buildDeployConfig, collectDatabaseId, collectInstanceNames } from './wrangler-config.ts';
 
 const EMOJI_VARIABLES = {
   STORE_EMOJI_THUNDERSTORE: 'thunderstore',
@@ -96,15 +96,17 @@ async function confirmRealDeploy(): Promise<boolean> {
 
 async function main(): Promise<number> {
   const databaseId = collectDatabaseId(process.env);
+  const names = collectInstanceNames(process.env);
   const built = buildDeployArgs({ env: process.env });
-  if (!databaseId.ok || !built.ok) {
-    for (const error of [...(databaseId.ok ? [] : databaseId.errors), ...(built.ok ? [] : built.errors)]) console.error(`deploy: ${error}`);
+  if (!databaseId.ok || !names.ok || !built.ok) {
+    const errors = [...(databaseId.ok ? [] : databaseId.errors), ...(names.ok ? [] : names.errors), ...(built.ok ? [] : built.errors)];
+    for (const error of errors) console.error(`deploy: ${error}`);
     return 1;
   }
   const extraArgs = stripLeadingSeparator(process.argv.slice(2));
   if (!isDryRun(extraArgs) && !(await confirmRealDeploy())) return 1;
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-  const config = buildDeployConfig(readFileSync(join(root, CONFIG_FILE), 'utf8'), databaseId.id);
+  const config = buildDeployConfig(readFileSync(join(root, CONFIG_FILE), 'utf8'), databaseId.id, names.names);
   if (!config.ok) {
     for (const error of config.errors) console.error(`deploy: ${error}`);
     return 1;

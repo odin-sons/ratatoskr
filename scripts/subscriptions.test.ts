@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildListSql,
   buildRemoveSql,
@@ -163,7 +163,24 @@ describe('set-filter SQL', () => {
   });
 });
 
+beforeEach(() => vi.stubEnv('D1_DATABASE_NAME', ''));
+afterEach(() => vi.unstubAllEnvs());
+
 describe('parseCli', () => {
+  it('defaults --database to D1_DATABASE_NAME when set, and lets the flag win', () => {
+    vi.stubEnv('D1_DATABASE_NAME', 'ratatoskr-skyrim');
+    expect(parseCli(['disable', '--id', 'main']).database).toBe('ratatoskr-skyrim');
+    expect(parseCli(['disable', '--id', 'main', '--database', 'other']).database).toBe('other');
+  });
+
+  it('refuses a --database that is not a plain database name, since it is printed into a shell command', () => {
+    for (const bad of ['x; rm -rf ~', '$(id)', 'my db', '-flag', '../db']) {
+      expect(() => parseCli(['disable', '--id', 'main', '--database', bad]), bad).toThrow('--database');
+    }
+    vi.stubEnv('D1_DATABASE_NAME', 'bad name');
+    expect(() => parseCli(['disable', '--id', 'main'])).toThrow('--database');
+  });
+
   it('reads the command, the id and the connection options', () => {
     expect(parseCli(['disable', '--id', 'main'])).toMatchObject({ command: 'disable', id: 'main', database: 'ratatoskr', local: false, sqlOnly: false });
     expect(parseCli(['--', 'enable', '--id', 'main', '--local', '--database', 'db', '--sql-only'])).toMatchObject({

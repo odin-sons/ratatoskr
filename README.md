@@ -100,7 +100,7 @@ Until then, use the manual steps below.
    `.env.example` to `.env` first) as `D1_DATABASE_ID`.
 
    ```sh
-   wrangler d1 create ratatoskr
+   wrangler d1 create ratatoskr   # or the name you set as D1_DATABASE_NAME
    ```
 
 3. Apply the schema to the remote database. Raw `wrangler` commands need the
@@ -109,7 +109,7 @@ Until then, use the manual steps below.
    touches the remote database.
 
    ```sh
-   pnpm run wrangler d1 execute ratatoskr --remote --file=./schema.sql
+   pnpm run wrangler d1 execute ratatoskr --remote --file=./schema.sql   # your D1_DATABASE_NAME, if set
    ```
 
    Upgrading an existing database: apply the files in `migrations/` you have not
@@ -161,7 +161,7 @@ Until then, use the manual steps below.
    your personal key.
 
    ```sh
-   wrangler secret put NEXUS_API_KEY
+   pnpm run wrangler secret put NEXUS_API_KEY
    ```
 
 8. Deploy. Use `pnpm run deploy`; plain `pnpm deploy` is a different, built-in
@@ -193,6 +193,22 @@ Until then, use the manual steps below.
    the approval gate. The optional presentation ones below aren't
    credentials, so they go in the same environment's **variables** instead,
    if you want a tag-triggered deploy to carry them too.
+
+### Several instances on one account
+
+The Worker is named `ratatoskr` and the D1 database `ratatoskr` unless you say otherwise. Two
+instances on one Cloudflare account (for two games, say) need different names, because both
+are unique per account. Set `WORKER_NAME` and `D1_DATABASE_NAME` in each checkout's
+`.env` (or as `production` environment variables for a tag-triggered deploy). `pnpm run deploy`
+and `pnpm run wrangler` substitute them into the same throwaway copy of `wrangler.jsonc` that
+carries the real `database_id`, and `pnpm add-subscription` and `pnpm subscriptions` use
+`D1_DATABASE_NAME` as their `--database` default. Create the database under the same name:
+`wrangler d1 create <D1_DATABASE_NAME>`.
+
+Each instance needs its own `ratatoskr.config.json`, `.env` and secrets, so use one checkout or
+fork per instance, and keep every `wrangler` call going through `pnpm run wrangler` (for secrets too), because the
+plain command reads the committed names. They share the account's limits: 5 cron triggers (an instance uses 2),
+100,000 Worker requests and 5M D1 row reads plus 100,000 row writes per day.
 
 ## Configuration
 
@@ -448,7 +464,7 @@ pnpm dev          # wrangler dev --test-scheduled
 ```
 
 Apply the schema to the local database once with
-`wrangler d1 execute ratatoskr --local --file=./schema.sql`. With
+`wrangler d1 execute ratatoskr --local --file=./schema.sql` (your `D1_DATABASE_NAME`, if set). With
 `--test-scheduled`, wrangler exposes a development-only route that fires the
 cron handler; the deployed Worker has no such route.
 
