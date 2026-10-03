@@ -108,6 +108,20 @@ have used them for years. What is expected of a good citizen:
   Thunderstore's cyberstorm API are undocumented and carry no compatibility
   guarantee.
 
+## Chart rendering services
+
+The weekly usage report (see "D1 usage monitor" in `docs/spec.md`) carries a chart as an image address
+on mermaid.ink and a link to the Mermaid Live editor. The bot calls neither service: it compresses the
+diagram text into the URL, and Discord, or the reader's browser, fetches it. The URL holds dates and
+usage percentages and nothing else.
+
+Mermaid, mermaid.ink (Jih-Chi Lee) and the Mermaid Live Editor (Knut Sveidqvist) are MIT-licensed. The
+project copies none of their code and only links to the services, so no obligation passes to this AGPL
+project. The hosted mermaid.ink publishes no terms of use, rate limit or uptime promise that could be
+found when this was written, so treat it as best effort. A failed image costs the picture only: the
+numbers are in the message text. The service can be self-hosted (see its README); the two base URLs are
+constants in `src/core/mermaid.ts`.
+
 ## README requirements
 
 - Unaffiliated-with disclaimer naming all three platforms.

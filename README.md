@@ -156,7 +156,24 @@ Until then, use the manual steps below.
    the mod channels. An existing database needs `schema.sql` applied again (step 3)
    before the first deploy that carries alerts; it adds the `alert_state` table.
 
-7. Only if you enable Nexus (see the disclaimer above): set
+7. Optional: the D1 usage monitor. It reads the day's D1 usage from Cloudflare's analytics API,
+   alerts in the channel from step 6 at 50, 70, 85 and 95 % of a daily limit, switches optional work
+   off from 70 %, and sends a usage chart every Monday. Create a token that can do nothing else: in
+   the Cloudflare dashboard, Profile → API Tokens → Create Token → Custom, one permission, Account →
+   Account Analytics → Read, limited to your account. Store it and your account id (on the Workers & Pages overview, or from `pnpm run wrangler
+   whoami`) as secrets, separate from the deploy token.
+
+   ```sh
+   pnpm run wrangler secret put CLOUDFLARE_ANALYTICS_TOKEN
+   ```
+
+   ```sh
+   pnpm run wrangler secret put CLOUDFLARE_ACCOUNT_ID
+   ```
+
+   Put the same two values in `.env` to see the numbers from your machine with `pnpm run usage`.
+
+8. Only if you enable Nexus (see the disclaimer above): set
    `"enabled": true` on the `nexus:*` source in `ratatoskr.config.json` and store
    your personal key.
 
@@ -164,7 +181,7 @@ Until then, use the manual steps below.
    pnpm run wrangler secret put NEXUS_API_KEY
    ```
 
-8. Deploy. Use `pnpm run deploy`; plain `pnpm deploy` is a different, built-in
+9. Deploy. Use `pnpm run deploy`; plain `pnpm deploy` is a different, built-in
    pnpm command.
 
    ```sh

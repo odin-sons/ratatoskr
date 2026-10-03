@@ -742,8 +742,8 @@ Each scheduled run logs exactly one JSON line (`event: "run"`): cron, per-source
 sources not polled, outbox rows not attempted), `parked`, `degraded` (immediate
 messages delivered only after a resend without optional buttons), `filtered` (rows
 dropped at delivery because the filter changed), `purged`, `changelogFetches`,
-`changelogSkipped` (dropped, never retried), `alerts` (limit alerts sent), `alertsFailed`,
-`subrequests` and `elapsedMs`.
+`changelogSkipped` (dropped, never retried), `usageStep` (the D1 degradation step that applied),
+`alerts` (limit alerts and weekly reports sent), `alertsFailed`, `subrequests` and `elapsedMs`.
 Error texts are one line, capped at 200 characters, with any `scheme://` URL (any case)
 and any `.../webhooks/...` path (with or without a scheme) replaced by `[url]`; every
 logged error text goes through this filter. Webhook URLs and secrets are never logged.
@@ -782,6 +782,51 @@ tick for Hexium) and written only when a level changes. If the table is missing 
 fails, the tick logs `limit alerts failed` and carries on with polling and delivery. Alert
 text is English; it is addressed to the operator, not to the channel's readers.
 
+### D1 usage monitor
+
+D1's free-plan limits are per account and fail hard: past 5,000,000 rows read or 100,000 rows written
+in a UTC day, queries error until 00:00 UTC, and a database past 500 MB rejects writes. Cloudflare
+emails only after the limit is hit. The monitor reads the day's usage from the GraphQL analytics
+API (`d1AnalyticsAdaptiveGroups` and `d1StorageAdaptiveGroups`) with a token that has only Account
+Analytics: Read, so it counts every database and every client of the account, manual queries and CI
+included. It needs the Worker secrets `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_ANALYTICS_TOKEN`; without
+both it is off and nothing below applies.
+
+On each tick with `tickIndex % 3 === 1` (every 15 minutes, never on a Hexium scan tick) the tick spends
+one subrequest on that read. From it:
+
+- Usage alerts go to the alert channel through the machinery of "Limit alerts", at 50, 70, 85 and
+  95 % of rows read, rows written and the largest database size (500 MB), and when a limit is reached.
+  The colour follows the share: 🟡 from 50 %, 🟠 from 70 %, 🔴 from 85 %, ⛔ from 95 %.
+- Projection alerts fire when the day's usage so far, extrapolated to 00:00 UTC, passes 100 % of a
+  daily limit. They start three hours into the day, when the rate is stable enough to extrapolate.
+- The degradation step is 0 below 70 % of either daily limit and 1, 2 and 3 from 70, 85 and 95 %. It
+  is stored in `alert_state` (`d1:degradation`) only when it changes. Every run, tick or reconcile,
+  applies the stored step (one primary-key read), so a failed reading keeps the last step and the first
+  reading after midnight lowers it.
+
+| Step | From | What stops |
+|---|---|---|
+| 1 | 70 % | Reconcile runs and their purge, changelog and website fetches |
+| 2 | 85 % | Also: the Hexium index scan runs every 6th tick instead of every 3rd |
+| 3 | 95 % | Also: the Hexium index scan stops |
+
+Polling of every source (Hexium by its listing) and delivery never stop. The Hexium index scan is the
+only large lever on reads: its known-versions read was 83 % of the reads in the 2026-10-02 measurement.
+Writes have no such lever; they are the product (events and outbox rows). Every alert tells the operator
+which step applies.
+
+**Weekly report.** The first reconcile run of a Monday (03:01 UTC) sends the alert channel a message
+with the last seven days as a table, a chart and the degradation status, so the operator sees that
+monitoring and alerting still work when nothing is wrong. It is stored under `d1:weekly-report` and
+sent at most once in six days; a failed send is retried by the next Monday run. The chart is mermaid
+text compressed into a URL: Discord fetches the picture from mermaid.ink, a second link opens the same
+diagram in Mermaid Live, and the numbers are in the message itself, so a down image service costs only
+the picture (see `docs/legal.md`).
+
+A failed analytics read, a missing `alert_state` table or a Discord error is logged and never fails a
+run. `pnpm run usage [--days N]` prints the same reading from the operator's machine.
+
 ## Configuration
 
 No inbound endpoint means no slash commands. Configuration is `wrangler secret`
@@ -789,7 +834,9 @@ and `wrangler d1 execute`. Accepted trade-off for a zero-surface deployment.
 
 Optional deploy-time names `WORKER_NAME` and `D1_DATABASE_NAME` (default `ratatoskr`)
 let several instances share one Cloudflare account; `scripts/wrangler-config.ts` writes them into the
-throwaway config next to the real `database_id`. Optional Worker secret `ALERT_WEBHOOK_URL` (see "Limit alerts"). Optional Worker variable `STORE_EMOJIS` (object or JSON string, keyed by store) sets
+throwaway config next to the real `database_id`. Optional Worker secret `ALERT_WEBHOOK_URL` (see "Limit alerts")
+and the optional secrets `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_ANALYTICS_TOKEN` (see "D1 usage monitor").
+Optional Worker variable `STORE_EMOJIS` (object or JSON string, keyed by store) sets
 custom store emoji, `RATATOSKR_EMOJI` (string) the emoji of the trailing source subtext and
 `LANGUAGE` (`en` default, `ru`) the message language; see "Message layout". Real ids
 belong in the operator's git-ignored `.env`, never in the repository:
