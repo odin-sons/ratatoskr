@@ -8,7 +8,7 @@ import { linkButtonUrl } from './components.ts';
 import type { Ctx } from './context.ts';
 import { CAPS, KIND_EMOJI, SECTION_EMOJI } from './layout.ts';
 import { STORES } from './stores.ts';
-import { formatBytes, formatCount, head, inline, mdLink, safeUrl, wholeCount } from './text.ts';
+import { formatBytes, formatCount, head, inline, inlineTitle, mdLink, safeUrl, wholeCount } from './text.ts';
 
 const FULL_LINK_PREFIX = `[${FULL_CHANGELOG_LABEL}](`;
 const INFO_SEP = ' · ';
@@ -36,7 +36,7 @@ function relativeTimestamp(event: ModEvent, now: Date): string | null {
 }
 
 function titleLine(event: ModEvent, storeEmoji: string, unnamed: string): string {
-  const text = inline(event.pkg.name, CAPS.name) || unnamed;
+  const text = inlineTitle(event.pkg.name, CAPS.name) || unnamed;
   const url = safeUrl(event.pkg.url);
   return `## ${storeEmoji ? `${storeEmoji} ` : ''}${url ? mdLink(text, url) : text}`;
 }

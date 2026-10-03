@@ -13,7 +13,7 @@ import { renderDigest, renderImmediate } from './index.ts';
 import { assertWithinLimits } from './limits.ts';
 import { BUTTON_EMOJI, KIND_EMOJI, PROJECT_LINE, SECTION_EMOJI } from './layout.ts';
 import { endsWithProjectField, makeEvent, NOW, realisticUpdates, STORE_KINDS, type EventSeed } from './__fixtures__/events.ts';
-import { escapeTruncate, formatBytes, inline, safeUrl } from './text.ts';
+import { escapeTruncate, formatBytes, inline, inlineTitle, safeUrl } from './text.ts';
 
 const noDetail = { detailed: () => false, now: NOW };
 const allDetail = { detailed: () => true, now: NOW };
@@ -549,6 +549,21 @@ describe('escapeTruncate', () => {
     expect(escapeTruncate('foo _bar_ baz', 100)).toBe('foo \\_bar\\_ baz');
     expect(escapeTruncate('a_1', 100)).toBe('a_1');
     expect(escapeTruncate('日本_語', 100)).toBe('日本_語');
+  });
+
+  it('keeps a lone run of underscores raw in a title, and escapes it when a second run could close an underline', () => {
+    expect(inlineTitle('Pin_It__AutomaticMapPins', 100)).toBe('Pin_It__AutomaticMapPins');
+    expect(inlineTitle('Mod___Name', 100)).toBe('Mod___Name');
+    expect(inlineTitle('A__B__C', 100)).toBe('A\\_\\_B\\_\\_C');
+    expect(inlineTitle('_lead__mid', 100)).toBe('\\_lead__mid');
+    expect(inline('Pin_It__AutomaticMapPins', 100)).toBe('Pin_It\\_\\_AutomaticMapPins');
+  });
+
+  it('shows the double underscore in an immediate message title without a backslash', () => {
+    const event = makeEvent({ store: 'hexium', kind: 'new', name: 'Pin_It__AutomaticMapPins', owner: 'mugshot', url: 'https://valheim.hexium.gg/mods/mugshot/Pin_It__AutomaticMapPins' });
+    const text = JSON.stringify(renderImmediate(event, { now: NOW }));
+    expect(text).toContain('[Pin_It__AutomaticMapPins](');
+    expect(text).not.toContain('Pin_It\\\\_');
   });
 });
 

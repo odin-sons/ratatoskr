@@ -22,11 +22,12 @@ function cleanInline(raw: string, max: number): string {
 }
 
 /** Escapes Markdown control characters and line-start list markers; never splits an escape pair; appends `…` when cut. */
-export function escapeTruncate(text: string, max: number): string {
+export function escapeTruncate(text: string, max: number, loneUnderscoreRunStaysRaw = false): string {
   if (max < 1) return '';
-  const escaped = text
-    .replace(SPECIAL, '\\$&')
-    .replace(UNDERSCORE, '\\_')
+  const special = text.replace(SPECIAL, '\\$&');
+  const lone = loneUnderscoreRunStaysRaw ? loneUnderscoreRun(special) : null;
+  const escaped = special
+    .replace(UNDERSCORE, (match, offset: number) => (lone !== null && offset >= lone.start && offset < lone.end ? match : '\\_'))
     .replace(LINE_START, (_match, before: string, mark?: string, digits?: string) => (mark !== undefined ? `${before}\\${mark}` : `${before}${digits}\\.`));
   if (escaped.length <= max) return escaped;
   let end = max - 1;
@@ -39,9 +40,21 @@ export function escapeTruncate(text: string, max: number): string {
   return `${escaped.slice(0, end)}…`;
 }
 
+/** The only run of two or more underscores in `text`, or null: a single run has no second run to close an underline. */
+function loneUnderscoreRun(text: string): { start: number; end: number } | null {
+  const runs = [...text.matchAll(/_{2,}/g)];
+  const only = runs.length === 1 ? runs[0] : undefined;
+  return only?.index === undefined ? null : { start: only.index, end: only.index + only[0].length };
+}
+
 /** Untrusted single-line text, safe to embed anywhere in Markdown, at most `max` characters. */
 export function inline(raw: string, max: number): string {
   return escapeTruncate(cleanInline(raw, max), max);
+}
+
+/** Like `inline`, for a title alone on its line: one run of underscores stays raw (Discord shows an escape there as a backslash). */
+export function inlineTitle(raw: string, max: number): string {
+  return escapeTruncate(cleanInline(raw, max), max, true);
 }
 
 /** Returns a Markdown-destination-safe http(s) URL, or null when unusable or longer than the cap. */
