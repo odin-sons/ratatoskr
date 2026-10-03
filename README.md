@@ -142,7 +142,20 @@ Until then, use the manual steps below.
    `--webhook-url-env`. It is also stored in D1 in plain text and appears in the
    printed command.
 
-6. Only if you enable Nexus (see the disclaimer above): set
+6. Optional: a Discord channel for the bot's own warnings. Create a webhook in it and
+   store the URL as a secret. The bot posts there when an internal limit nears (for
+   example the Hexium package index at 70, 85 and 95 % of its cap) and again every day
+   while a limit is exceeded. Without it nothing is sent.
+
+   ```sh
+   pnpm run wrangler secret put ALERT_WEBHOOK_URL
+   ```
+
+   Keep this webhook out of every subscription: it is for you, not for the readers of
+   the mod channels. An existing database needs `schema.sql` applied again (step 3)
+   before the first deploy that carries alerts; it adds the `alert_state` table.
+
+7. Only if you enable Nexus (see the disclaimer above): set
    `"enabled": true` on the `nexus:*` source in `ratatoskr.config.json` and store
    your personal key.
 
@@ -150,7 +163,7 @@ Until then, use the manual steps below.
    wrangler secret put NEXUS_API_KEY
    ```
 
-7. Deploy. Use `pnpm run deploy`; plain `pnpm deploy` is a different, built-in
+8. Deploy. Use `pnpm run deploy`; plain `pnpm deploy` is a different, built-in
    pnpm command.
 
    ```sh

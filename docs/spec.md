@@ -243,6 +243,12 @@ CREATE TABLE outbox (
 );
 CREATE INDEX idx_outbox_pending ON outbox (next_attempt_at) WHERE parked = 0 AND delivered_at IS NULL;
 CREATE INDEX idx_outbox_delivered ON outbox (delivered_at) WHERE delivered_at IS NOT NULL;
+
+CREATE TABLE alert_state (
+  alert_key TEXT PRIMARY KEY,   -- '<source id>:<limit id>', e.g. 'hexium:valheim:index-lines'
+  level INTEGER NOT NULL,       -- last level alerted or cleared: 0 below 70 %, 1, 2, 3, 4 exceeded
+  notified_at TEXT NOT NULL
+);
 ```
 
 The `UNIQUE (subscription_id, event_id)` constraint is what makes a re-run
@@ -733,17 +739,52 @@ Each scheduled run logs exactly one JSON line (`event: "run"`): cron, per-source
 sources not polled, outbox rows not attempted), `parked`, `degraded` (immediate
 messages delivered only after a resend without optional buttons), `filtered` (rows
 dropped at delivery because the filter changed), `purged`, `changelogFetches`,
-`changelogSkipped` (dropped, never retried), `subrequests` and `elapsedMs`.
+`changelogSkipped` (dropped, never retried), `alerts` (limit alerts sent), `alertsFailed`,
+`subrequests` and `elapsedMs`.
 Error texts are one line, capped at 200 characters, with any `scheme://` URL (any case)
 and any `.../webhooks/...` path (with or without a scheme) replaced by `[url]`; every
 logged error text goes through this filter. Webhook URLs and secrets are never logged.
+
+### Limit alerts
+
+Some internal limits switch a feature off without failing anything. The Hexium package
+index is the case that started this: past `HEXIUM_INDEX_MAX_LINES` (3,500 lines),
+`HEXIUM_INDEX_MAX_BYTES` (1,792,000 bytes) or `HEXIUM_INDEX_MAX_ITERATIONS` (7,000 visited
+lines, blank ones included) the scan is refused, and updates of packages the store already
+knows stop being detected while new packages still are. Before alerts, the only trace was a
+warning in the run log.
+
+An adapter reports each limit it measured as a `CapUsage` (limit, observed value, whether it
+was exceeded, what stops working, the name of the constant) on a successful poll. The Hexium
+adapter reports the line, byte and visited-line usage on every index scan, and an exceeded limit, with the
+cap that fired, when the scan is refused; the visited-line cap is reported too. Alerts come
+from index scans of a bootstrapped source; an index already over a cap during the cold-start
+seed or a reconcile run only logs a warning. The byte share is measured on the decoded text,
+so it is a close approximation of the bytes. After every source has been polled and committed,
+and before changelogs and delivery, each tick:
+
+- a limit is at level 1, 2 or 3 from 70 %, 85 % and 95 % of its value (`CAP_ALERT_THRESHOLDS`)
+  and at level 4 when exceeded;
+- an alert goes to the alert channel when a limit reaches a higher level than the one stored
+  in `alert_state`, and again every 24 hours (`CAP_ALERT_REPEAT_MS`) while it stays exceeded;
+- a lower level is stored without an alert, so crossing the threshold again alerts again;
+- the alert names the source, the limit, the numbers, the consequence and the constant, and
+  costs one subrequest from the tick's budget;
+- a refused send stores nothing, so the next tick retries; a missing `ALERT_WEBHOOK_URL`
+  sends and stores nothing and logs `alert due but ALERT_WEBHOOK_URL is not set`.
+
+The alert channel is the webhook in the Worker secret `ALERT_WEBHOOK_URL`, separate from every
+subscription. The state is read with one query per tick that reported a limit (every third
+tick for Hexium) and written only when a level changes. If the table is missing or D1
+fails, the tick logs `limit alerts failed` and carries on with polling and delivery. Alert
+text is English; it is addressed to the operator, not to the channel's readers.
 
 ## Configuration
 
 No inbound endpoint means no slash commands. Configuration is `wrangler secret`
 and `wrangler d1 execute`. Accepted trade-off for a zero-surface deployment.
 
-Optional Worker variable `STORE_EMOJIS` (object or JSON string, keyed by store) sets
+Optional Worker secret `ALERT_WEBHOOK_URL` (see "Limit alerts"). Optional Worker variable `STORE_EMOJIS` (object or JSON string, keyed by store) sets
 custom store emoji, `RATATOSKR_EMOJI` (string) the emoji of the trailing source subtext and
 `LANGUAGE` (`en` default, `ru`) the message language; see "Message layout". Real ids
 belong in the operator's git-ignored `.env`, never in the repository:
@@ -795,8 +836,10 @@ number here, and update its date when you do.
 1. **Hexium index cap (3500 lines).** 1490 lines on 2026-10-02 (1318 on 2026-09-26,
    1113 on 2026-09-20), growing 29 to 34 per day, so the cap is reached between
    2026-11-30 and 2026-12-11. Past it the index scan is skipped: updates to Hexium
-   packages the store already knows stop being detected (new packages still are) and
-   the only sign is a warning in the run log. Decide before mid-November 2026: ask
+   packages the store already knows stop being detected (new packages still are). The
+   bot alerts in the alert channel at 70 %, 85 % and 95 % of the line and byte caps and
+   daily once a cap is exceeded (see "Limit alerts"; the thresholds fall around 2026-11-02,
+   2026-11-18 and 2026-11-29). Decide before mid-November 2026: ask
    Hexium for a server-side sorted or filtered listing, build an incremental scan, or
    raise the cap with a fresh CPU measurement (4000 lines was rejected at 4.8 ms, see
    `docs/api-notes.md`). Re-measure with the line count of
