@@ -3,6 +3,7 @@ import { OUTBOX_MAX_ATTEMPTS } from '../core/constants.ts';
 import { releaseKey } from '../core/ids.ts';
 import type { CommitBatch, EventDetails, Store } from '../core/ports.ts';
 import type {
+  AlertState,
   DueDelivery,
   ModEvent,
   OutboxRow,
@@ -29,6 +30,7 @@ export class MemoryStore implements Store {
   readonly events = new Map<string, ModEvent>();
   readonly subscriptions = new Map<string, Subscription>();
   readonly outbox = new Map<string, StoredOutboxRow>();
+  readonly alertStates = new Map<string, AlertState>();
 
   private readonly pairs = new Set<string>();
   private seq = 0;
@@ -203,6 +205,19 @@ export class MemoryStore implements Store {
     const key = pkgKey(event.pkg.source, event.pkg.packageId);
     const current = this.packages.get(key);
     if (current) this.packages.set(key, { ...current, websiteUrl: details.websiteUrl });
+  }
+
+  async getAlertStates(keys: string[]): Promise<Map<string, AlertState>> {
+    const found = new Map<string, AlertState>();
+    for (const key of keys) {
+      const state = this.alertStates.get(key);
+      if (state !== undefined) found.set(key, { ...state });
+    }
+    return found;
+  }
+
+  async setAlertState(key: string, state: AlertState): Promise<void> {
+    this.alertStates.set(key, { ...state });
   }
 }
 

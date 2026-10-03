@@ -52,6 +52,8 @@ export function formatRunLog({ cron, report, elapsedMs }: RunLogInput): string {
     degraded: report.degraded,
     filtered: report.filtered,
     purged: report.purged,
+    alerts: report.alerts,
+    alertsFailed: report.alertsFailed,
     changelogFetches: report.changelogFetches,
     changelogSkipped: report.changelogSkipped,
     subrequests: report.subrequests,

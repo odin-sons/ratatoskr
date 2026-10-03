@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import type { PackageSnapshot, SourceConfig } from '../core/types.ts';
+import type { CapUsage, PackageSnapshot, SourceConfig } from '../core/types.ts';
 import type { PollContext, PollResult, SourceAdapter, Store } from '../core/ports.ts';
 import { extractChangelog } from '../changelog/extract.ts';
 import { CADENCE, CLOUDFLARE } from '../core/constants.ts';
 import {
   CHANGELOG_MAX_BYTES,
   HEXIUM_INDEX_MAX_BYTES,
+  HEXIUM_INDEX_MAX_ITERATIONS,
+  HEXIUM_INDEX_MAX_LINES,
   HEXIUM_LOOKUP_MAX_BYTES,
   SOURCE_BUDGET,
   SOURCE_URL_MAX_CHARS,
@@ -40,12 +42,33 @@ function hexiumDownloadUrl(raw: unknown): string | null {
 const WARN_INDEX_OVER_CAP = 'package-index above cap: updates of existing packages are not detected';
 const WARN_INDEX_UNAVAILABLE = 'package-index unavailable or unreadable: updates of existing packages are not detected';
 
+type IndexCap = 'lines' | 'bytes' | 'iterations';
+
 class IndexOverCapError extends Error {
-  constructor(reason: string) {
+  readonly cap: IndexCap;
+
+  constructor(reason: string, cap: IndexCap) {
     super(reason);
     this.name = 'IndexOverCapError';
+    this.cap = cap;
   }
 }
+
+const INDEX_CAPS = {
+  lines: { id: 'index-lines', label: 'package index line cap', unit: 'lines', limit: HEXIUM_INDEX_MAX_LINES, constant: 'HEXIUM_INDEX_MAX_LINES' },
+  bytes: { id: 'index-bytes', label: 'package index size cap', unit: 'bytes', limit: HEXIUM_INDEX_MAX_BYTES, constant: 'HEXIUM_INDEX_MAX_BYTES' },
+  iterations: {
+    id: 'index-visited-lines',
+    label: 'package index visited-line cap (blank lines included)',
+    unit: 'lines',
+    limit: HEXIUM_INDEX_MAX_ITERATIONS,
+    constant: 'HEXIUM_INDEX_MAX_ITERATIONS',
+  },
+} as const;
+
+const INDEX_CONSEQUENCE = 'Updates of Hexium packages the bot already knows are not detected until the index fits again; new packages still are.';
+
+const indexUsage = (cap: IndexCap, value: number | null, exceeded: boolean): CapUsage => ({ ...INDEX_CAPS[cap], value, exceeded, consequence: INDEX_CONSEQUENCE });
 
 type LookupOutcome = { snapshot: PackageSnapshot } | { failure: 'failed' | 'unreadable'; rateLimited: boolean };
 
@@ -68,6 +91,7 @@ interface LookupPass {
   picked: number;
   skipped: Skipped;
   warnings: string[];
+  capUsage?: CapUsage[];
 }
 
 /** Slice to seed next: `seed:<n>` resumes at n; anything else (legacy marks, out of range, junk) starts over. */
@@ -130,17 +154,20 @@ export class HexiumAdapter implements SourceAdapter {
     let packages: PackageSnapshot[] = [];
     let complete = false;
     let warnings: string[];
+    let capUsage: CapUsage[] = [];
     try {
       const lookups = await this.scanForChanges(ctx, delivered, listingSkipped);
       packages = lookups.packages;
       complete = lookups.complete;
       warnings = lookups.warnings;
+      capUsage = lookups.capUsage ?? [];
     } catch (err) {
       console.warn(`[${this.config.id}] index scan failed, listing only: ${describeError(err)}`);
       warnings = [
         ...this.reportSkipped({ ...noSkipped(), listingItems: listingSkipped }),
         err instanceof IndexOverCapError ? WARN_INDEX_OVER_CAP : WARN_INDEX_UNAVAILABLE,
       ];
+      if (err instanceof IndexOverCapError) capUsage = [indexUsage(err.cap, null, true)];
     }
     return {
       status: 'ok',
@@ -149,6 +176,7 @@ export class HexiumAdapter implements SourceAdapter {
       etag: listing === 'not-modified' ? state.etag : listing.etag,
       complete,
       ...withWarnings(warnings),
+      ...(capUsage.length === 0 ? {} : { capUsage }),
     };
   }
 
@@ -176,13 +204,13 @@ export class HexiumAdapter implements SourceAdapter {
       if (res.status !== 'ok') throw new UnexpectedShapeError('package index returned no body');
       return res.text;
     } catch (err) {
-      if (err instanceof ResponseTooLargeError) throw new IndexOverCapError('package index body is too large');
+      if (err instanceof ResponseTooLargeError) throw new IndexOverCapError('package index body is too large', 'bytes');
       throw err;
     }
   }
 
   private assertUsable(scan: IndexScan, bytes: number): void {
-    if (scan.truncated) throw new IndexOverCapError('package index has too many lines');
+    if (scan.truncated) throw new IndexOverCapError('package index has too many lines', scan.truncatedBy ?? 'lines');
     if (scan.lines === 0 && bytes > 2) throw new UnexpectedShapeError('package index has no lines');
     if (scan.lines > 0 && scan.failed === scan.lines) throw new UnexpectedShapeError('no package index line is readable');
   }
@@ -229,6 +257,7 @@ export class HexiumAdapter implements SourceAdapter {
     pass.skipped.listingItems = listingSkipped;
     pass.warnings = this.reportSkipped(pass.skipped);
     if (pass.picked < pass.candidates) pass.warnings.push(`lookups capped: ${pass.picked} of ${pass.candidates} candidates`);
+    pass.capUsage = [indexUsage('lines', scan.lines, false), indexUsage('bytes', text.length, false), indexUsage('iterations', scan.visited, false)];
     return pass;
   }
 

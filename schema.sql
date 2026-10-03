@@ -78,6 +78,13 @@ DROP INDEX IF EXISTS idx_outbox_due;
 CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox (next_attempt_at) WHERE parked = 0 AND delivered_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_outbox_delivered ON outbox (delivered_at) WHERE delivered_at IS NOT NULL;
 
+-- The level each alert was last sent (or cleared) at, so an alert goes out once per level.
+CREATE TABLE IF NOT EXISTS alert_state (
+  alert_key TEXT PRIMARY KEY,   -- '<source id>:<limit id>', e.g. 'hexium:valheim:index-lines'
+  level INTEGER NOT NULL,
+  notified_at TEXT NOT NULL
+);
+
 -- Example subscription (one per Discord channel webhook). Keep the webhook URL secret.
 -- INSERT INTO subscriptions (id, guild_id, webhook_url, thread_id, filter, mode, digest_interval_min)
 -- VALUES (

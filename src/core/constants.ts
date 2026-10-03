@@ -125,6 +125,12 @@ export const OUTBOX_MAX_ATTEMPTS = 8;
 /** Backoff for a failed send: `min(base * 2^attempts, max)` seconds, unless Discord gave `retry_after`. */
 export const OUTBOX_BACKOFF = { baseSeconds: 30, maxSeconds: 3600 } as const;
 
+/** Shares of a limit at which an alert is sent (70, 85 and 95 percent), then one more level when it is exceeded. */
+export const CAP_ALERT_THRESHOLDS = [0.7, 0.85, 0.95] as const;
+
+/** An exceeded limit is reported again after this long, until it is fixed. */
+export const CAP_ALERT_REPEAT_MS = MS_PER_DAY;
+
 /** Tick cadence. Source: docs/spec.md "Sources" — Hexium index scan every 3rd tick. */
 export const CADENCE = {
   tickMinutes: 5,

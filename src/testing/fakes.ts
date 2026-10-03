@@ -5,6 +5,7 @@ import type { Language } from '../i18n/index.ts';
 import type { Clock, PollContext, PollResult, SendResult, Sender, SourceAdapter } from '../core/ports.ts';
 import type {
   AppConfig,
+  CapUsage,
   DiscordMessage,
   ModEvent,
   PackageSnapshot,
@@ -153,7 +154,7 @@ export class FakeAdapter implements SourceAdapter {
 
 export function okPoll(
   packages: PackageSnapshot[],
-  extra: { cursor?: string | null; etag?: string | null; complete?: boolean; warnings?: string[] } = {},
+  extra: { cursor?: string | null; etag?: string | null; complete?: boolean; warnings?: string[]; capUsage?: CapUsage[] } = {},
 ): PollResult {
   return {
     status: 'ok',
@@ -162,6 +163,7 @@ export function okPoll(
     etag: extra.etag ?? null,
     complete: extra.complete ?? true,
     ...(extra.warnings === undefined ? {} : { warnings: extra.warnings }),
+    ...(extra.capUsage === undefined ? {} : { capUsage: extra.capUsage }),
   };
 }
 

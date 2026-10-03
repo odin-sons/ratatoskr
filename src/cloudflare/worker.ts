@@ -20,6 +20,8 @@ export interface Env {
   RATATOSKR_EMOJI?: string;
   /** Message language, a catalog name from `src/i18n`: `en` (default) or `ru`. */
   LANGUAGE?: string;
+  /** Webhook of the channel that receives limit alerts. */
+  ALERT_WEBHOOK_URL?: string;
 }
 
 function buildDeps(env: Env): TickDeps {
@@ -37,6 +39,7 @@ function buildDeps(env: Env): TickDeps {
     fetch: globalThis.fetch.bind(globalThis),
     clock: { now: () => new Date() },
     reconcileRunsPerDay: RECONCILE_CRONS.length,
+    ...(env.ALERT_WEBHOOK_URL === undefined || env.ALERT_WEBHOOK_URL === '' ? {} : { alertWebhookUrl: env.ALERT_WEBHOOK_URL }),
   };
 }
 

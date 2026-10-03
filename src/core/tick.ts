@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { renderDigest, renderImmediate } from '../render/index.ts';
+import { raiseCapAlerts, type SourceCapUsage } from './alerts.ts';
 import { SubrequestBudget } from './budget.ts';
 import {
   CADENCE,
@@ -18,7 +19,7 @@ import { fanOut, type CompiledSubscription } from './fanout.ts';
 import type { Clock, PollContext, Sender, SourceAdapter, Store } from './ports.ts';
 import { sanitizeLogText } from './report.ts';
 import type { Language } from '../i18n/index.ts';
-import type { AppConfig, ModEvent, PackageSnapshot, SourceId, SourceState, StoreEmojis } from './types.ts';
+import type { AppConfig, CapUsage, ModEvent, PackageSnapshot, SourceId, SourceState, StoreEmojis } from './types.ts';
 
 export type { Renderer } from './drain.ts';
 
@@ -40,6 +41,8 @@ export interface TickDeps {
   locale?: Language;
   /** Reconcile cron triggers per day; defaults to `CADENCE.reconcileRunsPerDay`. */
   reconcileRunsPerDay?: number;
+  /** Webhook of the alert channel; without it limit alerts are not sent. */
+  alertWebhookUrl?: string;
 }
 
 export interface SourceReport {
@@ -68,7 +71,11 @@ export interface TickReport {
   filtered: number;
   /** Delivered outbox rows deleted by a reconcile run. */
   purged: number;
-  /** Subrequests spent: source fetches, changelog fetches and Discord sends. */
+  /** Limit alerts sent to the alert channel. */
+  alerts: number;
+  /** Limit alerts Discord refused; they are tried again on the next run. */
+  alertsFailed: number;
+  /** Subrequests spent: source fetches, changelog fetches, Discord sends and alerts. */
   subrequests: number;
   drainError?: string;
 }
@@ -87,6 +94,7 @@ interface SourceOutcome {
   report: SourceReport;
   jobs: ChangelogJob[];
   fetched: boolean;
+  capUsage?: CapUsage[];
 }
 
 interface Run {
@@ -109,6 +117,7 @@ export async function runTick(deps: TickDeps, scheduledTimeMs: number): Promise<
     return false;
   });
   const jobs: ChangelogJob[] = [];
+  const usages: SourceCapUsage[] = [];
 
   if (run !== null) {
     let fetches = 0;
@@ -123,9 +132,10 @@ export async function runTick(deps: TickDeps, scheduledTimeMs: number): Promise<
       report.sources[id] = outcome.report;
       if (outcome.fetched) fetches += 1;
       jobs.push(...outcome.jobs);
+      for (const usage of outcome.capUsage ?? []) usages.push({ source: id, usage });
     }
   }
-  return finish(deps, budget, report, jobs, run?.now ?? deps.clock.now());
+  return finish(deps, budget, report, jobs, run?.now ?? deps.clock.now(), usages);
 }
 
 export async function runReconcile(deps: TickDeps, scheduledTimeMs: number, reconcileIndex: number): Promise<TickReport> {
@@ -161,6 +171,8 @@ function newReport(): TickReport {
     degraded: 0,
     filtered: 0,
     purged: 0,
+    alerts: 0,
+    alertsFailed: 0,
     subrequests: 0,
   };
 }
@@ -197,7 +209,15 @@ async function startRun(
   }
 }
 
-async function finish(deps: TickDeps, budget: SubrequestBudget, report: TickReport, jobs: ChangelogJob[], now: Date): Promise<TickReport> {
+async function finish(
+  deps: TickDeps,
+  budget: SubrequestBudget,
+  report: TickReport,
+  jobs: ChangelogJob[],
+  now: Date,
+  usages: SourceCapUsage[] = [],
+): Promise<TickReport> {
+  await raiseAlerts(deps, budget, report, usages, now);
   await fetchChangelogs(deps, budget, jobs, report);
   const drained = await drainOutbox({
     store: deps.store,
@@ -218,6 +238,16 @@ async function finish(deps: TickDeps, budget: SubrequestBudget, report: TickRepo
   report.subrequests = budget.used;
   if (drained.error !== undefined) report.drainError ??= drained.error;
   return report;
+}
+
+async function raiseAlerts(deps: TickDeps, budget: SubrequestBudget, report: TickReport, usages: SourceCapUsage[], now: Date): Promise<void> {
+  try {
+    const result = await raiseCapAlerts({ store: deps.store, sender: deps.sender, webhookUrl: deps.alertWebhookUrl, budget, usages, now });
+    report.alerts += result.sent;
+    report.alertsFailed += result.failed;
+  } catch (err) {
+    console.warn(`limit alerts failed: ${sanitizeLogText(errorMessage(err))}`);
+  }
 }
 
 async function guarded(run: Run, adapter: SourceAdapter, kind: 'tick' | 'reconcile'): Promise<SourceOutcome> {
@@ -260,6 +290,7 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
   let etag: string | null;
   let complete = true;
   let warned: Pick<SourceReport, 'warnings'> = {};
+  let capUsage: CapUsage[] = [];
   if (kind === 'tick') {
     const result = await adapter.poll(ctx);
     if (result.status === 'skipped') return { report: { status: 'skipped', events: 0 }, jobs: [], fetched: false };
@@ -275,6 +306,7 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
     etag = result.etag;
     complete = result.complete;
     if (result.warnings !== undefined && result.warnings.length > 0) warned = { warnings: result.warnings };
+    capUsage = result.capUsage ?? [];
   } else {
     snapshots = await adapter.reconcile!(ctx);
     cursor = state?.cursor ?? null;
@@ -303,7 +335,7 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
         : await store.getKnownVersions(id, [...new Set(snapshots.map((s) => s.packageId))]);
   const { events: detected } = diffSnapshots(known, snapshots, now);
   if (detected.length === 0 && isRedundantStateWrite(state, nextState, now.getTime())) {
-    return { report: { status: 'ok', events: 0, ...warned }, jobs: [], fetched: true };
+    return { report: { status: 'ok', events: 0, ...warned }, jobs: [], fetched: true, capUsage };
   }
   const seen = detected.length === 0 ? new Set<string>() : await store.existingEventIds(detected.map((e) => e.id));
   const events = seen.size === 0 ? detected : detected.filter((e) => !seen.has(e.id));
@@ -311,7 +343,7 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
   await store.commit({ source: id, packages: detected.map((e) => e.pkg), events, outbox: rows, state: nextState });
 
   const jobs = events.filter((e) => detailedEventIds.has(e.id)).map((event) => ({ adapter, ctx, event }));
-  return { report: { status: 'ok', events: events.length, ...warned }, jobs, fetched: true };
+  return { report: { status: 'ok', events: events.length, ...warned }, jobs, fetched: true, capUsage };
 }
 
 async function fetchChangelogs(deps: TickDeps, budget: SubrequestBudget, jobs: ChangelogJob[], report: TickReport): Promise<void> {

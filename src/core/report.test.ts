@@ -19,6 +19,8 @@ const report = (over: Partial<TickReport> = {}): TickReport => ({
   degraded: 2,
   filtered: 1,
   purged: 0,
+  alerts: 1,
+  alertsFailed: 0,
   subrequests: 19,
   ...over,
 });
@@ -39,6 +41,8 @@ describe('formatRunLog', () => {
       degraded: 2,
       filtered: 1,
       purged: 0,
+      alerts: 1,
+      alertsFailed: 0,
       changelogFetches: 2,
       changelogSkipped: 5,
       subrequests: 19,

@@ -683,5 +683,42 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
         expect((await env.store.listSubscriptions()).map((s) => s.id)).toEqual(['a']);
       });
     });
+
+    describe('alert state', () => {
+      const T1 = '2026-10-04T10:00:00.000Z';
+      const T2 = '2026-10-05T10:00:00.000Z';
+
+      it('returns an empty map for no keys and for keys never set', async () => {
+        const { store } = await setup();
+        expect((await store.getAlertStates([])).size).toBe(0);
+        expect((await store.getAlertStates(['hexium:valheim:index-lines'])).size).toBe(0);
+      });
+
+      it('round-trips level and time and returns only the keys that exist', async () => {
+        const { store } = await setup();
+        await store.setAlertState('a:one', { level: 2, notifiedAt: T1 });
+        await store.setAlertState('a:two', { level: 4, notifiedAt: T2 });
+        const found = await store.getAlertStates(['a:one', 'a:two', 'a:missing']);
+        expect([...found.keys()].sort()).toEqual(['a:one', 'a:two']);
+        expect(found.get('a:one')).toEqual({ level: 2, notifiedAt: T1 });
+        expect(found.get('a:two')).toEqual({ level: 4, notifiedAt: T2 });
+      });
+
+      it('replaces the stored state when set again', async () => {
+        const { store } = await setup();
+        await store.setAlertState('a:one', { level: 3, notifiedAt: T1 });
+        await store.setAlertState('a:one', { level: 0, notifiedAt: T2 });
+        expect((await store.getAlertStates(['a:one'])).get('a:one')).toEqual({ level: 0, notifiedAt: T2 });
+      });
+
+      it('answers for more keys than one query can bind', async () => {
+        const { store } = await setup();
+        await store.setAlertState('k-7', { level: 1, notifiedAt: T1 });
+        await store.setAlertState('k-150', { level: 2, notifiedAt: T2 });
+        const keys = Array.from({ length: 200 }, (_, i) => `k-${i}`);
+        const found = await store.getAlertStates(keys);
+        expect([...found.keys()].sort()).toEqual(['k-150', 'k-7']);
+      });
+    });
   });
 }

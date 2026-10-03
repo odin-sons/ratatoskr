@@ -218,3 +218,27 @@ export interface DiscordMessage {
   /** Always `{ parse: [] }` — mod names are user-controlled and must never ping. */
   allowed_mentions: { parse: [] };
 }
+
+/** A fixed internal limit an adapter measured against, so a limit that would silently disable a feature can be reported early. */
+export interface CapUsage {
+  /** Stable id within the source, e.g. `index-lines`. */
+  id: string;
+  /** What the limit is, for messages, e.g. `line cap`. */
+  label: string;
+  /** Unit of `limit` and `value`, e.g. `lines`. */
+  unit: string;
+  limit: number;
+  /** Observed amount; null when unknown. A lower bound when `exceeded`. */
+  value: number | null;
+  exceeded: boolean;
+  /** One sentence on what stops working past the limit. */
+  consequence: string;
+  /** Name of the constant that holds the limit. */
+  constant: string;
+}
+
+/** The last alert level reported for one limit, so an alert is sent once per level. */
+export interface AlertState {
+  level: number;
+  notifiedAt: string;
+}

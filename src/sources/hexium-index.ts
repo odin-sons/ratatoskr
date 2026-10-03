@@ -22,10 +22,14 @@ export interface IndexEntry {
 export interface IndexScan {
   /** Non-blank lines seen. */
   lines: number;
+  /** Lines visited, blank ones included. */
+  visited: number;
   /** Lines that could not be read; they are skipped, never emitted. */
   failed: number;
   /** The scan stopped at `HEXIUM_INDEX_MAX_LINES` lines or `HEXIUM_INDEX_MAX_ITERATIONS` visited lines. */
   truncated: boolean;
+  /** Which cap stopped the scan: `lines` is `HEXIUM_INDEX_MAX_LINES`, `iterations` is `HEXIUM_INDEX_MAX_ITERATIONS`. */
+  truncatedBy: 'lines' | 'iterations' | null;
 }
 
 function parseLine(text: string, start: number, stop: number): IndexEntry | null {
@@ -41,12 +45,14 @@ function parseLine(text: string, start: number, stop: number): IndexEntry | null
  * JSON.parsed. Every read is bounded by its line, so the cost is linear in the body size.
  */
 export function scanPackageIndex(text: string, visit: (entry: IndexEntry) => void): IndexScan {
-  const scan: IndexScan = { lines: 0, failed: 0, truncated: false };
+  const scan: IndexScan = { lines: 0, visited: 0, failed: 0, truncated: false, truncatedBy: null };
   for (let start = 0, visited = 0; start < text.length; visited += 1) {
     if (visited >= HEXIUM_INDEX_MAX_ITERATIONS) {
       scan.truncated = true;
+      scan.truncatedBy = 'iterations';
       break;
     }
+    scan.visited = visited + 1;
     let end = text.indexOf('\n', start);
     if (end === -1) end = text.length;
     const next = end + 1;
@@ -54,6 +60,7 @@ export function scanPackageIndex(text: string, visit: (entry: IndexEntry) => voi
     if (end > start) {
       if (scan.lines >= HEXIUM_INDEX_MAX_LINES) {
         scan.truncated = true;
+        scan.truncatedBy = 'lines';
         break;
       }
       scan.lines += 1;

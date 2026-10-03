@@ -43,6 +43,8 @@ const REPORT: TickReport = {
   degraded: 0,
   filtered: 0,
   purged: 0,
+  alerts: 0,
+  alertsFailed: 0,
   subrequests: 4,
 };
 
@@ -89,6 +91,15 @@ describe('worker', () => {
     expect(deps.config.sources).toBeDefined();
     expect(typeof deps.fetch).toBe('function');
     expect(deps.clock.now()).toBeInstanceOf(Date);
+  });
+
+  it('hands the alert webhook secret to the tick, and nothing when it is unset or empty', async () => {
+    await run(TICK_CRON, { ...env, ALERT_WEBHOOK_URL: 'https://discord.com/api/webhooks/1/alert-secret' });
+    expect(runTick.mock.calls[0]![0].alertWebhookUrl).toBe('https://discord.com/api/webhooks/1/alert-secret');
+    await run(TICK_CRON, { ...env, ALERT_WEBHOOK_URL: '' });
+    await run(TICK_CRON);
+    expect(runTick.mock.calls[1]![0]).not.toHaveProperty('alertWebhookUrl');
+    expect(runTick.mock.calls[2]![0]).not.toHaveProperty('alertWebhookUrl');
   });
 
   it.each(RECONCILE_CRONS.map((cron, i) => [cron, i] as const))('routes %s to runReconcile(%i)', async (cron, index) => {

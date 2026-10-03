@@ -667,6 +667,8 @@ describe('D1 adapter', () => {
       await spy.setEventDetails(e.id, { changelog: 'x', changelogUrl: null, websiteUrl: 'https://site.example/' });
       await spy.markDelivered([o.id], '2026-09-19T00:00:00.000Z');
       await spy.purgeDelivered('2026-09-20T00:00:00.000Z', 10);
+      await spy.setAlertState('k', { level: 1, notifiedAt: '2026-09-19T00:00:00.000Z' });
+      await spy.getAlertStates(['k']);
 
       const distinct = [...new Set(shim.preparedSql)];
       expect(distinct.length).toBeGreaterThanOrEqual(12);

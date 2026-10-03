@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type {
+  AlertState,
+  CapUsage,
   DiscordMessage,
   DueDelivery,
   ModEvent,
@@ -77,6 +79,12 @@ export interface Store {
    * is not null, the package's website (latest non-null wins).
    */
   setEventDetails(eventId: string, details: EventDetails): Promise<void>;
+
+  /** Alert state per key; keys never alerted on are absent. */
+  getAlertStates(keys: string[]): Promise<Map<string, AlertState>>;
+
+  /** Records the level an alert was last sent (or cleared) at. */
+  setAlertState(key: string, state: AlertState): Promise<void>;
 }
 
 /** What the per-event details phase learns about one event. */
@@ -131,6 +139,8 @@ export type PollResult =
       complete: boolean;
       /** Degradations worth an operator's attention (one short line each, no ids or URLs); they end up in the run log. */
       warnings?: string[];
+      /** Fixed internal limits this poll measured against (see `CapUsage`). */
+      capUsage?: CapUsage[];
     }
   /** Adapter chose not to poll this tick (e.g. Hexium index cadence, Nexus disabled). */
   | { status: 'skipped' };

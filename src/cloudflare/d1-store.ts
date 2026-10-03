@@ -5,6 +5,7 @@ import { releaseKey } from '../core/ids.ts';
 import type { CommitBatch, EventDetails, Store } from '../core/ports.ts';
 import { sanitizeLogText } from '../core/report.ts';
 import type {
+  AlertState,
   DeliveryMode,
   DueDelivery,
   EventKind,
@@ -170,6 +171,7 @@ const SQL_MARK_DELIVERED_PREFIX = 'UPDATE outbox SET delivered_at = ? WHERE deli
 const SQL_PURGE_DELIVERED = 'DELETE FROM outbox WHERE id IN (SELECT id FROM outbox WHERE delivered_at < ? LIMIT ?)';
 const SQL_MARK_FAILED_PREFIX = 'UPDATE outbox SET attempts = attempts + 1, next_attempt_at = ?, parked = MAX(parked, ?) WHERE delivered_at IS NULL AND id IN';
 const SQL_RESCHEDULE_PREFIX = 'UPDATE outbox SET next_attempt_at = ? WHERE delivered_at IS NULL AND parked = 0 AND id IN';
+const SQL_SET_ALERT_STATE = 'INSERT INTO alert_state (alert_key, level, notified_at) VALUES (?, ?, ?) ON CONFLICT (alert_key) DO UPDATE SET level = excluded.level, notified_at = excluded.notified_at';
 const SQL_SET_CHANGELOG = 'UPDATE events SET changelog = ?, changelog_url = ? WHERE id = ?';
 const SQL_SET_WEBSITE =
   'UPDATE packages SET website_url = ? WHERE source = (SELECT source FROM events WHERE id = ?) AND package_id = (SELECT package_id FROM events WHERE id = ?)';
@@ -180,6 +182,11 @@ const DELIVERED_IDS_PER_QUERY = CLOUDFLARE.d1MaxBoundParams - 1;
 const FAILED_IDS_PER_QUERY = CLOUDFLARE.d1MaxBoundParams - 2;
 const RESCHEDULE_IDS_PER_QUERY = CLOUDFLARE.d1MaxBoundParams - 1;
 const EVENT_IDS_PER_QUERY = CLOUDFLARE.d1MaxBoundParams;
+const ALERT_KEYS_PER_QUERY = CLOUDFLARE.d1MaxBoundParams;
+
+function sqlAlertStates(keys: number): string {
+  return `SELECT alert_key, level, notified_at FROM alert_state WHERE alert_key IN (${placeholders(keys)})`;
+}
 
 function placeholders(count: number): string {
   return Array.from({ length: count }, () => '?').join(', ');
@@ -411,6 +418,21 @@ export class D1Store implements Store {
       return;
     }
     await this.db.batch([changelog, this.db.prepare(SQL_SET_WEBSITE).bind(details.websiteUrl, eventId, eventId)]);
+  }
+
+  async getAlertStates(keys: string[]): Promise<Map<string, AlertState>> {
+    const found = new Map<string, AlertState>();
+    if (keys.length === 0) return found;
+    const statements = chunk([...new Set(keys)], ALERT_KEYS_PER_QUERY).map((ids) => this.db.prepare(sqlAlertStates(ids.length)).bind(...ids));
+    const results = await this.db.batch<{ alert_key: string; level: number; notified_at: string }>(statements);
+    for (const result of results) {
+      for (const row of result.results) found.set(row.alert_key, { level: row.level, notifiedAt: row.notified_at });
+    }
+    return found;
+  }
+
+  async setAlertState(key: string, state: AlertState): Promise<void> {
+    await this.db.prepare(SQL_SET_ALERT_STATE).bind(key, state.level, state.notifiedAt).run();
   }
 }
 

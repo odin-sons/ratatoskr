@@ -6,7 +6,7 @@ import type { PollContext, PollResult } from '../core/ports.ts';
 import type { SourceConfig } from '../core/types.ts';
 import { indexLine, syntheticIndex } from './__fixtures__/index-gen.ts';
 import { createFakeFetch, fixture, json, makeCtx as baseCtx, makeState, text, type FakeFetch, type RecordedCall } from './__fixtures__/fake-fetch.ts';
-import { HEXIUM_INDEX_MAX_BYTES, HEXIUM_INDEX_MAX_LINES, HEXIUM_LOOKUP_MAX_BYTES, SOURCE_BUDGET } from './budget.ts';
+import { HEXIUM_INDEX_MAX_BYTES, HEXIUM_INDEX_MAX_ITERATIONS, HEXIUM_INDEX_MAX_LINES, HEXIUM_LOOKUP_MAX_BYTES, SOURCE_BUDGET } from './budget.ts';
 import { HexiumAdapter } from './hexium.ts';
 import { scanPackageIndex, seedSliceOf } from './hexium-index.ts';
 
@@ -1261,5 +1261,43 @@ describe('HexiumAdapter — likes and website', () => {
     const out = await adapterWith().fetchChangelog(makeCtx(fake), pkg, '1.0.0');
     expect(fake.calls).toHaveLength(1);
     expect('websiteUrl' in out).toBe(false);
+  });
+});
+
+describe('HexiumAdapter.poll — index limit usage', () => {
+  const state = makeState({ cursor: null });
+  const known = allVersions(6);
+  const poll = async (index: string | (() => Response), tickIndex = indexTick(1)) =>
+    ok(await adapterWith(known).poll(makeCtx(routes({ index, lookup: answerAll() }), { tickIndex, state })));
+
+  it('reports the line, byte and visited-line usage of a healthy scan against their caps', async () => {
+    const index = syntheticIndex(6);
+    const res = await poll(index);
+    expect(res.capUsage).toEqual([
+      expect.objectContaining({ id: 'index-lines', unit: 'lines', value: 6, limit: HEXIUM_INDEX_MAX_LINES, exceeded: false, constant: 'HEXIUM_INDEX_MAX_LINES' }),
+      expect.objectContaining({ id: 'index-bytes', unit: 'bytes', value: index.length, limit: HEXIUM_INDEX_MAX_BYTES, exceeded: false, constant: 'HEXIUM_INDEX_MAX_BYTES' }),
+      expect.objectContaining({ id: 'index-visited-lines', unit: 'lines', value: 6, limit: HEXIUM_INDEX_MAX_ITERATIONS, exceeded: false, constant: 'HEXIUM_INDEX_MAX_ITERATIONS' }),
+    ]);
+  });
+
+  it('reports nothing on a tick without an index scan', async () => {
+    const res = ok(await adapterWith(known).poll(makeCtx(routes(), { tickIndex: LISTING_TICK, state })));
+    expect(res.capUsage).toBeUndefined();
+  });
+
+  it.each([
+    ['more lines than the cap', syntheticIndex(HEXIUM_INDEX_MAX_LINES + 5), 'index-lines', HEXIUM_INDEX_MAX_LINES, 'HEXIUM_INDEX_MAX_LINES'],
+    ['a body above the byte cap', `${syntheticIndex(6)}\n${' '.repeat(HEXIUM_INDEX_MAX_BYTES)}`, 'index-bytes', HEXIUM_INDEX_MAX_BYTES, 'HEXIUM_INDEX_MAX_BYTES'],
+    ['blank lines past the visited-line cap', `${indexLine(1)}\n${'\n'.repeat(HEXIUM_INDEX_MAX_ITERATIONS)}${indexLine(2)}`, 'index-visited-lines', HEXIUM_INDEX_MAX_ITERATIONS, 'HEXIUM_INDEX_MAX_ITERATIONS'],
+  ])('names the cap that was exceeded: %s', async (_label, index, id, limit, constant) => {
+    const res = await poll(index);
+    expect(res.capUsage).toEqual([expect.objectContaining({ id, limit, constant, value: null, exceeded: true })]);
+    expect(res.capUsage![0]!.consequence).toContain('already knows');
+  });
+
+  it('reports no usage when the index is merely unusable', async () => {
+    for (const index of ['<html>maintenance</html>', () => new Response('', { status: 500 })]) {
+      expect((await poll(index)).capUsage).toBeUndefined();
+    }
   });
 });
