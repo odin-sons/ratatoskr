@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CADENCE, CLOUDFLARE } from '../core/constants.ts';
 import { diffSnapshots } from '../core/diff.ts';
 import type { PollContext, PollResult } from '../core/ports.ts';
+import { runTick } from '../core/tick.ts';
+import { makeHarness } from '../testing/harness.ts';
+import { makeSubscription } from '../testing/fakes.ts';
 import type { SourceConfig } from '../core/types.ts';
 import { indexLine, syntheticIndex } from './__fixtures__/index-gen.ts';
 import { createFakeFetch, fixture, json, makeCtx as baseCtx, makeState, text, type FakeFetch, type RecordedCall } from './__fixtures__/fake-fetch.ts';
@@ -194,24 +197,80 @@ describe('HexiumAdapter.poll — listing-delivered updates on ticks without an i
     }
   });
 
-  it('caps the lookups per tick and keeps the listing snapshot of the rest', async () => {
+  it('caps the lookups per tick, holds back the rest and reaches every package over consecutive ticks', async () => {
     const body = JSON.parse(listingFixture) as { packages: Record<string, unknown>[] };
     const template = body.packages[0]!;
     body.packages = Array.from({ length: 12 }, (_, i) => ({ ...template, owner: `Owner${i}`, name: `Package${i}`, version_number: '2.0.0' }));
     const known = Object.fromEntries(body.packages.map((p) => [`${String(p.owner)}-${String(p.name)}`, '1.0.0']));
-    const fake = routes({ listing: JSON.stringify(body), lookup: answerAll('2.0.0') });
-    const res = ok(await adapterWith(known).poll(makeCtx(fake, { tickIndex: 1, state })));
-    expect(lookupCalls(fake)).toHaveLength(SOURCE_BUDGET.hexiumListingLookupsPerTick);
-    expect(res.packages).toHaveLength(12 + SOURCE_BUDGET.hexiumListingLookupsPerTick);
+    const cap = SOURCE_BUDGET.hexiumListingLookupsPerTick;
+    const seen = new Set<string>();
+    for (const tickIndex of [1, 2]) {
+      const fake = routes({ listing: JSON.stringify(body), lookup: answerAll('2.0.0') });
+      const res = ok(await adapterWith(known).poll(makeCtx(fake, { tickIndex, state })));
+      expect(lookupCalls(fake)).toHaveLength(cap);
+      expect(res.packages).toHaveLength(cap);
+      expect(res.packages.every((p) => p.downloadUrl !== null)).toBe(true);
+      expect(res.warnings).toContain(`listing updates held back until their lookup succeeds: ${12 - cap}`);
+      for (const p of res.packages) seen.add(p.packageId);
+    }
+    expect(seen.size).toBe(12);
   });
 
-  it('keeps the listing snapshot when the lookup fails', async () => {
-    const res = ok(await adapterWith({ [genesis]: '2.0.0' }).poll(makeCtx(routes(), { tickIndex: 1, state })));
-    expect(res.packages.find((p) => p.packageId === genesis)?.version).toBe('2.1.0');
+  it.each([
+    ['a 404', () => new Response('{"detail":"Not found."}', { status: 404 })],
+    ['a 429', () => new Response('', { status: 429 })],
+    ['a 500', () => new Response('', { status: 500 })],
+    ['a network error', () => Promise.reject(new TypeError('down')) as unknown as Response],
+    ['an unreadable body', () => new Response('<html></html>', { status: 200 })],
+  ])('holds back a known package whose lookup answers with %s, so it is never committed without its link', async (_label, answer) => {
+    const fake = routes({ lookup: () => answer() });
+    const res = ok(await adapterWith({ [genesis]: '2.0.0' }).poll(makeCtx(fake, { tickIndex: 1, state })));
+    expect(res.packages.find((p) => p.packageId === genesis)).toBeUndefined();
+    expect(res.packages).toHaveLength(3);
+    expect(res.warnings).toContain('listing updates held back until their lookup succeeds: 1');
+  });
+
+  it('delivers a never-seen package from the listing without a download link', async () => {
+    const fake = routes({ lookup: answerAll('2.1.0') });
+    const res = ok(await adapterWith().poll(makeCtx(fake, { tickIndex: 1, state })));
+    expect(lookupCalls(fake)).toHaveLength(0);
     expect(res.packages).toHaveLength(4);
+    expect(res.packages.find((p) => p.packageId === genesis)?.downloadUrl).toBeNull();
+    expect(res.warnings).toBeUndefined();
   });
 
-  it('returns the listing alone when the store read fails', async () => {
+  describe('on an index-scan tick', () => {
+    const genesisLine = '{"namespace":"GenesisMods","name":"zzzGenesisItemStacks","version_number":"2.0.0","file_format":"zip","file_size":10,"dependencies":[],"suggestions":[]}';
+
+    it('looks up a known package the listing is ahead of the index on, so the update carries its link', async () => {
+      const fake = routes({ index: genesisLine, lookup: answerAll('2.1.0') });
+      const res = ok(await adapterWith({ [genesis]: '2.0.0' }).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+      expect(lookupCalls(fake)).toHaveLength(1);
+      expect(res.packages.find((p) => p.packageId === genesis)).toMatchObject({ version: '2.1.0', downloadUrl: expect.stringContaining('hexium.gg') });
+    });
+
+    it('holds that package back when its lookup fails, instead of committing the listing snapshot', async () => {
+      const fake = routes({ index: genesisLine });
+      const res = ok(await adapterWith({ [genesis]: '2.0.0' }).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+      expect(res.packages.find((p) => p.packageId === genesis)).toBeUndefined();
+      expect(res.warnings).toContain('listing updates held back until their lookup succeeds: 1');
+    });
+
+    it('still looks up the listing changes when the index is unusable', async () => {
+      const fake = routes({ index: '<html>maintenance</html>', lookup: answerAll('2.1.0') });
+      const res = ok(await adapterWith({ [genesis]: '2.0.0' }).poll(makeCtx(fake, { tickIndex: indexTick(1), state })));
+      expect(res.packages.find((p) => p.packageId === genesis)).toMatchObject({ version: '2.1.0', downloadUrl: expect.stringContaining('hexium.gg') });
+      expect(res.warnings).toContain('package-index unavailable or unreadable: updates of existing packages are not detected');
+    });
+
+    it('does not look the same package up twice when the listing and the index both changed', async () => {
+      const fake = routes({ index: genesisLine.replace('"2.0.0"', '"2.1.0"'), lookup: answerAll('2.1.0') });
+      await adapterWith({ [genesis]: '2.0.0' }).poll(makeCtx(fake, { tickIndex: indexTick(1), state }));
+      expect(lookupCalls(fake)).toHaveLength(1);
+    });
+  });
+
+  it('holds the whole listing back when the store read fails, since it cannot tell a known package from a new one', async () => {
     const broken = new HexiumAdapter(config, {
       getAllKnownVersions: async () => new Map(),
       getKnownVersions: async () => {
@@ -219,7 +278,34 @@ describe('HexiumAdapter.poll — listing-delivered updates on ticks without an i
       },
     });
     const res = ok(await broken.poll(makeCtx(routes(), { tickIndex: 1, state })));
-    expect(res.packages).toHaveLength(4);
+    expect(res.packages).toHaveLength(0);
+    expect(res.warnings).toContain('listing updates held back until their lookup succeeds: 4');
+    expect(res.etag).toBe('"h1"');
+  });
+
+  it('keeps the stored listing validator while a package is held back, so the next tick fetches the listing again', async () => {
+    const fake = routes();
+    const held = ok(await adapterWith({ [genesis]: '2.0.0' }).poll(makeCtx(fake, { tickIndex: 1, state })));
+    expect(held.etag).toBe('"h1"');
+    const fine = ok(await adapterWith({ [genesis]: '2.0.0' }).poll(makeCtx(routes({ lookup: answerAll('2.1.0') }), { tickIndex: 1, state })));
+    expect(fine.etag).not.toBe('"h1"');
+  });
+
+  it('holds a package back when its lookup still shows the stored version', async () => {
+    const fake = routes({ lookup: answerAll('2.0.0') });
+    const res = ok(await adapterWith({ [genesis]: '2.0.0' }).poll(makeCtx(fake, { tickIndex: 1, state })));
+    expect(res.packages.find((p) => p.packageId === genesis)).toBeUndefined();
+    expect(res.warnings).toContain('listing updates held back until their lookup succeeds: 1');
+  });
+
+  it('delivers the packages whose lookups succeed while another one in the same tick is held back', async () => {
+    const body = JSON.parse(listingFixture) as { packages: Record<string, unknown>[] };
+    const template = body.packages[0]!;
+    body.packages = ['A', 'B'].map((n) => ({ ...template, owner: `Owner${n}`, name: `Package${n}`, version_number: '2.0.0' }));
+    const fake = routes({ listing: JSON.stringify(body), lookup: (namespace, name) => (name === 'PackageA' ? json(lookupBody(namespace, name, '2.0.0')) : new Response('', { status: 500 })) });
+    const res = ok(await adapterWith({ 'OwnerA-PackageA': '1.0.0', 'OwnerB-PackageB': '1.0.0' }).poll(makeCtx(fake, { tickIndex: 1, state })));
+    expect(res.packages.map((p) => p.packageId)).toEqual(['OwnerA-PackageA']);
+    expect(res.warnings).toContain('listing updates held back until their lookup succeeds: 1');
   });
 });
 
@@ -1299,5 +1385,49 @@ describe('HexiumAdapter.poll — index limit usage', () => {
     for (const index of ['<html>maintenance</html>', () => new Response('', { status: 500 })]) {
       expect((await poll(index)).capUsage).toBeUndefined();
     }
+  });
+});
+
+describe('HexiumAdapter through runTick — a failed lookup is retried, never committed link-less', () => {
+  const genesis = 'GenesisMods-zzzGenesisItemStacks';
+  const HX = 'hexium:valheim';
+  const firstTick = ((): number => {
+    let tick = 1_000_000;
+    while (tick % CADENCE.hexiumIndexEveryNthTick !== 1) tick += 1;
+    return tick;
+  })();
+  const at = (tick: number): number => tick * 300_000;
+
+  function harness(lookup: LookupResponder) {
+    const fake = routes({ lookup });
+    const h = makeHarness({ subscriptions: [makeSubscription({ mode: 'immediate' })] });
+    h.deps.adapters = [new HexiumAdapter(config, h.store)];
+    h.deps.fetch = fake.fetch;
+    h.store.sources.set(HX, { id: HX, cursor: null, etag: null, bootstrapped: true, lastOkAt: new Date(at(firstTick)).toISOString() });
+    h.store.seedPackages(HX, { [genesis]: '2.0.0' });
+    return h;
+  }
+
+  const eventsFor = (h: ReturnType<typeof harness>) => [...h.store.events.values()].filter((e) => e.pkg.packageId === genesis);
+  const storedVersion = (h: ReturnType<typeof harness>) => h.store.packages.get(`${HX}|${genesis}`)?.version;
+
+  it('keeps the stored version and emits nothing while the lookup fails, then emits the update with its download link once it succeeds', async () => {
+    let healthy = false;
+    const h = harness((namespace, name) => (healthy ? json(lookupBody(namespace, name, '2.1.0')) : new Response('', { status: 500 })));
+
+    await runTick(h.deps, at(firstTick));
+    expect(storedVersion(h)).toBe('2.0.0');
+    expect(eventsFor(h)).toHaveLength(0);
+
+    await runTick(h.deps, at(firstTick + 1));
+    expect(storedVersion(h)).toBe('2.0.0');
+    expect(eventsFor(h)).toHaveLength(0);
+
+    healthy = true;
+    await runTick(h.deps, at(firstTick + 2));
+    expect(storedVersion(h)).toBe('2.1.0');
+    expect(eventsFor(h)).toHaveLength(1);
+    expect(eventsFor(h)[0]).toMatchObject({ kind: 'update', versionFrom: '2.0.0', versionTo: '2.1.0' });
+    expect(h.store.packages.get(`${HX}|${genesis}`)?.downloadUrl).toEqual(expect.stringContaining('hexium.gg'));
   });
 });

@@ -314,10 +314,13 @@ an incremental design that does not read the whole index every scan.
   live on 2026-09-27.
 - Any differing version is announced as `update` by the core diff, including an older
   one served by a stale listing or lookup.
-- A listing-delivered update whose lookup fails, is rate-limited or falls beyond the
-  per-tick cap is committed from the listing snapshot, without `download_url`, and stays
-  that way: the stored version then equals the index version, so no later scan looks the
-  package up again. A listing that runs ahead of the index has the same effect.
+- A known package whose update the listing shows is held back, not announced, until its
+  lookup succeeds. One whose lookup keeps failing (a deleted or unlisted package, say)
+  therefore produces no event and costs one subrequest per tick while it stays on page 1;
+  the index scan retries it afterwards. While the index is over its caps or unreadable, a
+  held-back package that scrolls off page 1 stays unannounced until the index is usable
+  again (an already-alerted degraded mode). A held-back tick keeps the stored listing
+  validator, so a listing that honours it is fetched in full again on the next tick.
 - Bursty scans (up to 15 lookups plus the listing and index reads) can leave few
   subrequests for changelog fetches; the changelogs of that tick are skipped and not
   retried.
@@ -368,16 +371,20 @@ Rules for the snapshot built from it:
   window of candidates advances by that amount per scan so packages that keep failing
   cannot starve the others; the poll is then reported incomplete and the rest are found
   again by the next scan.
-- **Listing-delivered dedup only excuses a genuinely new package.** A package the store
-  has never seen, already delivered by the listing at the index version, needs no lookup
-  (the `new` event carries no download link; accepted, see "Update source"). A known
-  package whose version changed always gets a lookup on a scan tick, even when page 1
-  carries the same version: the listing item has no `download_url`, and the package
-  upsert replaces `download_url` wholesale on a version change (not a `COALESCE`).
-  Ticks without a scan do the same for the listing page: known packages whose listing
-  version differs from the stored one (`store.getKnownVersions` over the page's ids, 20 rows)
-  get a lookup, at most `hexiumListingLookupsPerTick` (6). Beyond the cap, or when a lookup
-  fails, the listing snapshot is committed as is, without a download link.
+- **A known package's update is never committed without its lookup.** A package the store
+  has never seen, delivered by the listing, needs no lookup (the `new` event carries no
+  download link; accepted, see "Update source"). A known package whose listing version
+  differs from the stored one gets a full lookup on every tick, scan or not
+  (`store.getKnownVersions` over the page's ids, 20 rows), at most
+  `hexiumListingLookupsPerTick` (6) per tick with a window that rotates by `tickIndex`, so
+  a package that keeps failing cannot starve the others. The listing item has no
+  `download_url`, and the package upsert replaces `download_url` wholesale on a version
+  change (not a `COALESCE`), so a snapshot taken from the listing would erase a good link.
+  A package whose lookup failed, was unreadable or fell beyond the cap is dropped from the
+  tick's result: its stored version stays, the next tick looks it up again, and the poll
+  warns `listing updates held back until their lookup succeeds: N`. This also runs when the
+  index scan is skipped or fails. On a scan tick a package that is already resolved from the
+  listing is not looked up a second time for the index.
 - Cold start: the index seeds every package as a lean snapshot (index version, size,
   default flags, no metadata) in `hexiumSeedSlices` (8) stable slices, one per poll,
   slice = hash of `namespace-name` modulo 8. Seeded rows are never emitted; any later

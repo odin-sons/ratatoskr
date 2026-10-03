@@ -143,14 +143,17 @@ export class HexiumAdapter implements SourceAdapter {
     const listing = await this.readListing(ctx);
     const scanDue = ctx.tickIndex % CADENCE.hexiumIndexEveryNthTick === 0;
     const listingSkipped = listing === 'not-modified' ? 0 : listing.skipped;
+    if (!scanDue && listing === 'not-modified') return { status: 'not-modified', etag: state.etag };
+
+    const resolved = await this.resolveListing(ctx, listing === 'not-modified' ? [] : listing.packages);
+    const heldWarning = resolved.held > 0 ? [`listing updates held back until their lookup succeeds: ${resolved.held}`] : [];
+    const nextEtag = resolved.held > 0 || listing === 'not-modified' ? state.etag : listing.etag;
     if (!scanDue) {
-      if (listing === 'not-modified') return { status: 'not-modified', etag: state.etag };
-      const warnings = this.reportSkipped({ ...noSkipped(), listingItems: listingSkipped });
-      const lookedUp = await this.lookUpListedUpdates(ctx, listing.packages);
-      return { status: 'ok', packages: listing.packages.concat(lookedUp), cursor: state.cursor, etag: listing.etag, complete: true, ...withWarnings(warnings) };
+      const warnings = [...this.reportSkipped({ ...noSkipped(), listingItems: listingSkipped }), ...heldWarning];
+      return { status: 'ok', packages: resolved.packages, cursor: state.cursor, etag: nextEtag, complete: true, ...withWarnings(warnings) };
     }
 
-    const delivered = listing === 'not-modified' ? [] : listing.packages;
+    const delivered = resolved.packages;
     let packages: PackageSnapshot[] = [];
     let complete = false;
     let warnings: string[];
@@ -159,13 +162,14 @@ export class HexiumAdapter implements SourceAdapter {
       const lookups = await this.scanForChanges(ctx, delivered, listingSkipped);
       packages = lookups.packages;
       complete = lookups.complete;
-      warnings = lookups.warnings;
+      warnings = [...lookups.warnings, ...heldWarning];
       capUsage = lookups.capUsage ?? [];
     } catch (err) {
       console.warn(`[${this.config.id}] index scan failed, listing only: ${describeError(err)}`);
       warnings = [
         ...this.reportSkipped({ ...noSkipped(), listingItems: listingSkipped }),
         err instanceof IndexOverCapError ? WARN_INDEX_OVER_CAP : WARN_INDEX_UNAVAILABLE,
+        ...heldWarning,
       ];
       if (err instanceof IndexOverCapError) capUsage = [indexUsage(err.cap, null, true)];
     }
@@ -173,16 +177,20 @@ export class HexiumAdapter implements SourceAdapter {
       status: 'ok',
       packages: delivered.concat(packages),
       cursor: state.cursor,
-      etag: listing === 'not-modified' ? state.etag : listing.etag,
+      etag: nextEtag,
       complete,
       ...withWarnings(warnings),
       ...(capUsage.length === 0 ? {} : { capUsage }),
     };
   }
 
-  /** Full lookups for known packages whose version the listing changed; the listing item has no download link. */
-  private async lookUpListedUpdates(ctx: PollContext, listed: PackageSnapshot[]): Promise<PackageSnapshot[]> {
-    if (listed.length === 0) return [];
+  /**
+   * The listing's snapshots with each known package whose version changed replaced by its full lookup (the listing
+   * item has no download link). One whose lookup did not succeed, or still shows the stored version, is dropped, so its
+   * stored version stays and a later tick tries again; a never-seen package keeps its listing snapshot.
+   */
+  private async resolveListing(ctx: PollContext, listed: PackageSnapshot[]): Promise<{ packages: PackageSnapshot[]; held: number }> {
+    if (listed.length === 0) return { packages: [], held: 0 };
     try {
       const known = await this.store.getKnownVersions(this.config.id, listed.map((p) => p.packageId));
       const changed: IndexEntry[] = [];
@@ -190,11 +198,20 @@ export class HexiumAdapter implements SourceAdapter {
         const stored = known.get(p.packageId);
         if (stored !== undefined && stored !== p.version) changed.push({ namespace: p.owner, name: p.name, version: p.version, sizeBytes: null });
       }
-      if (changed.length === 0) return [];
-      return (await this.lookUp(ctx, changed, SOURCE_BUDGET.hexiumListingLookupsPerTick, 0)).packages;
+      if (changed.length === 0) return { packages: listed, held: 0 };
+      const looked = new Map((await this.lookUp(ctx, changed, SOURCE_BUDGET.hexiumListingLookupsPerTick, ctx.tickIndex)).packages.map((p) => [p.packageId, p]));
+      const changedIds = new Set(changed.map((entry) => `${entry.namespace}-${entry.name}`));
+      const packages: PackageSnapshot[] = [];
+      let held = 0;
+      for (const p of listed) {
+        if (!changedIds.has(p.packageId)) packages.push(p);
+        else if (looked.has(p.packageId) && looked.get(p.packageId)!.version !== known.get(p.packageId)) packages.push(looked.get(p.packageId)!);
+        else held += 1;
+      }
+      return { packages, held };
     } catch (err) {
-      console.warn(`[${this.config.id}] listing update lookups failed, listing only: ${describeError(err)}`);
-      return [];
+      console.warn(`[${this.config.id}] listing update lookups failed, listing held back: ${describeError(err)}`);
+      return { packages: [], held: listed.length };
     }
   }
 
@@ -272,8 +289,7 @@ export class HexiumAdapter implements SourceAdapter {
       const id = `${entry.namespace}-${entry.name}`;
       const knownVersion = known.get(id);
       if (knownVersion === entry.version || seen.has(id)) return;
-      // Only a never-seen package already announced by the listing skips its lookup; a known one always gets it.
-      if (knownVersion === undefined && delivered.get(id) === entry.version) return;
+      if (delivered.get(id) === entry.version) return;
       seen.add(id);
       candidates.push(entry);
     });
