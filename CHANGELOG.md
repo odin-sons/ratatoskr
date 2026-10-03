@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-03
+
+### Added
+
+- A D1 usage monitor. It reads the account's daily D1 usage from Cloudflare's
+  analytics API, alerts in the alert channel at 50, 70, 85 and 95 % of the
+  rows-read, rows-written and database-size limits and when the day's usage is
+  projected to pass 100 %, and degrades optional work in three steps (pause
+  reconcile and changelog fetches, scan the Hexium index half as often, stop
+  scanning it). Polling and delivery never stop. It needs the Worker secrets
+  `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_ANALYTICS_TOKEN` (a token with only
+  Account Analytics: Read) and is off without both.
+- A weekly usage report with a seven-day table and chart goes to the alert
+  channel on Fridays at 20:00 UTC+3. The chart is rendered by mermaid.ink; the
+  numbers are in the message, so a down image service costs only the picture.
+- `pnpm run usage [--days N] [--json]` prints the same usage reading.
+- Limit alerts: the Hexium package index reports its lines, bytes and visited
+  lines against its caps and alerts at 70, 85 and 95 % and when a cap is
+  exceeded, naming the cap and what stops working. They go to the alert channel
+  set by the Worker secret `ALERT_WEBHOOK_URL`. The level last alerted is kept in
+  a new `alert_state` table.
+- `WORKER_NAME` and `D1_DATABASE_NAME` (both default to `ratatoskr`) set the
+  Worker and D1 database names at deploy time, so several instances can share
+  one Cloudflare account without editing a committed file. `pnpm add-subscription`
+  and `pnpm subscriptions` default `--database` to `D1_DATABASE_NAME`.
+- A dated watch list of known risks in `docs/spec.md`, and a guard in
+  `pnpm check` that keeps the worst-case Hexium D1 reads within a tenth of the
+  daily limit.
+- CONTRIBUTING, CODE_OF_CONDUCT and SECURITY documents, issue forms, a pull
+  request template and release-note categories.
+
+### Changed
+
+- The three daily reconcile runs fire from one cron trigger, so an instance uses
+  two of the five triggers a free account allows.
+- A source's state row is rewritten at most once an hour while its cursor is
+  unchanged, which cuts about 790 D1 writes a day.
+- CI runs once per change, and the README shows status badges.
+
+### Fixed
+
+- A Hexium update of a known package no longer loses its download link: the
+  per-package lookup now runs for every changed known package, and an update
+  whose lookup failed is held back and retried on the next tick instead of being
+  committed without the link.
+- A Hexium package whose name contains a double underscore, such as
+  `Pin_It__AutomaticMapPins`, no longer shows backslashes in the message title.
+
+### Deploy notes
+
+- Apply `schema.sql` to the remote database before deploying; it creates
+  `alert_state`.
+- Deploy outside 03:00-05:15 UTC. The new reconcile cron can take up to 15
+  minutes to propagate, and a run delivered under the old schedule is skipped.
+- After the deploy the dashboard should show two cron triggers for the Worker.
+
 ## [1.2.0] - 2026-10-01
 
 ### Added
