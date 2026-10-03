@@ -125,6 +125,8 @@ export interface PollContext {
   secrets: Record<string, string | undefined>;
   /** Reconciliation only: increases by one per reconcile run, so an adapter can rotate through slices of its index. */
   sliceHint?: number;
+  /** Degradation step from the D1 usage monitor, 0 when none applies; see `DEGRADATION`. */
+  degradation?: number;
 }
 
 export type PollResult =
@@ -169,4 +171,23 @@ export interface SourceAdapter {
 
 export interface Clock {
   now(): Date;
+}
+
+// ---------------------------------------------------------------------------
+// D1 usage port.
+// ---------------------------------------------------------------------------
+
+/** D1 usage of one UTC day, summed over every database in the account. */
+export interface DailyUsage {
+  /** `YYYY-MM-DD`, UTC. */
+  date: string;
+  rowsRead: number;
+  rowsWritten: number;
+  /** Size of the largest database in the account, null when unknown. */
+  databaseBytes: number | null;
+}
+
+export interface UsageReader {
+  /** Daily usage for the `days` UTC days ending with the one `now` falls in, oldest first, days without queries as zeros. */
+  daily(now: Date, days: number): Promise<DailyUsage[]>;
 }

@@ -45,7 +45,7 @@ describe('runTick: limit alerts', () => {
     expect(first.alerts).toBe(1);
     expect(first.alertsFailed).toBe(0);
     expect(alertCalls(h)).toHaveLength(1);
-    expect(alertCalls(h)[0]!.payload.content).toContain('🟡 hexium:valheim: package index line cap at 71 % (2,500 of 3,500 lines).');
+    expect(alertCalls(h)[0]!.payload.content).toContain('🟠 hexium:valheim: package index line cap at 71 % (2,500 of 3,500 lines).');
     expect(h.store.alertStates.get('hexium:valheim:index-lines')).toMatchObject({ level: 1 });
 
     const second = await runTick(h.deps, scheduled + 300_000);

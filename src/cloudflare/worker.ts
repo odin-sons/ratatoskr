@@ -7,6 +7,7 @@ import type { AppConfig } from '../core/types.ts';
 import { parseLanguage } from '../i18n/index.ts';
 import { parseRatatoskrEmoji, parseStoreEmojis } from '../render/index.ts';
 import { createAdapters } from '../sources/index.ts';
+import { CloudflareUsageReader } from './analytics.ts';
 import { RECONCILE_CRON, RECONCILE_HOURS_UTC, TICK_CRON, reconcileIndexAt } from './crons.ts';
 import { D1Store } from './d1-store.ts';
 import { DiscordSender } from './discord-sender.ts';
@@ -22,6 +23,9 @@ export interface Env {
   LANGUAGE?: string;
   /** Webhook of the channel that receives limit alerts. */
   ALERT_WEBHOOK_URL?: string;
+  /** Cloudflare account id and an Account Analytics: Read token; with both, the D1 usage monitor runs. */
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  CLOUDFLARE_ANALYTICS_TOKEN?: string;
 }
 
 function buildDeps(env: Env): TickDeps {
@@ -40,6 +44,9 @@ function buildDeps(env: Env): TickDeps {
     clock: { now: () => new Date() },
     reconcileRunsPerDay: RECONCILE_HOURS_UTC.length,
     ...(env.ALERT_WEBHOOK_URL === undefined || env.ALERT_WEBHOOK_URL === '' ? {} : { alertWebhookUrl: env.ALERT_WEBHOOK_URL }),
+    ...(env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_ANALYTICS_TOKEN
+      ? { usage: new CloudflareUsageReader(globalThis.fetch.bind(globalThis), env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_ANALYTICS_TOKEN) }
+      : {}),
   };
 }
 

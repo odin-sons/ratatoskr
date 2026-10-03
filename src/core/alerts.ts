@@ -10,24 +10,37 @@ export interface SourceCapUsage {
   usage: CapUsage;
 }
 
-/** Level of an exceeded limit; 1 to 3 are the shares in `CAP_ALERT_THRESHOLDS`, 0 is below the first. */
+const thresholdsOf = (usage: CapUsage): readonly number[] => usage.thresholds ?? CAP_ALERT_THRESHOLDS;
+
+/** Level of an exceeded limit: one above its last threshold. 0 is below the first threshold. */
+export const exceededLevel = (usage: CapUsage): number => thresholdsOf(usage).length + 1;
+
+/** `exceededLevel` of a limit with the default thresholds. */
 export const EXCEEDED_LEVEL = CAP_ALERT_THRESHOLDS.length + 1;
 
-const LEVEL_ICONS = ['', '🟡', '🟠', '🔴', '⛔'];
-
 export function capLevel(usage: CapUsage): number {
-  if (usage.exceeded) return EXCEEDED_LEVEL;
+  if (usage.exceeded) return exceededLevel(usage);
   if (usage.value === null || usage.limit <= 0) return 0;
   const share = usage.value / usage.limit;
-  return CAP_ALERT_THRESHOLDS.filter((threshold) => share >= threshold).length;
+  return thresholdsOf(usage).filter((threshold) => share >= threshold).length;
+}
+
+/** The same colours for the same share of a limit, whatever the limit is. */
+function iconFor(usage: CapUsage): string {
+  if (usage.exceeded || usage.value === null) return '⛔';
+  const share = usage.value / usage.limit;
+  if (share >= 0.95) return '⛔';
+  if (share >= 0.85) return '🔴';
+  if (share >= 0.7) return '🟠';
+  return '🟡';
 }
 
 const alertKey = ({ source, usage }: SourceCapUsage): string => `${source}:${usage.id}`;
 
 const formatNumber = (n: number): string => n.toLocaleString('en-US');
 
-export function formatCapAlert({ source, usage }: SourceCapUsage, level: number): DiscordMessage {
-  const icon = LEVEL_ICONS[level] ?? '';
+export function formatCapAlert({ source, usage }: SourceCapUsage): DiscordMessage {
+  const icon = iconFor(usage);
   const headline =
     usage.exceeded || usage.value === null
       ? `${icon} ${source}: ${usage.label} exceeded (limit ${formatNumber(usage.limit)} ${usage.unit}).`
@@ -70,7 +83,7 @@ export async function raiseCapAlerts(input: RaiseAlertsInput): Promise<AlertsRes
     const level = capLevel(entry.usage);
     const stored = states.get(key);
     const storedLevel = stored?.level ?? 0;
-    const repeatDue = level === EXCEEDED_LEVEL && stored !== undefined && !(now.getTime() - Date.parse(stored.notifiedAt) < CAP_ALERT_REPEAT_MS);
+    const repeatDue = level === exceededLevel(entry.usage) && stored !== undefined && !(now.getTime() - Date.parse(stored.notifiedAt) < CAP_ALERT_REPEAT_MS);
     if (level <= storedLevel && !repeatDue) {
       if (stored !== undefined && level < storedLevel) {
         const lowered = { level, notifiedAt: stored.notifiedAt };
@@ -84,7 +97,7 @@ export async function raiseCapAlerts(input: RaiseAlertsInput): Promise<AlertsRes
       continue;
     }
     if (!budget.tryConsume()) continue;
-    const sent = await sender.send(webhookUrl, formatCapAlert(entry, level));
+    const sent = await sender.send(webhookUrl, formatCapAlert(entry));
     if (!sent.ok) {
       result.failed += 1;
       continue;

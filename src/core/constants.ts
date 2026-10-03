@@ -58,6 +58,38 @@ export const D1_FREE = {
   maxDatabaseBytes: 500_000_000,
 } as const;
 
+/** D1 usage alerts: a level at 50, 70, 85 and 95 percent of a daily or size limit. */
+export const USAGE_ALERT_THRESHOLDS = [0.5, 0.7, 0.85, 0.95] as const;
+
+/** Alert level of a projection: one, when the day's usage extrapolated to 00:00 UTC passes the limit. */
+export const PROJECTION_ALERT_THRESHOLDS = [1] as const;
+
+/** Elapsed time of the UTC day before which usage is not extrapolated. */
+export const PROJECTION_MIN_ELAPSED_MS = 3 * 3_600_000;
+
+/** The usage monitor reads the analytics API when `tickIndex % N === 1`: every 15 minutes, off the Hexium scan ticks. */
+export const USAGE_CHECK_EVERY_NTH_TICK = 3;
+
+/** Shares of a D1 daily limit (the larger of rows read and rows written) at which degradation steps 1, 2 and 3 apply. */
+export const DEGRADATION_THRESHOLDS = [0.7, 0.85, 0.95] as const;
+
+/** What each degradation step switches off. Polling and delivery are never switched off. */
+export const DEGRADATION = {
+  /** Step 1: reconcile runs, the purge and changelog/website fetches pause. */
+  pauseExtrasFrom: 1,
+  /** Step 2: the Hexium index scan runs `rarerScanFactor` times less often. */
+  rarerScanFrom: 2,
+  rarerScanFactor: 2,
+  /** Step 3: the Hexium index scan pauses. */
+  pauseScanFrom: 3,
+} as const;
+
+/** A weekly usage report is sent at most this often. */
+export const WEEKLY_REPORT_MIN_GAP_MS = 6 * 24 * 3_600_000;
+
+/** Timeout of one Cloudflare GraphQL analytics request, and the most groups one answer may carry. */
+export const USAGE_API = { timeoutMs: 8_000, groupLimit: 1000 } as const;
+
 /**
  * Per-tick caps per category. Their sum can exceed `CLOUDFLARE.subrequestsPerInvocation`;
  * the shared `SubrequestBudget` (core/budget.ts) enforces the real limit and

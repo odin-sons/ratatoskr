@@ -2,7 +2,7 @@
 import type { CapUsage, PackageSnapshot, SourceConfig } from '../core/types.ts';
 import type { PollContext, PollResult, SourceAdapter, Store } from '../core/ports.ts';
 import { extractChangelog } from '../changelog/extract.ts';
-import { CADENCE, CLOUDFLARE } from '../core/constants.ts';
+import { CADENCE, CLOUDFLARE, DEGRADATION } from '../core/constants.ts';
 import {
   CHANGELOG_MAX_BYTES,
   HEXIUM_INDEX_MAX_BYTES,
@@ -141,7 +141,7 @@ export class HexiumAdapter implements SourceAdapter {
     if (state === null || !state.bootstrapped) return this.seedSlice(ctx, seedIndex(state?.cursor, SOURCE_BUDGET.hexiumSeedSlices));
 
     const listing = await this.readListing(ctx);
-    const scanDue = ctx.tickIndex % CADENCE.hexiumIndexEveryNthTick === 0;
+    const scanDue = this.scanDue(ctx);
     const listingSkipped = listing === 'not-modified' ? 0 : listing.skipped;
     if (!scanDue && listing === 'not-modified') return { status: 'not-modified', etag: state.etag };
 
@@ -213,6 +213,14 @@ export class HexiumAdapter implements SourceAdapter {
       console.warn(`[${this.config.id}] listing update lookups failed, listing held back: ${describeError(err)}`);
       return { packages: [], held: listed.length };
     }
+  }
+
+  /** Every `hexiumIndexEveryNthTick`th tick; rarer under degradation step 2, never under step 3. */
+  private scanDue(ctx: PollContext): boolean {
+    const degradation = ctx.degradation ?? 0;
+    if (degradation >= DEGRADATION.pauseScanFrom) return false;
+    const every = CADENCE.hexiumIndexEveryNthTick * (degradation >= DEGRADATION.rarerScanFrom ? DEGRADATION.rarerScanFactor : 1);
+    return ctx.tickIndex % every === 0;
   }
 
   private async fetchIndex(ctx: PollContext): Promise<string> {

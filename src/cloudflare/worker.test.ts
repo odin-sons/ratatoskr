@@ -47,6 +47,7 @@ const REPORT: TickReport = {
   degraded: 0,
   filtered: 0,
   purged: 0,
+  usageStep: 0,
   alerts: 0,
   alertsFailed: 0,
   subrequests: 4,
@@ -104,6 +105,15 @@ describe('worker', () => {
     await run(TICK_CRON);
     expect(runTick.mock.calls[1]![0]).not.toHaveProperty('alertWebhookUrl');
     expect(runTick.mock.calls[2]![0]).not.toHaveProperty('alertWebhookUrl');
+  });
+
+  it('builds the D1 usage reader only when both the account id and the analytics token are set', async () => {
+    await run(TICK_CRON, { ...env, CLOUDFLARE_ACCOUNT_ID: 'a'.repeat(32), CLOUDFLARE_ANALYTICS_TOKEN: 'analytics-token' });
+    expect(typeof runTick.mock.calls[0]![0].usage.daily).toBe('function');
+    for (const partial of [{ CLOUDFLARE_ACCOUNT_ID: 'a'.repeat(32) }, { CLOUDFLARE_ANALYTICS_TOKEN: 'analytics-token' }, { CLOUDFLARE_ACCOUNT_ID: '', CLOUDFLARE_ANALYTICS_TOKEN: '' }, {}]) {
+      await run(TICK_CRON, { ...env, ...partial });
+    }
+    for (const call of runTick.mock.calls.slice(1)) expect(call[0]).not.toHaveProperty('usage');
   });
 
   it.each(RECONCILE_HOURS_UTC.map((hour, i) => [hour, i] as const))('routes the reconcile cron at %i:01 UTC to runReconcile(%i)', async (_hour, index) => {

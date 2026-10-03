@@ -148,6 +148,7 @@ export interface DiscordEmbed {
   footer?: { text: string; icon_url?: string };
   author?: { name: string; url?: string; icon_url?: string };
   thumbnail?: { url: string };
+  image?: { url: string };
 }
 
 /** Button emoji: a custom emoji has an `id`, a unicode one only a `name`. */
@@ -235,6 +236,8 @@ export interface CapUsage {
   consequence: string;
   /** Name of the constant that holds the limit. */
   constant: string;
+  /** Shares of `limit` that raise an alert level; defaults to `CAP_ALERT_THRESHOLDS`. */
+  thresholds?: readonly number[];
 }
 
 /** The last alert level reported for one limit, so an alert is sent once per level. */

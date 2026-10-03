@@ -727,6 +727,7 @@ describe('runTick: report', () => {
       degraded: 0,
       filtered: 0,
       purged: 0,
+      usageStep: 0,
       alerts: 0,
       alertsFailed: 0,
       subrequests: 0,

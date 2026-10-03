@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FakeSender, SEND_OK, clientError, rateLimited } from '../testing/fakes.ts';
 import { MemoryStore } from '../testing/memory-store.ts';
-import { EXCEEDED_LEVEL, capLevel, formatCapAlert, raiseCapAlerts, type SourceCapUsage } from './alerts.ts';
+import { EXCEEDED_LEVEL, capLevel, exceededLevel, formatCapAlert, raiseCapAlerts, type SourceCapUsage } from './alerts.ts';
 import { SubrequestBudget } from './budget.ts';
 import { CAP_ALERT_REPEAT_MS, PROJECT } from './constants.ts';
 import type { CapUsage } from './types.ts';
@@ -69,25 +69,69 @@ describe('capLevel', () => {
   });
 });
 
+describe('per-limit thresholds', () => {
+  const usageThresholds = [0.5, 0.7, 0.85, 0.95];
+
+  it.each([
+    [499, 0],
+    [500, 1],
+    [700, 2],
+    [850, 3],
+    [950, 4],
+  ])('puts %i of 1000 at level %i with the 50/70/85/95 thresholds', (value, level) => {
+    expect(capLevel(usage({ value, thresholds: usageThresholds }))).toBe(level);
+  });
+
+  it('puts an exceeded limit one level above its last threshold, whatever the thresholds are', () => {
+    expect(exceededLevel(usage())).toBe(EXCEEDED_LEVEL);
+    expect(exceededLevel(usage({ thresholds: usageThresholds }))).toBe(5);
+    expect(exceededLevel(usage({ thresholds: [1] }))).toBe(2);
+    expect(capLevel(usage({ exceeded: true, value: null, thresholds: usageThresholds }))).toBe(5);
+  });
+
+  it('alerts at the first of four thresholds, and repeats an exceeded limit with four thresholds after a day', async () => {
+    const { sender, run } = setup();
+    expect(await run([entry({ value: 520, thresholds: usageThresholds })])).toEqual({ sent: 1, failed: 0 });
+    const exceeded = entry({ exceeded: true, value: null, thresholds: usageThresholds });
+    expect(await run([exceeded])).toEqual({ sent: 1, failed: 0 });
+    expect(await run([exceeded], { now: new Date(NOW.getTime() + 1000) })).toEqual({ sent: 0, failed: 0 });
+    expect(await run([exceeded], { now: new Date(NOW.getTime() + CAP_ALERT_REPEAT_MS) })).toEqual({ sent: 1, failed: 0 });
+    expect(sender.calls).toHaveLength(3);
+  });
+
+  it('alerts once when a projection passes the limit', async () => {
+    const { sender, run } = setup();
+    const projected = (value: number) => entry({ id: 'rows-read-projected', value, thresholds: [1] });
+    expect(await run([projected(999)])).toEqual({ sent: 0, failed: 0 });
+    expect(await run([projected(1100)])).toEqual({ sent: 1, failed: 0 });
+    expect(await run([projected(1300)])).toEqual({ sent: 0, failed: 0 });
+    expect(sender.calls[0]!.payload.content).toContain('at 110 %');
+  });
+});
+
 describe('formatCapAlert', () => {
   it('names the source, the cap, the numbers, the constant and the project link, and never pings', () => {
-    const message = formatCapAlert(entry({ value: 750, constant: 'HEXIUM_INDEX_MAX_LINES' }), 1);
+    const message = formatCapAlert(entry({ value: 750, constant: 'HEXIUM_INDEX_MAX_LINES' }));
     expect(message.allowed_mentions).toEqual({ parse: [] });
-    expect(message.content).toContain('🟡 hexium:valheim: package index line cap at 75 % (750 of 1,000 lines).');
+    expect(message.content).toContain('🟠 hexium:valheim: package index line cap at 75 % (750 of 1,000 lines).');
     expect(message.content).toContain('Updates of known packages are not detected.');
     expect(message.content).toContain('`HEXIUM_INDEX_MAX_LINES`');
     expect(message.content).toContain(`[ratatoskr v${PROJECT.version}](${PROJECT.repoUrl})`);
   });
 
   it('says the limit is exceeded and that the alert repeats daily', () => {
-    const { content } = formatCapAlert(entry({ exceeded: true, value: null, limit: 3500 }), EXCEEDED_LEVEL);
+    const { content } = formatCapAlert(entry({ exceeded: true, value: null, limit: 3500 }));
     expect(content).toContain('⛔ hexium:valheim: package index line cap exceeded (limit 3,500 lines).');
     expect(content).toContain('Reported again every 24 hours until it is fixed.');
   });
 
-  it('uses a different icon at each level', () => {
-    const icons = [1, 2, 3, EXCEEDED_LEVEL].map((level) => formatCapAlert(entry(), level).content!.split(' ')[0]);
-    expect(new Set(icons).size).toBe(4);
+  it('picks the icon from the share of the limit, the same for every limit', () => {
+    const icon = (over: Partial<CapUsage>): string | undefined => formatCapAlert(entry(over)).content!.split(' ')[0];
+    expect(icon({ value: 500 })).toBe('🟡');
+    expect(icon({ value: 700 })).toBe('🟠');
+    expect(icon({ value: 850 })).toBe('🔴');
+    expect(icon({ value: 950 })).toBe('⛔');
+    expect(icon({ exceeded: true, value: null })).toBe('⛔');
   });
 });
 
@@ -114,7 +158,7 @@ describe('raiseCapAlerts', () => {
     const { sender, run } = setup();
     expect(await run([entry({ value: 970 })])).toEqual({ sent: 1, failed: 0 });
     expect(sender.calls).toHaveLength(1);
-    expect(sender.calls[0]!.payload.content).toContain('🔴');
+    expect(sender.calls[0]!.payload.content).toContain('⛔');
   });
 
   it('repeats an exceeded limit only after 24 hours', async () => {

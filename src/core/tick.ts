@@ -2,9 +2,12 @@
 import { renderDigest, renderImmediate } from '../render/index.ts';
 import { raiseCapAlerts, type SourceCapUsage } from './alerts.ts';
 import { SubrequestBudget } from './budget.ts';
+import { maybeSendWeeklyReport } from './weekly.ts';
+import { readDegradation, runUsageMonitor } from './usage-monitor.ts';
 import {
   CADENCE,
   CLOUDFLARE,
+  DEGRADATION,
   DELIVERED_RETENTION_DAYS,
   MS_PER_DAY,
   OUTBOX_PURGE_BATCH,
@@ -16,7 +19,7 @@ import { dedupeSnapshots, diffSnapshots } from './diff.ts';
 import { drainOutbox, type Renderer } from './drain.ts';
 import { compileFilter } from './filter.ts';
 import { fanOut, type CompiledSubscription } from './fanout.ts';
-import type { Clock, PollContext, Sender, SourceAdapter, Store } from './ports.ts';
+import type { Clock, PollContext, Sender, SourceAdapter, Store, UsageReader } from './ports.ts';
 import { sanitizeLogText } from './report.ts';
 import type { Language } from '../i18n/index.ts';
 import type { AppConfig, CapUsage, ModEvent, PackageSnapshot, SourceId, SourceState, StoreEmojis } from './types.ts';
@@ -43,6 +46,8 @@ export interface TickDeps {
   reconcileRunsPerDay?: number;
   /** Webhook of the alert channel; without it limit alerts are not sent. */
   alertWebhookUrl?: string;
+  /** Reads D1 usage from the analytics API; without it the usage monitor, its degradation steps and the weekly report are off. */
+  usage?: UsageReader;
 }
 
 export interface SourceReport {
@@ -71,7 +76,9 @@ export interface TickReport {
   filtered: number;
   /** Delivered outbox rows deleted by a reconcile run. */
   purged: number;
-  /** Limit alerts sent to the alert channel. */
+  /** The D1 usage degradation step that applied to this run, 0 when none. */
+  usageStep: number;
+  /** Limit alerts and weekly reports sent to the alert channel. */
   alerts: number;
   /** Limit alerts Discord refused; they are tried again on the next run. */
   alertsFailed: number;
@@ -105,6 +112,7 @@ interface Run {
   tickIndex: number;
   sliceHint: number | undefined;
   subs: CompiledSubscription[];
+  degradation: number;
 }
 
 export async function runTick(deps: TickDeps, scheduledTimeMs: number): Promise<TickReport> {
@@ -120,6 +128,10 @@ export async function runTick(deps: TickDeps, scheduledTimeMs: number): Promise<
   const usages: SourceCapUsage[] = [];
 
   if (run !== null) {
+    const monitor = await runUsageMonitor({ store: deps.store, reader: deps.usage, budget, now: run.now, tickIndex: run.tickIndex });
+    run.degradation = monitor.degradation;
+    report.usageStep = monitor.degradation;
+    usages.push(...monitor.usages);
     let fetches = 0;
     for (const adapter of rotate(enabled, run.tickIndex)) {
       const id = adapter.config.id;
@@ -135,7 +147,7 @@ export async function runTick(deps: TickDeps, scheduledTimeMs: number): Promise<
       for (const usage of outcome.capUsage ?? []) usages.push({ source: id, usage });
     }
   }
-  return finish(deps, budget, report, jobs, run?.now ?? deps.clock.now(), usages);
+  return finish(deps, budget, report, jobs, run?.now ?? deps.clock.now(), usages, run?.degradation ?? 0);
 }
 
 export async function runReconcile(deps: TickDeps, scheduledTimeMs: number, reconcileIndex: number): Promise<TickReport> {
@@ -146,17 +158,47 @@ export async function runReconcile(deps: TickDeps, scheduledTimeMs: number, reco
   const run = await startRun(deps, budget, scheduledTimeMs, sliceHint, report);
   const candidates = deps.adapters.filter((a) => a.config.enabled && a.reconcile !== undefined);
   const jobs: ChangelogJob[] = [];
+  const degradation = run === null ? 0 : await readDegradation(deps.store, deps.usage, run.now);
+  report.usageStep = degradation;
+  const paused = degradation >= DEGRADATION.pauseExtrasFrom;
+  if (run !== null) await sendWeeklyReport(deps, budget, report, scheduledTimeMs, degradation, run.now);
 
-  if (run !== null && candidates.length > 0) {
+  if (run !== null && candidates.length > 0 && !paused) {
+    run.degradation = degradation;
     const adapter = candidates[((reconcileIndex % candidates.length) + candidates.length) % candidates.length]!;
     const outcome = await guarded(run, adapter, 'reconcile');
     report.sources[adapter.config.id] = outcome.report;
     jobs.push(...outcome.jobs);
   }
   const now = run?.now ?? deps.clock.now();
-  await finish(deps, budget, report, jobs, now);
-  report.purged = await purgeDelivered(deps, now);
+  await finish(deps, budget, report, jobs, now, [], degradation);
+  if (!paused) report.purged = await purgeDelivered(deps, now);
   return report;
+}
+
+async function sendWeeklyReport(
+  deps: TickDeps,
+  budget: SubrequestBudget,
+  report: TickReport,
+  scheduledTimeMs: number,
+  degradation: number,
+  now: Date,
+): Promise<void> {
+  try {
+    const sent = await maybeSendWeeklyReport({
+      store: deps.store,
+      sender: deps.sender,
+      reader: deps.usage,
+      webhookUrl: deps.alertWebhookUrl,
+      budget,
+      now,
+      scheduledTimeMs,
+      degradation,
+    });
+    if (sent) report.alerts += 1;
+  } catch (err) {
+    console.warn(`weekly report failed: ${sanitizeLogText(errorMessage(err))}`);
+  }
 }
 
 function newReport(): TickReport {
@@ -171,6 +213,7 @@ function newReport(): TickReport {
     degraded: 0,
     filtered: 0,
     purged: 0,
+    usageStep: 0,
     alerts: 0,
     alertsFailed: 0,
     subrequests: 0,
@@ -199,7 +242,7 @@ async function startRun(
     const subs = (await deps.store.listSubscriptions())
       .filter((s) => s.enabled)
       .map((sub) => ({ sub, filter: compileFilter(sub.filter) }));
-    return { deps, budget, now, nowIso: now.toISOString(), tickIndex: Math.floor(scheduledTimeMs / TICK_MS), sliceHint, subs };
+    return { deps, budget, now, nowIso: now.toISOString(), tickIndex: Math.floor(scheduledTimeMs / TICK_MS), sliceHint, subs, degradation: 0 };
   } catch (err) {
     report.drainError = `listSubscriptions failed: ${errorMessage(err)}`;
     for (const a of deps.adapters) {
@@ -216,9 +259,10 @@ async function finish(
   jobs: ChangelogJob[],
   now: Date,
   usages: SourceCapUsage[] = [],
+  degradation = 0,
 ): Promise<TickReport> {
   await raiseAlerts(deps, budget, report, usages, now);
-  await fetchChangelogs(deps, budget, jobs, report);
+  await fetchChangelogs(deps, budget, jobs, report, degradation);
   const drained = await drainOutbox({
     store: deps.store,
     sender: deps.sender,
@@ -279,6 +323,7 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
     now,
     secrets: deps.secrets,
     ...(run.sliceHint === undefined ? {} : { sliceHint: run.sliceHint }),
+    ...(run.degradation === 0 ? {} : { degradation: run.degradation }),
   };
 
   if (kind === 'reconcile' && (state === null || !state.bootstrapped)) {
@@ -346,7 +391,11 @@ async function processSource(run: Run, adapter: SourceAdapter, kind: 'tick' | 'r
   return { report: { status: 'ok', events: events.length, ...warned }, jobs, fetched: true, capUsage };
 }
 
-async function fetchChangelogs(deps: TickDeps, budget: SubrequestBudget, jobs: ChangelogJob[], report: TickReport): Promise<void> {
+async function fetchChangelogs(deps: TickDeps, budget: SubrequestBudget, jobs: ChangelogJob[], report: TickReport, degradation: number): Promise<void> {
+  if (degradation >= DEGRADATION.pauseExtrasFrom) {
+    report.changelogSkipped += jobs.length;
+    return;
+  }
   const selected = selectDetailJobs(jobs, budget.remaining - SUBREQUEST_SEND_RESERVE);
   report.changelogSkipped += jobs.length - selected.length;
   report.changelogFetches += selected.length;
