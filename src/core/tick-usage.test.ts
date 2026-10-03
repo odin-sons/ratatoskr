@@ -13,7 +13,7 @@ const WEBHOOK = 'https://discord.invalid/api/webhooks/9/alert-token';
 const TODAY = FIXED_NOW_ISO.slice(0, 10);
 const CHECK_TICK = 1_000_000;
 const at = (tick: number): number => tick * 300_000;
-const MONDAY_03_01 = Date.UTC(2026, 9, 5, 3, 1);
+const FRIDAY_17_00 = Date.UTC(2026, 9, 9, 17, 0);
 
 const reading = (readShare: number, writeShare = 0): DailyUsage => ({
   date: TODAY,
@@ -173,51 +173,56 @@ describe('runReconcile under the D1 usage steps', () => {
   });
 });
 
-describe('runReconcile: the weekly report', () => {
-  const week = (): DailyUsage[] => Array.from({ length: 7 }, (_, i) => ({ ...reading(0.04), date: new Date(Date.UTC(2026, 9, 5 - 6 + i)).toISOString().slice(0, 10) }));
+describe('runTick: the weekly report', () => {
+  const week = (): DailyUsage[] => Array.from({ length: 7 }, (_, i) => ({ ...reading(0.04), date: new Date(Date.UTC(2026, 9, 9 - 6 + i)).toISOString().slice(0, 10) }));
+  const reports = (h: Harness) => h.sender.callsTo(WEBHOOK).filter((c) => c.payload.embeds !== undefined);
+  const tickAt = (ms: number): number => Math.floor(ms / 300_000);
 
-  it('goes to the alert channel on the first reconcile run of a Monday, once per week', async () => {
-    const usage = readerOf(() => week());
-    const { h } = setup(usage, { reconcilable: true });
-    h.clock.set(new Date(MONDAY_03_01).toISOString());
-    const report = await runReconcile(h.deps, MONDAY_03_01, 0);
-    const reports = h.sender.callsTo(WEBHOOK).filter((c) => c.payload.embeds !== undefined);
-    expect(reports).toHaveLength(1);
-    expect(report.alerts).toBe(1);
+  async function runAt(h: Harness, adapter: FakeAdapter, ms: number) {
+    h.clock.set(new Date(ms).toISOString());
+    adapter.enqueue(okPoll([]));
+    return runTick(h.deps, tickAt(ms) * 300_000);
+  }
+
+  it('goes to the alert channel on the first tick from Friday 17:00 UTC (20:00 UTC+3), once per week', async () => {
+    const { h, adapter } = setup(readerOf(() => week()));
+    const before = await runAt(h, adapter, FRIDAY_17_00 - 300_000);
+    expect(before.alerts).toBe(0);
+    expect(reports(h)).toHaveLength(0);
+
+    const first = await runAt(h, adapter, FRIDAY_17_00);
+    expect(reports(h)).toHaveLength(1);
+    expect(first.alerts).toBeGreaterThanOrEqual(1);
     expect(h.store.alertStates.has(WEEKLY_REPORT_KEY)).toBe(true);
 
-    h.clock.set(new Date(MONDAY_03_01 + 3_600_000).toISOString());
-    const again = await runReconcile(h.deps, MONDAY_03_01 + 3_600_000, 0);
-    expect(again.alerts).toBe(0);
-    expect(h.sender.callsTo(WEBHOOK).filter((c) => c.payload.embeds !== undefined)).toHaveLength(1);
+    await runAt(h, adapter, FRIDAY_17_00 + 3_600_000);
+    expect(reports(h)).toHaveLength(1);
   });
 
-  it('is not sent on another weekday', async () => {
-    const { h } = setup(readerOf(() => week()), { reconcilable: true });
-    const tuesday = Date.UTC(2026, 9, 6, 3, 1);
-    h.clock.set(new Date(tuesday).toISOString());
-    await runReconcile(h.deps, tuesday, 0);
-    expect(h.sender.callsTo(WEBHOOK)).toHaveLength(0);
+  it('is not sent on another weekday, nor by a reconcile run', async () => {
+    const { h, adapter } = setup(readerOf(() => week()), { reconcilable: true });
+    await runAt(h, adapter, FRIDAY_17_00 - 86_400_000);
+    h.clock.set(new Date(FRIDAY_17_00).toISOString());
+    await runReconcile(h.deps, FRIDAY_17_00, 0);
+    expect(reports(h)).toHaveLength(0);
   });
 
-  it('is retried by the next reconcile run of the same Monday after a failed first attempt', async () => {
+  it('is retried by the next tick after a failed first attempt, without failing the tick', async () => {
     let healthy = false;
-    const { h } = setup(readerOf(() => (healthy ? week() : new Error('analytics API answered 502'))), { reconcilable: true });
-    h.clock.set(new Date(MONDAY_03_01).toISOString());
-    await runReconcile(h.deps, MONDAY_03_01, 0);
+    const { h, adapter } = setup(readerOf(() => (healthy ? week() : new Error('analytics API answered 502'))));
+    const failed = await runAt(h, adapter, FRIDAY_17_00);
+    expect(failed.sources[HX]).toMatchObject({ status: 'ok' });
     expect(h.store.alertStates.has(WEEKLY_REPORT_KEY)).toBe(false);
+    expect(vi.mocked(console.warn).mock.calls.some((c) => String(c[0]).includes('weekly report failed'))).toBe(true);
     healthy = true;
-    h.clock.set(new Date(MONDAY_03_01 + 3_600_000).toISOString());
-    const second = await runReconcile(h.deps, MONDAY_03_01 + 3_600_000, 1);
-    expect(second.alerts).toBe(1);
+    await runAt(h, adapter, FRIDAY_17_00 + 300_000);
+    expect(reports(h)).toHaveLength(1);
   });
 
-  it('never fails the reconcile run when the report cannot be built', async () => {
-    const { h, adapter } = setup(readerOf(() => new Error('analytics API answered 502')), { reconcilable: true });
-    h.clock.set(new Date(MONDAY_03_01).toISOString());
-    const report = await runReconcile(h.deps, MONDAY_03_01, 0);
-    expect(adapter.reconcileCalls).toHaveLength(1);
-    expect(report.alerts).toBe(0);
-    expect(vi.mocked(console.warn).mock.calls.some((c) => String(c[0]).includes('weekly report failed'))).toBe(true);
+  it('is built before the sources are polled, so a busy tick cannot starve it of subrequests', async () => {
+    const { h, adapter } = setup(readerOf(() => week()));
+    const report = await runAt(h, adapter, FRIDAY_17_00);
+    expect(report.subrequests).toBeGreaterThanOrEqual(2);
+    expect(reports(h)).toHaveLength(1);
   });
 });

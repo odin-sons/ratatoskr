@@ -8,8 +8,8 @@ import type { DailyUsage, UsageReader } from './ports.ts';
 import { WEEKLY_REPORT_DAYS, WEEKLY_REPORT_KEY, maybeSendWeeklyReport, type WeeklyInput } from './weekly.ts';
 
 const WEBHOOK = 'https://discord.invalid/api/webhooks/1/alert-token';
-const MONDAY = Date.UTC(2026, 9, 5, 3, 1);
-const TUESDAY = Date.UTC(2026, 9, 6, 3, 1);
+const FRIDAY = Date.UTC(2026, 9, 9, 17, 0);
+const THURSDAY = Date.UTC(2026, 9, 8, 18, 0);
 
 const usage: DailyUsage[] = Array.from({ length: WEEKLY_REPORT_DAYS }, (_, i) => ({
   date: new Date(Date.UTC(2026, 8, 29 + i)).toISOString().slice(0, 10),
@@ -30,8 +30,8 @@ function setup(over: Partial<WeeklyInput> = {}) {
       reader,
       webhookUrl: WEBHOOK,
       budget: new SubrequestBudget(),
-      now: new Date(MONDAY),
-      scheduledTimeMs: MONDAY,
+      now: new Date(FRIDAY),
+      scheduledTimeMs: FRIDAY,
       degradation: 0,
       ...over,
       ...extra,
@@ -40,14 +40,14 @@ function setup(over: Partial<WeeklyInput> = {}) {
 }
 
 describe('maybeSendWeeklyReport', () => {
-  it('sends the report to the alert channel on a Monday, and records it', async () => {
+  it('sends the report to the alert channel on Friday from 17:00 UTC (20:00 UTC+3), and records it', async () => {
     const { store, sender, daily, run } = setup();
     expect(await run()).toBe(true);
     expect(sender.calls).toHaveLength(1);
     expect(sender.calls[0]!.webhookUrl).toBe(WEBHOOK);
     expect(sender.calls[0]!.payload.embeds![0]!.title).toContain('D1 usage');
-    expect(daily).toHaveBeenCalledWith(new Date(MONDAY), WEEKLY_REPORT_DAYS);
-    expect(store.alertStates.get(WEEKLY_REPORT_KEY)).toEqual({ level: 0, notifiedAt: new Date(MONDAY).toISOString() });
+    expect(daily).toHaveBeenCalledWith(new Date(FRIDAY), WEEKLY_REPORT_DAYS);
+    expect(store.alertStates.get(WEEKLY_REPORT_KEY)).toEqual({ level: 0, notifiedAt: new Date(FRIDAY).toISOString() });
   });
 
   it('spends two subrequests: the analytics read and the send', async () => {
@@ -58,7 +58,8 @@ describe('maybeSendWeeklyReport', () => {
   });
 
   it.each([
-    ['another day of the week', { scheduledTimeMs: TUESDAY }],
+    ['another day of the week', { scheduledTimeMs: THURSDAY }],
+    ['Friday before 17:00 UTC', { scheduledTimeMs: FRIDAY - 1 }],
     ['no analytics reader', { reader: undefined }],
     ['no alert webhook', { webhookUrl: undefined }],
     ['too little subrequest budget', { budget: new SubrequestBudget(1) }],
@@ -69,24 +70,30 @@ describe('maybeSendWeeklyReport', () => {
     expect(daily).not.toHaveBeenCalled();
   });
 
-  it('sends one report per week, whichever reconcile run of the Monday comes first: the next Monday is due, a repeat within the gap is not', async () => {
+  it('sends one report per week: the next Friday is due, a repeat within the gap is not', async () => {
     const { store, sender, run } = setup();
     await run();
-    expect(await run({ now: new Date(MONDAY + 60_000) })).toBe(false);
-    store.alertStates.set(WEEKLY_REPORT_KEY, { level: 0, notifiedAt: new Date(MONDAY - WEEKLY_REPORT_MIN_GAP_MS + 1).toISOString() });
+    expect(await run({ now: new Date(FRIDAY + 60_000) })).toBe(false);
+    store.alertStates.set(WEEKLY_REPORT_KEY, { level: 0, notifiedAt: new Date(FRIDAY - WEEKLY_REPORT_MIN_GAP_MS + 1).toISOString() });
     expect(await run()).toBe(false);
-    store.alertStates.set(WEEKLY_REPORT_KEY, { level: 0, notifiedAt: new Date(MONDAY - WEEKLY_REPORT_MIN_GAP_MS).toISOString() });
+    store.alertStates.set(WEEKLY_REPORT_KEY, { level: 0, notifiedAt: new Date(FRIDAY - WEEKLY_REPORT_MIN_GAP_MS).toISOString() });
     expect(await run()).toBe(true);
     expect(sender.calls).toHaveLength(2);
   });
 
-  it('records nothing when Discord refuses the report, so the next Monday run tries again', async () => {
+  it('records nothing when Discord refuses the report, so the next tick tries again', async () => {
     const { store, sender, run } = setup();
     sender.enqueue(clientError(404));
     expect(await run()).toBe(false);
     expect(store.alertStates.size).toBe(0);
     sender.enqueue(SEND_OK);
     expect(await run()).toBe(true);
+  });
+
+  it('still sends late on Friday, after a first attempt failed', async () => {
+    const { sender, run } = setup();
+    expect(await run({ scheduledTimeMs: Date.UTC(2026, 9, 9, 23, 55), now: new Date(Date.UTC(2026, 9, 9, 23, 55)) })).toBe(true);
+    expect(sender.calls).toHaveLength(1);
   });
 
   it('puts the current degradation step in the report', async () => {

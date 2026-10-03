@@ -84,6 +84,9 @@ export const DEGRADATION = {
   pauseScanFrom: 3,
 } as const;
 
+/** The weekly usage report goes out on the first tick from this UTC weekday and hour: Friday 20:00 UTC+3. */
+export const WEEKLY_REPORT = { weekdayUtc: 5, fromHourUtc: 17 } as const;
+
 /** A weekly usage report is sent at most this often. */
 export const WEEKLY_REPORT_MIN_GAP_MS = 6 * 24 * 3_600_000;
 

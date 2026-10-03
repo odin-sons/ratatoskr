@@ -132,6 +132,7 @@ export async function runTick(deps: TickDeps, scheduledTimeMs: number): Promise<
     run.degradation = monitor.degradation;
     report.usageStep = monitor.degradation;
     usages.push(...monitor.usages);
+    await sendWeeklyReport(deps, budget, report, scheduledTimeMs, monitor.degradation, run.now);
     let fetches = 0;
     for (const adapter of rotate(enabled, run.tickIndex)) {
       const id = adapter.config.id;
@@ -161,7 +162,6 @@ export async function runReconcile(deps: TickDeps, scheduledTimeMs: number, reco
   const degradation = run === null ? 0 : await readDegradation(deps.store, deps.usage, run.now);
   report.usageStep = degradation;
   const paused = degradation >= DEGRADATION.pauseExtrasFrom;
-  if (run !== null) await sendWeeklyReport(deps, budget, report, scheduledTimeMs, degradation, run.now);
 
   if (run !== null && candidates.length > 0 && !paused) {
     run.degradation = degradation;

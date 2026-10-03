@@ -816,10 +816,11 @@ only large lever on reads: its known-versions read was 83 % of the reads in the 
 Writes have no such lever; they are the product (events and outbox rows). Every alert tells the operator
 which step applies.
 
-**Weekly report.** The first reconcile run of a Monday (03:01 UTC) sends the alert channel a message
+**Weekly report.** The first tick from Friday 17:00 UTC (20:00 UTC+3) sends the alert channel a message
 with the last seven days as a table, a chart and the degradation status, so the operator sees that
 monitoring and alerting still work when nothing is wrong. It is stored under `d1:weekly-report` and
-sent at most once in six days; a failed send is retried by the next Monday run. The chart is mermaid
+sent at most once in six days; a failed send is retried by the next tick that Friday. It rides on the
+five-minute tick, so it needs no cron trigger of its own. The chart is mermaid
 text compressed into a URL: Discord fetches the picture from mermaid.ink, a second link opens the same
 diagram in Mermaid Live, and the numbers are in the message itself, so a down image service costs only
 the picture (see `docs/legal.md`).

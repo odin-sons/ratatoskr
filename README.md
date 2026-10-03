@@ -158,7 +158,7 @@ Until then, use the manual steps below.
 
 7. Optional: the D1 usage monitor. It reads the day's D1 usage from Cloudflare's analytics API,
    alerts in the channel from step 6 at 50, 70, 85 and 95 % of a daily limit, switches optional work
-   off from 70 %, and sends a usage chart every Monday. Create a token that can do nothing else: in
+   off from 70 %, and sends a usage chart every Friday at 20:00 UTC+3. Create a token that can do nothing else: in
    the Cloudflare dashboard, Profile → API Tokens → Create Token → Custom, one permission, Account →
    Account Analytics → Read, limited to your account. Store it and your account id (on the Workers & Pages overview, or from `pnpm run wrangler
    whoami`) as secrets, separate from the deploy token.
