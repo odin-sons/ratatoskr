@@ -135,7 +135,7 @@ export const CAP_ALERT_REPEAT_MS = MS_PER_DAY;
 export const CADENCE = {
   tickMinutes: 5,
   hexiumIndexEveryNthTick: 3,
-  /** Number of reconcile cron triggers per day; `src/cloudflare/crons.ts` must list this many. */
+  /** Number of reconcile cron triggers per day; `RECONCILE_HOURS_UTC` in `src/cloudflare/crons.ts` must list this many. */
   reconcileRunsPerDay: 3,
 } as const;
 

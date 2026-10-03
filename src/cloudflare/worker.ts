@@ -7,7 +7,7 @@ import type { AppConfig } from '../core/types.ts';
 import { parseLanguage } from '../i18n/index.ts';
 import { parseRatatoskrEmoji, parseStoreEmojis } from '../render/index.ts';
 import { createAdapters } from '../sources/index.ts';
-import { RECONCILE_CRONS, TICK_CRON } from './crons.ts';
+import { RECONCILE_CRON, RECONCILE_HOURS_UTC, TICK_CRON, reconcileIndexAt } from './crons.ts';
 import { D1Store } from './d1-store.ts';
 import { DiscordSender } from './discord-sender.ts';
 
@@ -38,18 +38,18 @@ function buildDeps(env: Env): TickDeps {
     locale: parseLanguage(env.LANGUAGE),
     fetch: globalThis.fetch.bind(globalThis),
     clock: { now: () => new Date() },
-    reconcileRunsPerDay: RECONCILE_CRONS.length,
+    reconcileRunsPerDay: RECONCILE_HOURS_UTC.length,
     ...(env.ALERT_WEBHOOK_URL === undefined || env.ALERT_WEBHOOK_URL === '' ? {} : { alertWebhookUrl: env.ALERT_WEBHOOK_URL }),
   };
 }
 
 async function dispatch(controller: ScheduledController, env: Env): Promise<void> {
-  const reconcileIndex = (RECONCILE_CRONS as readonly string[]).indexOf(controller.cron);
+  const reconcileIndex = reconcileIndexAt(controller.scheduledTime);
   let report: TickReport;
   const startedAt = Date.now();
   if (controller.cron === TICK_CRON) {
     report = await runTick(buildDeps(env), controller.scheduledTime);
-  } else if (reconcileIndex >= 0) {
+  } else if (controller.cron === RECONCILE_CRON && reconcileIndex >= 0) {
     report = await runReconcile(buildDeps(env), controller.scheduledTime, reconcileIndex);
   } else {
     console.error(`unknown cron trigger: ${sanitizeLogText(controller.cron)}`);

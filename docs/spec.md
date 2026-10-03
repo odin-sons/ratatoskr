@@ -121,7 +121,7 @@ log line.
 
 ### Reconciliation
 
-Three times a day, walk the full index for each store that offers one (for
+Three times a day (03:01, 04:01 and 05:01 UTC), walk the full index for each store that offers one (for
 Hexium, the whole package index in one read), compare against D1 and emit anything
 missed: packages whose version differs from D1 or that D1 lacks get a full lookup,
 at most 20 per run, unchanged packages produce nothing. This covers the two real gaps:
@@ -129,10 +129,12 @@ cron triggers have no retries, so a failed tick is simply skipped; and a burst
 larger than one listing page slips past a page-1 poller.
 
 Reconciliation is a separate cron at a different hour, and it is subject to the
-same per-tick budget — process one store per run. Reconcile crons run at minute
-1 (`1 3`, `1 4`, `1 5`), never on the 5-minute tick grid, so a reconcile run
-never overlaps a tick run (both drain the outbox and write cursors). Each run
-gets `sliceHint = floor(scheduledTime / 1 day) * 3 + reconcileIndex` in its
+same per-tick budget — process one store per run. One cron expression, `1 3,4,5 * * *`,
+fires the three runs, so an instance uses two of the five cron triggers a free account
+allows (the tick and this one) and two instances fit one account. The run's
+`reconcileIndex` (0, 1, 2) comes from the UTC hour of the scheduled time; the minute 1 is
+never on the 5-minute tick grid, so a reconcile run never overlaps a tick run (both drain
+the outbox and write cursors). Each run gets `sliceHint = floor(scheduledTime / 1 day) * 3 + reconcileIndex` in its
 `PollContext`, which advances by one per run, so an adapter with more pending work
 than one run can do (Hexium: more than 20 changed packages) starts at a different
 candidate each run.
@@ -371,6 +373,7 @@ Quota usage at 800 events/day, two guilds:
 | Worker requests | 100,000/day | 288 | 0.3 % |
 | D1 rows written | 100,000/day | ~9,000 | 9 % |
 | D1 rows read | 5,000,000/day | ~220,000 | 4 % |
+| Cron triggers | 5/account | 2 | 40 % |
 | External subrequests | 50/invocation | ≤ 48, enforced | — |
 
 D1 figures are measured on the live database (2026-10-02, extrapolated to a full UTC day; the D1
@@ -730,7 +733,7 @@ Nexus needs none of this: `changelogs.json` is already keyed by version.
   Every send has a 10 s timeout; a timeout is a retryable failure.
 - Outbox rows exceeding an attempt ceiling get parked, not silently dropped.
   Each parking logs `outbox parked rows=N status=S` and counts into the report.
-- Cron invocations must not overlap: reconcile crons are off the tick grid.
+- Cron invocations must not overlap: the reconcile cron is off the tick grid.
 
 ### Run report
 

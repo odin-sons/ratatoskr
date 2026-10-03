@@ -11,10 +11,12 @@ vi.mock('../sources/index.ts', () => ({ createAdapters: () => [] }));
 
 import { CADENCE } from '../core/constants.ts';
 import type { TickReport } from '../core/tick.ts';
-import { RECONCILE_CRONS, TICK_CRON } from './crons.ts';
+import { RECONCILE_CRON, RECONCILE_HOURS_UTC, TICK_CRON } from './crons.ts';
 import worker, { type Env } from './worker.ts';
 
 const env = { DB: {} as D1Database, NEXUS_API_KEY: 'nexus-secret-key' } satisfies Env;
+
+const reconcileAt = (index: number): number => Date.UTC(2026, 9, 4, RECONCILE_HOURS_UTC[index]!, 1);
 
 function controller(cron: string, scheduledTime = 1_800_000_000_000): ScheduledController {
   return { cron, scheduledTime, type: 'scheduled', noRetry: () => {} } as ScheduledController;
@@ -26,11 +28,13 @@ function ctxWithSpy(): { ctx: ExecutionContext; pending: Promise<unknown>[] } {
   return { ctx, pending };
 }
 
-async function run(cron: string, e: Env = env): Promise<void> {
+async function run(cron: string, e: Env = env, scheduledTime?: number): Promise<void> {
   const { ctx, pending } = ctxWithSpy();
-  await worker.scheduled(controller(cron), e, ctx);
+  await worker.scheduled(controller(cron, scheduledTime), e, ctx);
   await Promise.all(pending);
 }
+
+const reconcile = (index = 0, e: Env = env): Promise<void> => run(RECONCILE_CRON, e, reconcileAt(index));
 
 const REPORT: TickReport = {
   sources: { 'thunderstore:valheim': { status: 'ok', events: 2 } },
@@ -102,18 +106,26 @@ describe('worker', () => {
     expect(runTick.mock.calls[2]![0]).not.toHaveProperty('alertWebhookUrl');
   });
 
-  it.each(RECONCILE_CRONS.map((cron, i) => [cron, i] as const))('routes %s to runReconcile(%i)', async (cron, index) => {
-    await run(cron);
+  it.each(RECONCILE_HOURS_UTC.map((hour, i) => [hour, i] as const))('routes the reconcile cron at %i:01 UTC to runReconcile(%i)', async (_hour, index) => {
+    await reconcile(index);
     expect(runTick).not.toHaveBeenCalled();
     expect(runReconcile).toHaveBeenCalledTimes(1);
-    expect(runReconcile.mock.calls[0]![1]).toBe(1_800_000_000_000);
+    expect(runReconcile.mock.calls[0]![1]).toBe(reconcileAt(index));
     expect(runReconcile.mock.calls[0]![2]).toBe(index);
   });
 
+  it('runs nothing and logs an error when the reconcile cron fires at an hour outside the list', async () => {
+    await run(RECONCILE_CRON, env, Date.UTC(2026, 9, 4, 8, 1));
+    expect(runTick).not.toHaveBeenCalled();
+    expect(runReconcile).not.toHaveBeenCalled();
+    expect(errors[0]).toContain('unknown cron trigger');
+    expect(logs).toHaveLength(0);
+  });
+
   it('passes the number of reconcile crons so slice hints advance once per run', async () => {
-    await run(RECONCILE_CRONS[0]);
-    expect(runReconcile.mock.calls[0]![0].reconcileRunsPerDay).toBe(RECONCILE_CRONS.length);
-    expect(RECONCILE_CRONS.length).toBe(CADENCE.reconcileRunsPerDay);
+    await reconcile(0);
+    expect(runReconcile.mock.calls[0]![0].reconcileRunsPerDay).toBe(RECONCILE_HOURS_UTC.length);
+    expect(RECONCILE_HOURS_UTC.length).toBe(CADENCE.reconcileRunsPerDay);
   });
 
   it('logs one structured line per tick run with the report and no secrets', async () => {
@@ -132,9 +144,9 @@ describe('worker', () => {
   });
 
   it('logs one structured line per reconcile run', async () => {
-    await run(RECONCILE_CRONS[2]);
+    await reconcile(2);
     expect(logs).toHaveLength(1);
-    expect(JSON.parse(logs[0]!)).toMatchObject({ event: 'run', cron: RECONCILE_CRONS[2] });
+    expect(JSON.parse(logs[0]!)).toMatchObject({ event: 'run', cron: RECONCILE_CRON });
   });
 
   it('logs no run line for an unknown cron or a failed run', async () => {
@@ -167,18 +179,16 @@ describe('worker', () => {
 
   it('swallows a non-Error rejection from reconcile', async () => {
     runReconcile.mockRejectedValue('string failure');
-    await expect(run(RECONCILE_CRONS[1])).resolves.toBeUndefined();
+    await expect(reconcile(1)).resolves.toBeUndefined();
     expect(errors[0]).toContain('string failure');
   });
 
-  it('keeps every reconcile cron off the tick grid so the two never run concurrently', () => {
+  it('keeps the reconcile cron off the tick grid so the two never run concurrently', () => {
     const tickMinutes = Number(/^\*\/(\d+) /.exec(TICK_CRON)![1]);
     expect(tickMinutes).toBe(CADENCE.tickMinutes);
-    for (const cron of RECONCILE_CRONS) {
-      const minute = cron.split(' ')[0]!;
-      expect(minute).toMatch(/^\d+$/);
-      expect(Number(minute) % tickMinutes).not.toBe(0);
-    }
+    const minute = RECONCILE_CRON.split(' ')[0]!;
+    expect(minute).toMatch(/^\d+$/);
+    expect(Number(minute) % tickMinutes).not.toBe(0);
   });
 
   describe('STORE_EMOJIS', () => {
@@ -187,7 +197,7 @@ describe('worker', () => {
 
     it('reaches the tick and reconcile deps from an object setting', async () => {
       await run(TICK_CRON, { ...env, STORE_EMOJIS: { thunderstore: TS, hexium: HX } });
-      await run(RECONCILE_CRONS[0], { ...env, STORE_EMOJIS: { thunderstore: TS } });
+      await reconcile(0, { ...env, STORE_EMOJIS: { thunderstore: TS } });
       expect(runTick.mock.calls[0]![0].storeEmojis).toEqual({ thunderstore: TS, hexium: HX });
       expect(runReconcile.mock.calls[0]![0].storeEmojis).toEqual({ thunderstore: TS });
       expect(warns).toEqual([]);
@@ -228,7 +238,7 @@ describe('worker', () => {
 
     it('reaches the tick and reconcile deps', async () => {
       await run(TICK_CRON, { ...env, RATATOSKR_EMOJI: RT });
-      await run(RECONCILE_CRONS[0], { ...env, RATATOSKR_EMOJI: RT });
+      await reconcile(0, { ...env, RATATOSKR_EMOJI: RT });
       expect(runTick.mock.calls[0]![0].ratatoskrEmoji).toBe(RT);
       expect(runReconcile.mock.calls[0]![0].ratatoskrEmoji).toBe(RT);
       expect(warns).toEqual([]);
@@ -254,7 +264,7 @@ describe('worker', () => {
   describe('LANGUAGE', () => {
     it('reaches the tick and reconcile deps', async () => {
       await run(TICK_CRON, { ...env, LANGUAGE: 'ru' });
-      await run(RECONCILE_CRONS[0], { ...env, LANGUAGE: 'ru' });
+      await reconcile(0, { ...env, LANGUAGE: 'ru' });
       expect(runTick.mock.calls[0]![0].locale).toBe('ru');
       expect(runReconcile.mock.calls[0]![0].locale).toBe('ru');
       expect(warns).toEqual([]);
@@ -284,7 +294,7 @@ describe('worker', () => {
       .filter((line) => !line.trim().startsWith('//'))
       .join('\n');
     const wrangler = JSON.parse(json) as Record<string, unknown> & { triggers: { crons: string[] } };
-    expect(wrangler.triggers.crons).toEqual([TICK_CRON, ...RECONCILE_CRONS]);
+    expect(wrangler.triggers.crons).toEqual([TICK_CRON, RECONCILE_CRON]);
     expect(wrangler.main).toBe('src/cloudflare/worker.ts');
     expect(wrangler.workers_dev).toBe(false);
     expect(wrangler.preview_urls).toBe(false);

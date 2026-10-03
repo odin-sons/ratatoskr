@@ -69,13 +69,14 @@ endpoints: [docs/api-notes.md](docs/api-notes.md).
 
 ### Quota footprint
 
-Estimated at 800 events/day and two guilds (from [docs/spec.md](docs/spec.md)):
+Measured on a live instance, extrapolated to a full UTC day (see [docs/spec.md](docs/spec.md)):
 
 | Resource | Free limit | Used | Share |
 |---|---|---|---|
 | Worker requests | 100,000/day | 288 | 0.3 % |
-| D1 rows written | 100,000/day | ~4,000 | 4 % |
-| D1 rows read | 5,000,000/day | ~50,000 | 1 % |
+| D1 rows written | 100,000/day | ~9,000 | 9 % |
+| D1 rows read | 5,000,000/day | ~220,000 | 4 % |
+| Cron triggers | 5/account | 2 | 40 % |
 | External subrequests | 50/invocation | <= 21 | n/a |
 
 The binding limit is the 10 ms CPU budget per invocation, not quotas.
@@ -452,7 +453,14 @@ Apply the schema to the local database once with
 cron handler; the deployed Worker has no such route.
 
 ```sh
-curl "http://localhost:8787/__scheduled?cron=*%2F5+*+*+*+*"
+curl "http://localhost:8787/cdn-cgi/local/scheduled?cron=*%2F5+*+*+*+*"
+```
+
+The reconcile trigger runs at 03:01, 04:01 and 05:01 UTC and picks its run from the hour of
+the scheduled time, so pass a time inside one of those minutes:
+
+```sh
+curl "http://localhost:8787/cdn-cgi/local/scheduled?cron=1+3%2C4%2C5+*+*+*&time=1791082860000"
 ```
 
 Other commands:
