@@ -2,7 +2,8 @@
 
 ## Shape
 
-A cron-triggered Worker with no inbound routes. One tick does:
+A Worker whose cron triggers do the polling and whose only inbound route is the
+signed Discord interactions endpoint (see "Bot"). One tick does:
 
 ```
 cron (*/5)
@@ -17,8 +18,9 @@ cron (*/5)
 The upstream poll is **global per deployment**, never per guild. One fetch feeds
 every subscribed channel. Only filtering and rendering are per subscription.
 
-Cross-deployment cache sharing is impossible without a public endpoint, and we
-do not want one. Each operator gets their own free-tier quota, which is used at
+Cross-deployment cache sharing would need a public endpoint that serves upstream
+data, and we do not want one; the interactions endpoint answers Discord only.
+Each operator gets their own free-tier quota, which is used at
 single-digit percentages anyway.
 
 ### Portability
@@ -225,12 +227,14 @@ CREATE INDEX idx_events_release ON events (release_key, created_at);  -- cross-s
 CREATE TABLE subscriptions (
   id TEXT PRIMARY KEY,
   guild_id TEXT NOT NULL,
-  webhook_url TEXT NOT NULL,
+  webhook_url TEXT NOT NULL,        -- nullable from migration 0005, see "Bot data"
   thread_id TEXT,                   -- forum post or channel thread, NULL for the parent channel
   filter TEXT NOT NULL,             -- JSON
   mode TEXT NOT NULL,               -- 'immediate' | 'digest'
   digest_interval_min INTEGER,
   enabled INTEGER NOT NULL DEFAULT 1
+  -- 0005 adds transport, channel_id, label, created_by, thread_per_mod and the
+  -- tables mod_threads and messages; see "Bot data"
 );
 
 CREATE TABLE outbox (
@@ -319,8 +323,9 @@ Enforcement points:
 ### Managing subscriptions
 
 Each subscription is one row, so several channels with independent filters are
-several rows. Two scripts print (never execute) the `pnpm run wrangler d1
-execute` commands:
+several rows. Bot subscriptions are managed with slash commands (see "Bot").
+For webhook subscriptions, two scripts print (never execute) the `pnpm run
+wrangler d1 execute` commands:
 
 - `pnpm add-subscription`: a plain `INSERT`, so a duplicate `--id` fails on the
   primary key instead of replacing a row. The filter comes from repeatable flags
@@ -339,8 +344,8 @@ execute` commands:
 delivers into an existing forum post or channel thread instead of the
 webhook's parent channel — a documented Discord webhook-execute parameter,
 applied by `DiscordSender.send` (`src/cloudflare/discord-sender.ts`) as a
-`thread_id` query parameter at send time. This project never creates a
-thread; pointing a subscription at one that was deleted just fails delivery
+`thread_id` query parameter at send time. Webhook subscriptions never create a
+thread (bot subscriptions do, see "Bot"); pointing a subscription at one that was deleted just fails delivery
 like any other bad destination.
 
 It is a column of its own, not folded into `webhook_url`: several
@@ -353,8 +358,180 @@ stays correct if that string never varies by destination.
 to an existing table ships as a numbered file in `migrations/`, applied once
 (`0001_outbox_delivered_at.sql` adds `outbox.delivered_at` and its indexes,
 `0002_package_download_url_and_downloads.sql` adds `packages.download_url` and `packages.downloads`,
-`0003_package_likes_and_website.sql` adds `packages.likes` and `packages.website_url`); a test
+`0003_package_likes_and_website.sql` adds `packages.likes` and `packages.website_url`,
+`0004_subscription_thread_id.sql` adds `subscriptions.thread_id`, and `0005` is described
+under "Bot data"); a test
 applies each migration over the previous schema shape and runs the current queries.
+
+## Bot
+
+From 2.0.0 the Worker is also a Discord bot: subscriptions are created and
+changed in Discord with slash commands, and a mod's updates can go into the
+mod's own thread. Polling, diffing, fan-out and the outbox work as described
+above; the delivery targets, the subscription store and the filter are what
+change.
+
+### Interactions endpoint
+
+`fetch` serves `POST /interactions` on the Worker's `workers.dev` hostname and
+answers 404 to every other path and method. The URL is entered once as the
+application's Interactions Endpoint URL in the Discord developer portal.
+`wrangler.jsonc` sets `workers_dev: true` for this (it was `false` before 2.0.0),
+which the agent rules allow since #37.
+
+1. Read `X-Signature-Ed25519`, `X-Signature-Timestamp` and the raw body bytes.
+2. Verify the Ed25519 signature over timestamp plus body against
+   `DISCORD_PUBLIC_KEY` with WebCrypto (`src/interactions/verify.ts`). A bad
+   signature gets 401 before the body is parsed and before any D1 access.
+3. A PING gets a PONG. Application commands, autocomplete requests and message
+   components go to the router in `src/interactions/`.
+
+Discord wants the first response within 3 seconds, and the interaction token
+stays valid for 15 minutes. Read-only commands answer inline. Commands that
+write to D1 answer with a deferred response (type 5, carrying the ephemeral flag,
+which cannot be added later) and finish with
+`PATCH /webhooks/{application id}/{token}/messages/@original` inside
+`ctx.waitUntil`. Autocomplete always answers inline from an indexed query and
+returns at most 25 choices. These limits live in `src/core/constants.ts` with
+their source.
+
+Guild and channel come only from the signed payload; no command option names
+another channel or guild. Discord runs a command inside a forum post, not in
+the forum's own view, so there the payload's `channel` is the post and
+`channel.parent_id` is the forum. The handler resolves the target channel from
+that: in a forum post it is the forum, so `/subscribe`, `/unsubscribe` and
+`/list` work from any post of the forum; in a text channel it is that channel;
+in a thread of a text channel the command is refused with a message to run it
+in the channel. Commands are registered with the Manage Channel
+default member permission, and the handler checks `member.permissions` again.
+Replies are ephemeral and use `LANGUAGE`.
+
+### Delivery targets
+
+`Sender.send` takes a target instead of a webhook URL:
+`{kind: 'webhook', url, threadId?}` or `{kind: 'bot', channelId, threadId?}`.
+A successful result carries `messageId` and `channelId` (bot targets only; the
+webhook path keeps `wait=false`). `BotSender` (`src/cloudflare/bot-sender.ts`)
+authenticates with `DISCORD_BOT_TOKEN` and makes three kinds of call:
+
+- `POST /channels/{id}/messages` for a message in a channel or thread;
+- `POST /channels/{id}/threads` on a forum channel: one request creates the post
+  and its starter message;
+- `POST /channels/{id}/messages/{id}/threads` to open a thread on a message.
+
+Errors map to the same results as `DiscordSender` (429 retryable with
+`retryAfterSeconds`, 5xx and network errors retryable, anything else
+non-retryable). A thread that was deleted or is archived and locked is reported
+as its own result, so the caller can reset the mapping. Every call counts
+against `SubrequestBudget`; opening a thread on a message and posting into it
+count as two. `drain.ts` rate-limits and groups failures per channel for bot
+targets and per `webhook_url` for webhook targets.
+
+### Bot data
+
+Migration `0005` rebuilds `subscriptions`, because `webhook_url` becomes
+nullable, and adds:
+
+| Column | Meaning |
+|---|---|
+| `transport` | `webhook` (existing rows) or `bot` |
+| `channel_id` | destination channel of a bot subscription (a forum channel or a text channel) |
+| `label` | name shown in `/list` and in the `subscription` autocomplete |
+| `created_by` | Discord user id of the creator |
+| `thread_per_mod` | write updates of a mod into the mod's thread (text channels) |
+
+Webhook subscriptions keep working unchanged. A bot subscription has no
+`webhook_url`.
+
+Two tables hold what the bot learns when it sends:
+
+- `mod_threads (channel_id, source, package_id, thread_id, anchor_message_id,
+  created_at)`, primary key `(channel_id, source, package_id)`: one thread per
+  mod and channel, shared by every subscription of that channel.
+- `messages (message_id, channel_id, source, package_id, event_id, created_at)`,
+  primary key `message_id`: written for immediate messages and for posts that
+  belong to one mod, read by `/info` and the "Mod info" message command. Rows
+  older than 7 days are purged in the reconcile cron, like delivered outbox rows;
+  the message command on an older message answers that the message is too old
+  and points to `/info`.
+
+Autocomplete reads `packages` through the indexes
+`packages(owner COLLATE NOCASE)` and `packages(name COLLATE NOCASE)`, by prefix
+only, and only for a prefix of at least 2 characters (a shorter one returns no
+choices), because a one-letter owner prefix can touch every package of that
+letter and the DISTINCT over owners scans index entries, not result rows. The `Store` port gains subscription create, update and delete (delete
+also removes undelivered outbox rows), listing by channel and by guild, the
+thread and message maps, and package and owner prefix search. Every method runs
+through the shared contract suite and the `EXPLAIN QUERY PLAN` check.
+
+### Commands
+
+A subscription is picked with the `subscription` option, which autocompletes
+over the subscriptions of the current channel (at most 25) and accepts a typed
+label.
+
+| Command | Effect |
+|---|---|
+| `/subscribe` | Creates a subscription in the current channel. Options: `owner`, `mod` (both autocomplete from `packages`), `category`, `source`, `kind` (`new`, `update`, both), `mode` (`immediate`, `digest`), `interval`, `label`, `thread_per_mod`. Refuses with a message when the bot lacks a permission it needs in the channel (`app_permissions` of the interaction): View Channel, Send Messages (shown as Create Posts in a forum), Embed Links, Send Messages in Threads and Create Public Threads. In a forum it is run inside any post of that forum. |
+| `/unsubscribe` | Removes the chosen subscription and its undelivered outbox rows. |
+| `/list` | Ephemeral list of the channel's subscriptions (`all:true`: the whole server) with label, mode, thread flag and a filter summary; pages when it does not fit. |
+| `/filter` | Edits any field of the chosen subscription's filter, and lists or removes single `alsoMatch` rules. |
+| `/include` | Widens: adds a mod, an author (stored as a bare-owner `packages` entry) or a category as an `alsoMatch` rule. |
+| `/exclude` | Narrows: adds to `excludePackages` or `excludeCategories`. |
+| `/info` | Shows a mod: name, author, latest version, store, links, downloads and likes where the source has them, and the last changelog. `mod` autocompletes; inside a mod's thread it is optional. |
+| Mod info (message command) | Same answer for the mod behind a message, found through `messages`. A digest message with several mods asks for `/info`. |
+
+`pnpm register-commands` registers the set with Discord. Everything a command
+changes is a plain row edit; queued outbox rows are re-checked against the
+current filter at delivery, so a change also applies to them.
+
+### Filter rules
+
+`alsoMatch` is a list of rules, each with `sources`, `packages` and
+`includeCategories`; the fields inside one rule combine with AND, as in the
+base filter. The filter described under "Subscription filter" is the base rule.
+An event passes when the base rule or any `alsoMatch` rule accepts it. `allowNsfw`, `kinds`, `excludePackages`, `excludeCategories`,
+`dedupAcrossStores` and `includeChangelog` are not part of a rule: they apply
+to every rule, and an exclusion always wins.
+
+`/include mod:X` adds `{packages: [X]}`, and `/include category:Tools` adds
+`{includeCategories: [Tools]}`. When the base rule already accepts everything,
+`/include` says there is nothing to widen. `parseFilter` and `FILTER_KEYS` in
+`scripts/validate-config.ts` accept `alsoMatch` and cap the number of rules. A
+category rule matches only what a source reports as a category or tag; a source
+that reports none never satisfies it, and the command warns about that.
+
+### Threads and forum posts
+
+Routing sits in `drain.ts`: before a row is sent, `mod_threads` decides the
+target, and after a successful send the thread and message maps are written
+with the rest of the batch.
+
+| Channel | Mode | Behavior |
+|---|---|---|
+| Forum | `immediate` | A `new` event creates a post for the mod, titled with the mod name (at most 100 characters). An `update` goes into that post; without one, it creates the post. |
+| Forum | `digest` | Each digest batch becomes one post titled from the locale and the batch time. The first message is the starter; the other messages of the batch are replies. `thread_per_mod` is ignored. |
+| Text channel | `thread_per_mod` | The first message about a mod is its anchor. The first `update` opens a thread on the anchor and posts there. Without an anchor, the update is a plain message and becomes the anchor. |
+| Text channel | otherwise | As before: plain messages. |
+
+A mod that should have both a thread and a digest line needs two
+subscriptions. A thread that is gone resets its `mod_threads` row, and the
+message goes out as a new post or message. Digest posts are not mapped.
+
+### Limits and budget
+
+- Caps on the number of subscriptions per channel, per server and per deployment
+  are constants in `src/core/constants.ts` (provisional: 10, 50 and 200) and are
+  enforced by `/subscribe`. Every subscription adds outbox rows for each
+  event it matches, so the caps protect the D1 write budget.
+- New writes per day: one `messages` row per immediate message, one
+  `mod_threads` row per mod and channel, and the subscription edits. They go
+  into `d1-budget.test.ts` next to the existing guards.
+- A command costs a handful of D1 rows. Autocomplete costs one indexed prefix
+  query per keystroke, for a prefix of at least 2 characters, with the worst
+  case of rows read bounded in `d1-budget.test.ts`.
+- The fetch handler stays inside the 10 ms CPU budget: signature check, one or
+  two D1 calls, one JSON response.
 
 ## Volume
 
@@ -370,7 +547,7 @@ Quota usage at 800 events/day, two guilds:
 
 | Resource | Free limit | Used | Share |
 |---|---|---|---|
-| Worker requests | 100,000/day | 288 | 0.3 % |
+| Worker requests (cron only) | 100,000/day | 288 | 0.3 % |
 | D1 rows written | 100,000/day | ~9,000 | 9 % |
 | D1 rows read | 5,000,000/day | ~220,000 | 4 % |
 | Cron triggers | 5/account | 2 | 40 % |
@@ -380,7 +557,11 @@ D1 figures are measured on the live database (2026-10-02, extrapolated to a full
 dashboard and `pnpm run wrangler d1 insights <database name>`). About 83 % of the reads are one query,
 the Hexium known-versions read behind each index scan.
 
-Quotas are not the constraint. CPU time and Discord readability are.
+Quotas are not the constraint. CPU time and Discord readability are. From 2.0.0
+interaction requests count against the same 100,000 requests a day: a command is
+one request and autocomplete is one per keystroke, so 1,000 keystrokes a day are
+1 % of the limit. The minimum prefix length (see "Bot data") bounds the D1 reads
+of each autocomplete request, and `d1-budget.test.ts` covers the worst case.
 
 Subrequests are the exception that needs an explicit guard. Polls, changelog
 fetches and Discord sends share one per-invocation `SubrequestBudget` (limit 48:
@@ -388,7 +569,9 @@ the platform's 50 minus a safety margin). Adapters receive a counting `fetch`
 that rejects with a dedicated error once the budget is spent (adapters already
 treat a failed fetch as a skipped poll or a missing changelog). Priority: polls
 first, then Discord sends, then changelogs, which may only spend what leaves
-24 subrequests (the per-tick send cap) unspent. Every send spends one, and a
+24 subrequests (the per-tick send cap) unspent. Every send spends at least one
+(a thread opened on a message and the post into it spend two; the cap counts
+subrequests, not messages), and a
 digest never renders more messages than the budget still allows. Whatever does
 not fit is deferred to the next tick, not lost, except changelog excerpts, which
 are dropped (`changelogSkipped`).
@@ -830,8 +1013,10 @@ run. `pnpm run usage [--days N]` prints the same reading from the operator's mac
 
 ## Configuration
 
-No inbound endpoint means no slash commands. Configuration is `wrangler secret`
-and `wrangler d1 execute`. Accepted trade-off for a zero-surface deployment.
+Subscriptions are managed with slash commands (see "Bot"). Deployment settings
+are `wrangler secret` and `wrangler d1 execute`. The bot needs three secrets:
+`DISCORD_APP_ID`, `DISCORD_PUBLIC_KEY` and `DISCORD_BOT_TOKEN`. `pnpm register-commands`
+registers the commands with Discord and reads the same values from `.env`.
 
 Optional deploy-time names `WORKER_NAME` and `D1_DATABASE_NAME` (default `ratatoskr`)
 let several instances share one Cloudflare account; `scripts/wrangler-config.ts` writes them into the
@@ -880,6 +1065,12 @@ Still open:
 2. Measured CPU per tick — needs a real deployment to confirm the 10 ms budget.
 3. Nexus response shapes are unverified (no API key during development).
 4. Persisting `alsoOn` for a release already delivered on another store.
+5. Bot: a digest batch is created as one post, but its remaining messages can be
+   delivered on a later tick (progressive delivery), and the post may have been
+   closed or archived by then. Reopening it needs a permission the bot may lack;
+   the fallback is a new post.
+6. Bot: whether a forum post accepts a Components V2 starter message. Confirm
+   against the live API and record the result in `docs/api-notes.md`.
 
 ### Watch list
 

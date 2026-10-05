@@ -8,9 +8,10 @@
 [![Cloudflare Workers free plan](https://img.shields.io/badge/Cloudflare%20Workers-free%20plan-f38020)](docs/spec.md)
 
 A Discord bot that reports new and updated game mods from Thunderstore, Hexium
-and Nexus Mods. It runs entirely on the Cloudflare Workers free plan, triggered
-by cron, with no inbound HTTP routes. Each operator deploys their own instance
-for their own game (primary target: Valheim).
+and Nexus Mods. It runs entirely on the Cloudflare Workers free plan. Cron
+triggers poll the sources, and slash commands arrive through one signed Discord
+interactions endpoint. Each operator deploys their own instance for their own
+game (primary target: Valheim).
 
 Named after the squirrel that carries messages up and down Yggdrasil.
 
@@ -46,7 +47,10 @@ Named after the squirrel that carries messages up and down Yggdrasil.
 
 Every 5 minutes a cron trigger polls the enabled sources once per deployment
 (never per guild), detects new packages and version changes, and delivers them
-to Discord webhooks according to each subscription's filter. Delivery is either
+to Discord according to each subscription's filter. Subscriptions are managed
+with slash commands (`/subscribe`, `/unsubscribe`, `/list`, `/filter`,
+`/include`, `/exclude`, `/info`); see "Bot" in [docs/spec.md](docs/spec.md).
+Delivery is either
 `immediate` or a periodic `digest` (default every 30 minutes). Digests never
 drop a mod: detail is reduced before messages are split.
 
@@ -73,7 +77,7 @@ Measured on a live instance, extrapolated to a full UTC day (see [docs/spec.md](
 
 | Resource | Free limit | Used | Share |
 |---|---|---|---|
-| Worker requests | 100,000/day | 288 | 0.3 % |
+| Worker requests (cron only; slash commands add one per command and one per autocomplete keystroke) | 100,000/day | 288 | 0.3 % |
 | D1 rows written | 100,000/day | ~9,000 | 9 % |
 | D1 rows read | 5,000,000/day | ~220,000 | 4 % |
 | Cron triggers | 5/account | 2 | 40 % |
@@ -129,6 +133,10 @@ Until then, use the manual steps below.
 5. Create a Discord webhook (channel settings, Integrations, Webhooks) and add
    a subscription. The script prints a `pnpm run wrangler d1 execute` command;
    it does not run it. Review the output, then run it.
+
+   > **Deprecated.** Webhook subscriptions, `pnpm add-subscription` and
+   > `pnpm subscriptions` are deprecated as of 2.0.0 and will be removed in
+   > 3.0.0. Manage subscriptions with the bot's slash commands instead.
 
    ```sh
    # put the webhook URL into .env (git-ignored, from step 2)
