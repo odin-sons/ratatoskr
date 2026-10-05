@@ -16,9 +16,11 @@ The maintainer aims to acknowledge a report within 7 days, then says whether it 
 
 ## What counts
 
-The bot holds three kinds of secret: Discord webhook URLs (anyone holding one can post to that channel), the optional Nexus API key, and the Cloudflare credentials used by deployment. In scope:
+The bot holds four kinds of secret: the Discord bot token (anyone holding it can act as the bot in every server it joined), Discord webhook URLs (anyone holding one can post to that channel), the optional Nexus API key, and the Cloudflare credentials used by deployment. It also serves one public route, `POST /interactions`, which accepts only requests signed with the application's Discord public key. In scope:
 
-- a way to make the bot or its logs reveal a webhook URL, an API key or a token;
+- a way to make the bot or its logs reveal a bot token, a webhook URL, an API key or another token;
+- a way to make `POST /interactions` act on a request that does not carry a valid Discord signature, or to reach D1 before the signature is checked;
+- a way for a user without the Manage Channel permission to create, change or remove a subscription, or to change one in a channel or server other than the one the command came from;
 - a way to make the bot mention `@everyone`, `@here` or a role, or to post content that bypasses its sanitising of upstream text (mod names, descriptions, changelogs, links);
 - a way to make the bot request URLs the operator did not configure;
 - SQL or shell injection through the scripts (`add-subscription`, `subscriptions`, `deploy`, `wrangler`);
@@ -28,4 +30,4 @@ Out of scope: vulnerabilities in Discord, Cloudflare, Thunderstore, Hexium or Ne
 
 ## If a secret leaks
 
-If a webhook URL or token appears in an issue, a log, a commit or a screenshot, treat it as compromised: delete the webhook in Discord and create a new one, or revoke and recreate the token, before you do anything else. Removing the text from the issue afterwards does not make the old value safe.
+If a webhook URL or token appears in an issue, a log, a commit or a screenshot, treat it as compromised: delete the webhook in Discord and create a new one, or revoke and recreate the token (for the bot token: reset it in the Discord developer portal and update the Worker secret), before you do anything else. Removing the text from the issue afterwards does not make the old value safe.
