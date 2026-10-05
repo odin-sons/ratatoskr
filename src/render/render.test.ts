@@ -290,8 +290,7 @@ describe('injection', () => {
     expect(unescapedCount(line, '[')).toBe(1);
     expect(unescapedCount(line, ']')).toBe(1);
     expect(unescapedCount(line, '(')).toBe(1);
-    expect(unescapedCount(line, ')')).toBe(1);
-    expect(line).toContain('evil\\]\\(https://evil.example\\)');
+    expect(line).toContain('evil\\]\\(https://evil.example)');
     expect(unescapedCount(line, '|')).toBe(0);
   });
 
@@ -486,7 +485,7 @@ describe('changelog field', () => {
 });
 
 describe('escapeTruncate', () => {
-  const SPECIAL = new Set(['\\', '*', '~', '|', '`', '[', ']', '(', ')', '<', '>']);
+  const SPECIAL = new Set(['\\', '*', '~', '|', '`', '[', ']', '<', '>']);
   const isWord = (ch: string | undefined): boolean => ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
 
   function reference(text: string, max: number): string {
@@ -501,7 +500,7 @@ describe('escapeTruncate', () => {
       const listDot = ch === '.' && col > 0 && onlyDigits && (next === undefined || next === ' ' || next === '\n');
       // An intraword underscore (word characters on both sides) never starts emphasis in Discord's Markdown, so it is left as-is.
       const underscore = ch === '_' && !(isWord(chars[i - 1]) && isWord(next));
-      const escape = SPECIAL.has(ch) || underscore || (col === 0 && (ch === '-' || ch === '#')) || listDot;
+      const escape = SPECIAL.has(ch) || (ch === '(' && chars[i - 1] === ']') || underscore || (col === 0 && (ch === '-' || ch === '#')) || listDot;
       const piece = escape ? `\\${ch}` : ch;
       if (len + piece.length > max) {
         while (pieces.length > 0 && len + 1 > max) len -= pieces.pop()!.length;
@@ -549,6 +548,11 @@ describe('escapeTruncate', () => {
     expect(escapeTruncate('foo _bar_ baz', 100)).toBe('foo \\_bar\\_ baz');
     expect(escapeTruncate('a_1', 100)).toBe('a_1');
     expect(escapeTruncate('日本_語', 100)).toBe('日本_語');
+  });
+
+  it('leaves parentheses raw, except one that follows a closing bracket', () => {
+    expect(inline('Vikings for Hire (Companions Traders and Workers)', 100)).toBe('Vikings for Hire (Companions Traders and Workers)');
+    expect(inline('a](b)', 100)).toBe('a\\]\\(b)');
   });
 
   it('keeps a lone run of underscores raw in a title, and escapes it when a second run could close an underline', () => {

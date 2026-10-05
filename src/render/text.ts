@@ -2,7 +2,7 @@
 import { neutralizeMentions, stripUnsafeChars } from '../text/sanitize.ts';
 import { CAPS } from './layout.ts';
 
-const SPECIAL = /[\\*~|`[\]()<>]/g;
+const SPECIAL = /[\\*~|`[\]<>]|(?<=\])\(/g;
 /** An underscore that is not flanked by a word character on both sides: Discord never reads an intraword `_` as emphasis. */
 const UNDERSCORE = /(?<![\p{L}\p{N}])_|_(?![\p{L}\p{N}])/gu;
 const LINE_START = /(^|\n)(?:([-#])|(\d+)\.(?![^ \n]))/g;

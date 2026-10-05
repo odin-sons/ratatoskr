@@ -297,7 +297,8 @@ describe('detailed embed layout (digest)', () => {
       expect(heading.startsWith('## [')).toBe(true);
       expect(heading.endsWith(`](${PAGE})`)).toBe(true);
       const text = heading.slice(4, heading.length - `](${PAGE})`.length);
-      for (const ch of ['[', ']', '(', ')', '|', '<']) expect(unescapedCount(text, ch), ch).toBe(0);
+      for (const ch of ['[', ']', '|', '<']) expect(unescapedCount(text, ch), ch).toBe(0);
+      expect(text).not.toMatch(/(?<!\\)\]\(/);
       expect(all[1]!.startsWith(`${KIND_EMOJI.update} Updated by `)).toBe(true);
       expect(all[2]).toBe('');
       expect(all).toHaveLength(4);

@@ -333,7 +333,8 @@ describe('injection', () => {
     expect(title.startsWith('## [')).toBe(true);
     expect(title.endsWith(`](${PAGE})`)).toBe(true);
     const text = title.slice(4, title.length - `](${PAGE})`.length);
-    for (const ch of ['[', ']', '(', ')', '|', '<']) expect(unescapedCount(text, ch), ch).toBe(0);
+    for (const ch of ['[', ']', '|', '<']) expect(unescapedCount(text, ch), ch).toBe(0);
+    expect(text).not.toMatch(/(?<!\\)\]\(/);
     expect(lines[1]!.startsWith(`${KIND_EMOJI.update} Updated by `)).toBe(true);
     expect(lines[2]).toBe('');
     expect(lines).toHaveLength(4);
