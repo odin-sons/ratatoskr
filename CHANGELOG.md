@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-06
+
+### Fixed
+
+- Mod names with parentheses, such as "Vikings for Hire (Companions Traders and
+  Workers)", no longer show a backslash before each parenthesis in the Discord
+  title. A parenthesis is still escaped right after a closing bracket, so a name
+  cannot form a link destination.
+
 ## [1.3.0] - 2026-10-03
 
 ### Added

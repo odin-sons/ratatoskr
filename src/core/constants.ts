@@ -193,7 +193,7 @@ export const MAX_SCAN_BYTES = 6 * 1024 * 1024;
 
 export const PROJECT = {
   name: 'ratatoskr',
-  version: '1.3.0',
+  version: '1.3.1',
   repoUrl: 'https://github.com/odin-sons/ratatoskr',
   license: 'AGPL-3.0-or-later',
 } as const;
