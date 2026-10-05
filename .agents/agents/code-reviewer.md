@@ -28,7 +28,8 @@ commit anything, and never run destructive commands.
 - 50 subrequests and 6 connections per invocation: every fetch loop is capped and
   defers the remainder.
 - Cursors advance only inside the commit that stores the events they cover.
-- No runtime dependencies, no `eval` / `new Function`, no inbound routes.
+- No runtime dependencies, no `eval` / `new Function`, no inbound route other
+  than `POST /interactions`, which verifies the signature before touching D1.
 - Core stays platform-agnostic; Cloudflare specifics only in `src/cloudflare/`.
 - External limits (Discord, Cloudflare, upstream) come from `src/core/constants.ts`.
 - NSFW content is excluded by default and fails closed when a flag is unknown.

@@ -1,8 +1,8 @@
 # ratatoskr
 
 Discord bot that reports new and updated game mods from Thunderstore, Hexium and
-Nexus Mods. Runs entirely on Cloudflare Workers free tier, cron-triggered, with
-no inbound HTTP routes.
+Nexus Mods. Runs entirely on Cloudflare Workers free tier. Cron triggers do the
+polling; the only inbound route is the signed Discord interactions endpoint.
 
 Named after the squirrel that carries messages up and down Yggdrasil.
 
@@ -40,8 +40,12 @@ These are not preferences. Violating them breaks the deployment target.
 - No `eval` / `new Function` — forbidden in the Workers runtime. This rules out
   runtime-compiled template engines.
 - Zero runtime dependencies. Everything via `fetch`, WebCrypto, D1 bindings.
-  Build-time dev dependencies are fine.
-- No inbound routes. No `workers.dev` subdomain. No custom domain. Cron only.
+  Build-time dev dependencies are fine. Discord's Ed25519 request signature is
+  checked with WebCrypto.
+- One inbound route: `POST /interactions`, the Discord interactions endpoint,
+  served from the `workers.dev` subdomain. It verifies the signature before it
+  touches D1 or parses the body, and answers 404 to every other path and method.
+  No other route, no custom domain. Everything else is cron.
 - No Cloudflare Queues — a D1 outbox table covers our volume and keeps a quota
   free.
 - Budget every tick: cap listing fetches, changelog fetches and Discord sends
@@ -128,7 +132,7 @@ wrangler d1 execute <db> --file=./schema.sql
 ## What not to do
 
 - Do not add a runtime dependency without asking.
-- Do not ship any API key in the repository.
+- Do not ship any API key, bot token or webhook URL in the repository.
 - Do not proxy or mirror mod downloads.
 - Do not reproduce upstream content in full — excerpt and link.
 - Do not copy code or type definitions from `thunderstore-ui`; that repository
