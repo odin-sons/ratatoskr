@@ -170,7 +170,22 @@ export const DISCORD_INTERACTION = {
   descriptionMax: 100,
   choiceNameMax: 100,
   choiceValueMax: 100,
+  optionsPerCommandMax: 25,
+  choicesPerOptionMax: 25,
+  /** `default_member_permissions` of a command that needs Manage Channel (1 << 4). */
+  manageChannelPermissions: '16',
 } as const;
+
+/** Subscriptions a channel (a text channel or forum, threads under it included), a server and the whole deployment may hold. Source: product limits, docs/spec.md "Commands". */
+export const MAX_SUBSCRIPTIONS_PER_CHANNEL = 10;
+export const MAX_SUBSCRIPTIONS_PER_GUILD = 50;
+export const MAX_SUBSCRIPTIONS_TOTAL = 200;
+
+/** Longest `label` of a bot subscription. */
+export const SUBSCRIPTION_LABEL_MAX = 100;
+
+/** Longest `owner`, `mod` and `category` option text. */
+export const SUBSCRIBE_TEXT_OPTION_MAX = 100;
 
 /** Largest interaction body the endpoint reads; anything bigger is rejected before verification. Not a Discord limit: payloads are a few KB. */
 export const INTERACTION_BODY_MAX_BYTES = 256 * 1024;

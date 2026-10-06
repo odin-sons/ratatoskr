@@ -152,6 +152,10 @@ export class MemoryStore implements Store {
     return [...this.subscriptions.values()].filter((s) => s.guildId === guildId).map((s) => ({ ...s }));
   }
 
+  async countSubscriptions(): Promise<number> {
+    return this.subscriptions.size;
+  }
+
   async getModThread(channelId: string, source: SourceId, packageId: string): Promise<ModThread | null> {
     const thread = this.modThreads.get(threadKey(channelId, source, packageId));
     return thread ? { ...thread } : null;
@@ -193,6 +197,10 @@ export class MemoryStore implements Store {
       .sort((a, b) => compareFolded(a.name, b.name))
       .slice(0, AUTOCOMPLETE_MAX_RESULTS)
       .map((p) => ({ source: p.source, packageId: p.packageId, owner: p.owner, name: p.name }));
+  }
+
+  async packageExists(packageId: string, sources: SourceId[]): Promise<boolean> {
+    return sources.some((source) => this.packages.has(pkgKey(source, packageId)));
   }
 
   async searchOwners(prefix: string): Promise<string[]> {

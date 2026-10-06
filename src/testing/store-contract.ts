@@ -837,6 +837,25 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
       });
     });
 
+    describe('countSubscriptions', () => {
+      const botSub = (over: Partial<Subscription>): Subscription => ({ transport: 'bot', channelId: 'chan-1', guildId: 'guild-1', filter: {}, mode: 'immediate', digestIntervalMin: 30, enabled: true, ...over }) as Subscription;
+      it('counts every subscription of every transport, disabled and paused ones included', async () => {
+        const { store } = await setup([makeSubscription({ id: 'hook' })]);
+        expect(await store.countSubscriptions()).toBe(1);
+        await store.createSubscription(botSub({ id: 'a' }));
+        await store.createSubscription(botSub({ id: 'b', enabled: false }));
+        await store.createSubscription(botSub({ id: 'c', pausedUntil: Number.MAX_SAFE_INTEGER, guildId: 'guild-2' }));
+        expect(await store.countSubscriptions()).toBe(4);
+        await store.deleteSubscription('a');
+        expect(await store.countSubscriptions()).toBe(3);
+      });
+
+      it('is zero without subscriptions', async () => {
+        const { store } = await setup([]);
+        expect(await store.countSubscriptions()).toBe(0);
+      });
+    });
+
     describe('takeDue with bot subscriptions', () => {
       it('never returns rows of a bot subscription, so they cannot occupy the limit', async () => {
         const { store } = await setup();
@@ -958,6 +977,19 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
         }
         for (const [source, list] of bySource) await store.commit({ source, packages: list, events: [], outbox: [], state: { ...state, id: source } });
       }
+
+      it('knows a package by its exact id within the given sources only', async () => {
+        const { store } = await setup();
+        await seed(store, [{ owner: 'Bob', name: 'Warfare' }, { owner: 'Ann', name: 'Axe', source: 'hexium:valheim' }]);
+        const id = makeSnapshot({ owner: 'Bob', name: 'Warfare' }).packageId;
+        expect(await store.packageExists(id, [SOURCE])).toBe(true);
+        expect(await store.packageExists(id, ['hexium:valheim', SOURCE])).toBe(true);
+        expect(await store.packageExists(id, ['hexium:valheim'])).toBe(false);
+        expect(await store.packageExists(id, [])).toBe(false);
+        expect(await store.packageExists(id.slice(0, -1), [SOURCE])).toBe(false);
+        expect(await store.packageExists(id.toLowerCase(), [SOURCE])).toBe(id === id.toLowerCase());
+        expect(await store.packageExists('Bob', [SOURCE])).toBe(false);
+      });
 
       it('returns nothing for a prefix shorter than the minimum', async () => {
         const { store } = await setup();

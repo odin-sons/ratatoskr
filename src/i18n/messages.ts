@@ -36,6 +36,42 @@ export interface Messages {
   unsupportedChannel: string;
   /** `permissions` is the already joined list of permission names. */
   botPermissionsMissing(permissions: string): string;
+  /** `/subscribe` refusals. */
+  subscribeNeedsFilter: string;
+  subscribeThreadPerModDigest: string;
+  subscribeIntervalImmediate: string;
+  sourceNotConfigured(source: string): string;
+  /** `details` is the joined list of validation problems. */
+  invalidOptions(details: string): string;
+  subscribeLimitChannel(max: number): string;
+  subscribeLimitGuild(max: number): string;
+  subscribeLimitTotal(max: number): string;
+  subscribeOwnerAndMod: string;
+  modNotFound(mod: string): string;
+  subscribeDuplicate: string;
+  /** `where` is a channel mention, `details` the mode and the filter summary. */
+  subscribed(label: string, where: string, details: string): string;
+  subscriptionId(id: string): string;
+  /** `/unsubscribe`. */
+  unsubscribed(label: string): string;
+  subscriptionNotFound: string;
+  /** `/list`. */
+  listEmpty: string;
+  listChannelTitle: string;
+  listGuildTitle: string;
+  listWebhook: string;
+  listPrevious: string;
+  listNext: string;
+  /** Pieces of a subscription line. */
+  modeImmediate: string;
+  modeDigest(minutes: number): string;
+  threadPerMod: string;
+  filterEverything: string;
+  filterPackages(list: string): string;
+  filterCategories(list: string): string;
+  filterSources(list: string): string;
+  filterOnlyNew: string;
+  filterOnlyUpdates: string;
   /** B, KB, MB, GB, TB. */
   byteUnits: readonly [string, string, string, string, string];
 }
