@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
 import { DISCORD_INTERACTION } from '../core/constants.ts';
-import { COMMAND_DEFINITIONS, OPTION_TYPE, type CommandOptionDefinition } from './definitions.ts';
+import { COMMAND_DEFINITIONS, OPTION_TYPE, type ChatCommandDefinition, type CommandOptionDefinition } from './definitions.ts';
 import { createCommandRegistry } from './commands.ts';
 import { MemoryStore } from '../testing/memory-store.ts';
 
+const CHAT_COMMANDS = COMMAND_DEFINITIONS.filter((c): c is ChatCommandDefinition => c.type === 1);
 const NAME = /^[\p{Ll}\p{Lo}\p{N}_-]{1,32}$/u;
 
 describe('command definitions', () => {
-  it('describe subscribe, unsubscribe, pause, continue and list', () => {
-    expect(COMMAND_DEFINITIONS.map((c) => c.name)).toEqual(['subscribe', 'unsubscribe', 'pause', 'continue', 'list']);
+  it('describe subscribe, unsubscribe, pause, continue, list, info and the Mod info message command', () => {
+    expect(COMMAND_DEFINITIONS.map((c) => c.name)).toEqual(['subscribe', 'unsubscribe', 'pause', 'continue', 'list', 'info', 'Mod info']);
   });
 
   it('are served by the registry: every command, and every autocomplete option, has a handler', () => {
@@ -21,7 +22,7 @@ describe('command definitions', () => {
     expect(registry.components.has('list')).toBe(true);
   });
 
-  it.each(COMMAND_DEFINITIONS.map((c) => [c.name, c] as const))('%s keeps to the Discord limits', (_name, command) => {
+  it.each(CHAT_COMMANDS.map((c) => [c.name, c] as const))('%s keeps to the Discord limits', (_name, command) => {
     expect(command.name).toMatch(NAME);
     expect(command.name).toBe(command.name.toLowerCase());
     expect(command.description.length).toBeGreaterThanOrEqual(1);
@@ -42,11 +43,25 @@ describe('command definitions', () => {
     }
   });
 
-  it('are Manage Channel only and never offered in direct messages', () => {
+  it('restrict the commands that change subscriptions to Manage Channel and leave the read-only ones open', () => {
+    const open = ['info', 'Mod info'];
     for (const command of COMMAND_DEFINITIONS) {
-      expect(command.default_member_permissions).toBe('16');
-      expect(command.dm_permission).toBe(false);
+      expect(command.default_member_permissions, command.name).toBe(open.includes(command.name) ? undefined : '16');
+      expect(Object.hasOwn(command, 'default_member_permissions'), command.name).toBe(!open.includes(command.name));
     }
+  });
+
+  it('are never offered in direct messages', () => {
+    for (const command of COMMAND_DEFINITIONS) expect(command.dm_permission).toBe(false);
+  });
+
+  it('give info an optional autocompleting mod and register Mod info as a nameable message command', () => {
+    const info = CHAT_COMMANDS.find((c) => c.name === 'info')!;
+    expect(info.options).toEqual([expect.objectContaining({ name: 'mod', autocomplete: true, type: OPTION_TYPE.string })]);
+    expect(info.options![0]!.required).toBeUndefined();
+    const modInfo = COMMAND_DEFINITIONS.find((c) => c.name === 'Mod info')!;
+    expect(modInfo).toEqual({ name: 'Mod info', description: '', type: 3, dm_permission: false });
+    expect(modInfo.name.length).toBeLessThanOrEqual(DISCORD_INTERACTION.commandNameMax);
   });
 
   it('give subscribe the documented options, with autocomplete on owner and mod and fixed choices on source, kind and mode', () => {
@@ -79,7 +94,7 @@ describe('command definitions', () => {
   });
 
   it('never combine autocomplete with fixed choices, which Discord rejects', () => {
-    for (const command of COMMAND_DEFINITIONS) for (const option of command.options ?? []) expect(option.autocomplete && option.choices, option.name).toBeFalsy();
+    for (const command of CHAT_COMMANDS) for (const option of command.options ?? []) expect(option.autocomplete && option.choices, option.name).toBeFalsy();
   });
 });
 

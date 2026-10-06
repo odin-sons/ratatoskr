@@ -222,8 +222,12 @@ const SQL_PUT_MOD_THREAD = `INSERT INTO mod_threads (${MOD_THREAD_COLUMNS.join('
 const SQL_DELETE_MOD_THREAD = 'DELETE FROM mod_threads WHERE channel_id = ? AND source = ? AND package_id = ?';
 const SQL_GET_MESSAGE = `SELECT ${MESSAGE_COLUMNS.join(', ')} FROM messages WHERE message_id = ?`;
 const SQL_PUT_MESSAGE = `INSERT INTO messages (${MESSAGE_COLUMNS.join(', ')}) VALUES (${placeholders(MESSAGE_COLUMNS.length)}) ON CONFLICT (message_id) DO UPDATE SET channel_id = excluded.channel_id, source = excluded.source, package_id = excluded.package_id, event_id = excluded.event_id, created_at = excluded.created_at`;
+const SQL_GET_MOD_THREAD_BY_THREAD = `SELECT ${MOD_THREAD_COLUMNS.join(', ')} FROM mod_threads WHERE channel_id = ? AND thread_id = ? LIMIT 1`;
+const sqlPackagesById = (sources: number): string => `SELECT ${PACKAGE_READ_COLUMNS.join(', ')} FROM packages WHERE source IN (${placeholders(sources)}) AND package_id = ?`;
+const SQL_EVENT_BY_ID = `SELECT ${EVENT_JOIN_SELECT} FROM events e ${EVENT_JOIN_PACKAGES} WHERE e.id = ?`;
 const SQL_PURGE_MESSAGES = 'DELETE FROM messages WHERE message_id IN (SELECT message_id FROM messages WHERE created_at < ? LIMIT ?)';
 const SQL_SEARCH_PACKAGES = 'SELECT source, package_id, owner, name FROM packages WHERE name COLLATE NOCASE >= ? AND name COLLATE NOCASE < ? ORDER BY name COLLATE NOCASE LIMIT ?';
+const SQL_SEARCH_PACKAGES_SFW = 'SELECT source, package_id, owner, name FROM packages WHERE name COLLATE NOCASE >= ? AND name COLLATE NOCASE < ? AND is_nsfw = 0 ORDER BY name COLLATE NOCASE LIMIT ?';
 const sqlPackageExists = (sources: number): string => `SELECT 1 AS found FROM packages WHERE source IN (${placeholders(sources)}) AND package_id = ? LIMIT 1`;
 const SQL_SEARCH_OWNERS = 'SELECT owner FROM packages WHERE owner COLLATE NOCASE >= ? AND owner COLLATE NOCASE < ? ORDER BY owner COLLATE NOCASE LIMIT ?';
 /** Above every UTF-8 sequence, so `prefix + this` bounds the range of names starting with `prefix`. */
@@ -448,15 +452,12 @@ export class D1Store implements Store {
 
   async getModThread(channelId: string, source: SourceId, packageId: string): Promise<ModThread | null> {
     const row = await this.db.prepare(SQL_GET_MOD_THREAD).bind(channelId, source, packageId).first<ModThreadCols>();
-    if (row === null) return null;
-    return {
-      channelId: row.channel_id,
-      source: row.source,
-      packageId: row.package_id,
-      threadId: row.thread_id,
-      anchorMessageId: row.anchor_message_id,
-      createdAt: row.created_at,
-    };
+    return row === null ? null : mapModThread(row);
+  }
+
+  async getModThreadByThreadId(channelId: string, threadId: string): Promise<ModThread | null> {
+    const row = await this.db.prepare(SQL_GET_MOD_THREAD_BY_THREAD).bind(channelId, threadId).first<ModThreadCols>();
+    return row === null ? null : mapModThread(row);
   }
 
   async putModThread(thread: ModThread): Promise<void> {
@@ -495,10 +496,10 @@ export class D1Store implements Store {
     return result.meta.changes;
   }
 
-  async searchPackages(prefix: string): Promise<PackageMatch[]> {
+  async searchPackages(prefix: string, options: { sfwOnly?: boolean } = {}): Promise<PackageMatch[]> {
     if (prefix.length < AUTOCOMPLETE_MIN_PREFIX) return [];
     const { results } = await this.db
-      .prepare(SQL_SEARCH_PACKAGES)
+      .prepare(options.sfwOnly === true ? SQL_SEARCH_PACKAGES_SFW : SQL_SEARCH_PACKAGES)
       .bind(prefix, prefix + PREFIX_UPPER_BOUND, AUTOCOMPLETE_MAX_RESULTS)
       .all<{ source: string; package_id: string; owner: string; name: string }>();
     return results.map((r) => ({ source: r.source, packageId: r.package_id, owner: r.owner, name: r.name }));
@@ -507,6 +508,17 @@ export class D1Store implements Store {
   async packageExists(packageId: string, sources: SourceId[]): Promise<boolean> {
     if (sources.length === 0) return false;
     return (await this.db.prepare(sqlPackageExists(sources.length)).bind(...sources, packageId).first()) !== null;
+  }
+
+  async getPackagesById(packageId: string, sources: SourceId[]): Promise<PackageSnapshot[]> {
+    if (sources.length === 0) return [];
+    const { results } = await this.db.prepare(sqlPackagesById(sources.length)).bind(...sources, packageId).all<PackageCols>();
+    return results.map(mapPackage).sort((a, b) => sources.indexOf(a.source) - sources.indexOf(b.source));
+  }
+
+  async getEventById(eventId: string): Promise<ModEvent | null> {
+    const row = await this.db.prepare(SQL_EVENT_BY_ID).bind(eventId).first<EventJoinRow>();
+    return row === null ? null : mapEvent(row);
   }
 
   async searchOwners(prefix: string): Promise<string[]> {
@@ -791,6 +803,40 @@ function parseCategories(raw: string): string[] {
   } catch {
     return [];
   }
+}
+
+function mapModThread(row: ModThreadCols): ModThread {
+  return {
+    channelId: row.channel_id,
+    source: row.source,
+    packageId: row.package_id,
+    threadId: row.thread_id,
+    anchorMessageId: row.anchor_message_id,
+    createdAt: row.created_at,
+  };
+}
+
+function mapPackage(row: PackageCols): PackageSnapshot {
+  return {
+    source: row.source,
+    store: row.store as StoreKind,
+    packageId: row.package_id,
+    owner: row.owner,
+    name: row.name,
+    version: row.latest_version,
+    url: row.url,
+    iconUrl: row.icon_url,
+    downloadUrl: row.download_url,
+    downloads: row.downloads,
+    likes: row.likes,
+    websiteUrl: row.website_url,
+    description: row.description,
+    categories: parseCategories(row.categories),
+    isNsfw: row.is_nsfw === 1,
+    isDeprecated: row.is_deprecated === 1,
+    updatedAt: row.updated_at,
+    sizeBytes: row.size_bytes,
+  };
 }
 
 function mapEvent(row: EventJoinRow): ModEvent {
