@@ -28,6 +28,14 @@ export interface Messages {
   /** Between the digit groups of a large number. */
   thousandsSeparator: string;
   decimalSeparator: string;
+  /** Interaction replies. */
+  unknownCommand: string;
+  somethingWrong: string;
+  missingManageChannel: string;
+  guildOnly: string;
+  unsupportedChannel: string;
+  /** `permissions` is the already joined list of permission names. */
+  botPermissionsMissing(permissions: string): string;
   /** B, KB, MB, GB, TB. */
   byteUnits: readonly [string, string, string, string, string];
 }

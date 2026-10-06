@@ -8,6 +8,11 @@ import { FakeAdapter, FIXED_NOW_ISO, makeSubscription, okPoll } from '../testing
 import { makeHarness } from '../testing/harness.ts';
 import { createFakeFetch, fixture, json, text, type FakeFetch } from '../sources/__fixtures__/fake-fetch.ts';
 import { NexusAdapter } from '../sources/nexus.ts';
+import { handleInteractionRequest } from '../interactions/endpoint.ts';
+import { finishDeferred } from '../interactions/responses.ts';
+import { createRegistry } from '../interactions/router.ts';
+import { en } from '../i18n/en.ts';
+import { generateKeyPair, interactionPayload, signedRequest, TOKEN_SENTINEL } from '../testing/signing.ts';
 import { BotSender } from './bot-sender.ts';
 import { DiscordSender } from './discord-sender.ts';
 
@@ -253,5 +258,55 @@ describe('the Discord bot token never reaches a log, an error or a result', () =
     expect(result).toMatchObject({ ok: false, retryable: false });
     expect(fake.calls).toHaveLength(0);
     expectNoSecret(name, consoleOutput(), inspect(result));
+  });
+});
+
+describe('interaction tokens, the public key and the bot token never reach a log, an error or a response', () => {
+  const PUBLIC_KEY = `${PREFIX}-PUBLIC-KEY-0d4c8e1b`;
+  const BOT_TOKEN = `${PREFIX}-BOT-TOKEN-3a9f7c52e6b104d8`;
+
+  const deps = (publicKey: string, registry = createRegistry(), fetchImpl: typeof fetch = createFakeFetch([['discord.com', () => json({ message: TOKEN_SENTINEL })]]).fetch) => ({
+    publicKey,
+    registry,
+    messages: en,
+    fetch: fetchImpl,
+    waitUntil: (promise: Promise<unknown>) => void pending.push(promise),
+  });
+  let pending: Promise<unknown>[];
+  beforeEach(() => {
+    pending = [];
+  });
+
+  it('keeps every secret out of the answer and the logs when the signature is wrong or the key is malformed', async () => {
+    const keys = await generateKeyPair();
+    const other = await generateKeyPair();
+    const payload = interactionPayload({ data: { name: 'x', options: [{ value: BOT_TOKEN }] } });
+    for (const [publicKey, signer] of [
+      [keys.publicKeyHex, other],
+      [PUBLIC_KEY, keys],
+    ] as const) {
+      const res = await handleInteractionRequest(await signedRequest(signer, payload), deps(publicKey));
+      expectNoSecret('rejected request', consoleOutput(), await res.text(), inspect([...res.headers]));
+      expect(res.status).toBe(401);
+    }
+  });
+
+  it('keeps the interaction token out of the output when a handler fails and when finishing the deferred response fails', async () => {
+    const keys = await generateKeyPair();
+    const registry = createRegistry();
+    registry.commands.set('boom', (interaction, ctx) => {
+      finishDeferred(ctx, interaction, Promise.reject(new Error(`work failed ${TOKEN_SENTINEL} ${BOT_TOKEN}`)));
+      throw new Error(`handler failed ${TOKEN_SENTINEL} ${BOT_TOKEN}`);
+    });
+    const failures: Upstream[] = [...FAILURES, ['a 200 echoing the token', () => json({ message: TOKEN_SENTINEL })]];
+    for (const [name, respond] of failures) {
+      const fake = createFakeFetch([['discord.com', respond]]);
+      const res = await handleInteractionRequest(await signedRequest(keys, interactionPayload({ data: { name: 'boom' } })), deps(keys.publicKeyHex, registry, fake.fetch));
+      await Promise.all(pending);
+      pending = [];
+      expectNoSecret(name, consoleOutput(), await res.text());
+      expect(fake.callsTo('/webhooks/'), `${name}: the webhook was reached`).toHaveLength(1);
+      expect(fake.calls.every((call) => call.headers.authorization === undefined)).toBe(true);
+    }
   });
 });

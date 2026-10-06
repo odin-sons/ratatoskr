@@ -159,6 +159,22 @@ export const AUTOCOMPLETE_MIN_PREFIX = 2;
 /** Choices per autocomplete response. Source: Discord developer docs, application command option choices (25). */
 export const AUTOCOMPLETE_MAX_RESULTS = 25;
 
+/**
+ * Interactions. Source: Discord developer docs, "Receiving and Responding" (first response within 3 s, token valid
+ * 15 min) and "Application Commands" (command and option names 1-32 characters, descriptions and choice names/values 1-100).
+ */
+export const DISCORD_INTERACTION = {
+  firstResponseMs: 3_000,
+  tokenLifetimeMs: 15 * 60_000,
+  commandNameMax: 32,
+  descriptionMax: 100,
+  choiceNameMax: 100,
+  choiceValueMax: 100,
+} as const;
+
+/** Largest interaction body the endpoint reads; anything bigger is rejected before verification. Not a Discord limit: payloads are a few KB. */
+export const INTERACTION_BODY_MAX_BYTES = 256 * 1024;
+
 /** Index entries one owner search reads at most, so its D1 rows read stay bounded whatever the prefix matches. */
 export const AUTOCOMPLETE_OWNER_SCAN_LIMIT = 300;
 

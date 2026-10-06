@@ -22,5 +22,11 @@ export const ru: Messages = {
   page: (index, total) => `(стр. ${index}/${total})`,
   thousandsSeparator: '\u00a0',
   decimalSeparator: ',',
+  unknownCommand: 'Неизвестная команда.',
+  somethingWrong: 'Что-то пошло не так. Попробуйте позже.',
+  missingManageChannel: 'Для этой команды нужно право «Управление каналом».',
+  guildOnly: 'Эта команда работает только в канале сервера.',
+  unsupportedChannel: 'Эта команда не работает в канале такого типа. Используйте её в текстовом канале, ветке или посте форума.',
+  botPermissionsMissing: (permissions) => `Мне не хватает прав в этом канале: ${permissions}.`,
   byteUnits: ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'],
 };

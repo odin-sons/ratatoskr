@@ -4,7 +4,9 @@ import { formatRunLog, sanitizeLogText } from '../core/report.ts';
 import { runReconcile, runTick } from '../core/tick.ts';
 import type { TickDeps, TickReport } from '../core/tick.ts';
 import type { AppConfig } from '../core/types.ts';
-import { parseLanguage } from '../i18n/index.ts';
+import { getMessages, parseLanguage } from '../i18n/index.ts';
+import { createCommandRegistry } from '../interactions/commands.ts';
+import { handleInteractionRequest } from '../interactions/endpoint.ts';
 import { parseRatatoskrEmoji, parseStoreEmojis } from '../render/index.ts';
 import { createAdapters } from '../sources/index.ts';
 import { CloudflareUsageReader } from './analytics.ts';
@@ -26,6 +28,10 @@ export interface Env {
   /** Cloudflare account id and an Account Analytics: Read token; with both, the D1 usage monitor runs. */
   CLOUDFLARE_ACCOUNT_ID?: string;
   CLOUDFLARE_ANALYTICS_TOKEN?: string;
+  /** Discord application id, public key (hex) and bot token; the public key enables `POST /interactions`. */
+  DISCORD_APP_ID?: string;
+  DISCORD_PUBLIC_KEY?: string;
+  DISCORD_BOT_TOKEN?: string;
 }
 
 function buildDeps(env: Env): TickDeps {
@@ -74,7 +80,25 @@ async function dispatchSafely(controller: ScheduledController, env: Env): Promis
   }
 }
 
+const registry = createCommandRegistry();
+
+async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  try {
+    return await handleInteractionRequest(request, {
+      publicKey: env.DISCORD_PUBLIC_KEY,
+      registry,
+      messages: getMessages(parseLanguage(env.LANGUAGE)),
+      fetch: globalThis.fetch.bind(globalThis),
+      waitUntil: (promise) => ctx.waitUntil(promise),
+    });
+  } catch (err) {
+    console.error(`interaction request failed: ${err instanceof Error ? err.name : 'error'}`);
+    return new Response(null, { status: 500 });
+  }
+}
+
 export default {
+  fetch: handleFetch,
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(dispatchSafely(controller, env));
   },
