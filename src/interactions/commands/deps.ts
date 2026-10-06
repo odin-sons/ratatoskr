@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Store } from '../../core/ports.ts';
-import type { SourceConfig, StoreEmojis } from '../../core/types.ts';
+import type { ChannelKind, SourceConfig, StoreEmojis } from '../../core/types.ts';
 
 /** What the command handlers need from the outside; tests pass real in-memory implementations. */
 export interface CommandDeps {
@@ -12,6 +12,8 @@ export interface CommandDeps {
   storeEmojis?: StoreEmojis;
   ratatoskrEmoji?: string;
   now: () => Date;
+  /** Asks Discord what kind of channel `channelId` is; null when it cannot tell. Without it a thread's parent is unknown. */
+  channelKind?: (channelId: string) => Promise<ChannelKind | null>;
 }
 
 const ID_CHARS = 10;

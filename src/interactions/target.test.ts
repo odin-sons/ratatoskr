@@ -19,7 +19,7 @@ const inChannel = (type: number, extra: Record<string, unknown> = {}): Interacti
 
 describe('resolveTarget', () => {
   it.each([CHANNEL_TYPE.guildText, CHANNEL_TYPE.guildAnnouncement])('a channel of type %i is the target itself', (type) => {
-    expect(resolveTarget(make({ guild_id: GUILD_ID, channel: { id: CHANNEL_ID, type } }))).toEqual({ ok: true, channelId: CHANNEL_ID });
+    expect(resolveTarget(make({ guild_id: GUILD_ID, channel: { id: CHANNEL_ID, type } }))).toEqual({ ok: true, channelId: CHANNEL_ID, channelKind: 'text' });
   });
 
   it.each([CHANNEL_TYPE.announcementThread, CHANNEL_TYPE.publicThread, CHANNEL_TYPE.privateThread])('a thread of type %i targets its parent and itself', (type) => {
@@ -55,7 +55,7 @@ describe('resolveTarget', () => {
       channel: { id: CHANNEL_ID, type: CHANNEL_TYPE.guildText },
       data: { name: 'subscribe', options: [{ name: 'channel', value: PARENT }, { name: 'guild_id', value: PARENT }] },
     });
-    expect(resolveTarget(interaction)).toEqual({ ok: true, channelId: CHANNEL_ID });
+    expect(resolveTarget(interaction)).toEqual({ ok: true, channelId: CHANNEL_ID, channelKind: 'text' });
   });
 });
 

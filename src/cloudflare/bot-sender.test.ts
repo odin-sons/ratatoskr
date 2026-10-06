@@ -235,6 +235,11 @@ describe('BotSender.openThreadOnMessage', () => {
     expect(await sender.openThreadOnMessage(CHANNEL, MESSAGE_ID, 'name')).toMatchObject({ ok: false, retryable: false, gone: true });
   });
 
+  it('flags error code 160004 (a thread already exists for the message) as threadExists, not gone', async () => {
+    const { sender } = senderWith(() => jsonResponse({ code: 160004, message: 'A thread has already been created for this message' }, 400));
+    expect(await sender.openThreadOnMessage(CHANNEL, MESSAGE_ID, 'name')).toEqual({ ok: false, retryable: false, status: 400, threadExists: true });
+  });
+
   it('maps a 5xx to a retryable result', async () => {
     const { sender } = senderWith(() => new Response('', { status: 500 }));
     expect(await sender.openThreadOnMessage(CHANNEL, MESSAGE_ID, 'name')).toMatchObject({ retryable: true, status: 500 });

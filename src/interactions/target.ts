@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import type { ChannelKind } from '../core/types.ts';
 import { CHANNEL_TYPE } from './constants.ts';
 import type { Interaction } from './types.ts';
 
 export type TargetResolution =
-  | { ok: true; channelId: string; threadId?: string }
+  /** `channelKind` is set when the payload proves it: a channel the command ran in directly is a text channel; the parent of a thread is not in the payload. */
+  | { ok: true; channelId: string; threadId?: string; channelKind?: ChannelKind }
   | { ok: false; reason: 'dm' | 'unsupported_channel' };
 
 const UNSUPPORTED = { ok: false, reason: 'unsupported_channel' } as const;
@@ -19,7 +21,7 @@ export function resolveTarget(interaction: Interaction, options: { threadPerMod?
   switch (channel.type) {
     case CHANNEL_TYPE.guildText:
     case CHANNEL_TYPE.guildAnnouncement:
-      return { ok: true, channelId: channel.id };
+      return { ok: true, channelId: channel.id, channelKind: 'text' };
     case CHANNEL_TYPE.announcementThread:
     case CHANNEL_TYPE.publicThread:
     case CHANNEL_TYPE.privateThread:

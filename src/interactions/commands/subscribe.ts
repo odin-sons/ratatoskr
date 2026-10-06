@@ -7,7 +7,7 @@ import {
   SUBSCRIBE_TEXT_OPTION_MAX,
   SUBSCRIPTION_LABEL_MAX,
 } from '../../core/constants.ts';
-import type { DeliveryMode, Subscription, SubscriptionFilter } from '../../core/types.ts';
+import type { ChannelKind, DeliveryMode, Subscription, SubscriptionFilter } from '../../core/types.ts';
 import {
   DELIVERY_MODES,
   DIGEST_INTERVAL_MAX_BOUND,
@@ -132,13 +132,22 @@ export function createSubscribeCommand(deps: CommandDeps): InteractionHandler {
       digestIntervalMin: plan.plan.digestIntervalMin,
       enabled: true,
     };
-    return deferWork(interaction, ctx, async () => ({ content: await create(deps, subscription, messages, plan.plan.mod) }));
+    return deferWork(interaction, ctx, async () => ({ content: await create(deps, subscription, messages, plan.plan.mod, target.channelKind) }));
   };
 }
 
-async function create(deps: CommandDeps, subscription: Subscription, messages: Messages, mod: string | undefined): Promise<string> {
-  if (!SUBSCRIPTION_ID_RE.test(subscription.id)) throw new Error('generated subscription id is malformed');
+async function create(
+  deps: CommandDeps,
+  planned: Subscription,
+  messages: Messages,
+  mod: string | undefined,
+  provenKind: ChannelKind | undefined,
+): Promise<string> {
+  if (!SUBSCRIPTION_ID_RE.test(planned.id)) throw new Error('generated subscription id is malformed');
   const { store } = deps;
+  const channelKind = provenKind ?? (await resolveChannelKind(deps, planned.channelId as string));
+  if (channelKind === null && planned.threadPerMod) return messages.subscribeChannelKindUnknown;
+  const subscription: Subscription = { ...planned, channelKind: channelKind ?? 'text' };
   if (mod !== undefined) {
     const sources = subscription.filter.sources ?? deps.sources.map((source) => source.id);
     if (!(await store.packageExists(mod, sources))) return messages.modNotFound(display(mod));
@@ -165,6 +174,14 @@ async function create(deps: CommandDeps, subscription: Subscription, messages: M
   const details = `${mode} · ${summarizeFilter(subscription.filter, messages)}`;
   return `${messages.subscribed(display(subscription.label ?? subscription.id), describeDestination(subscription, messages), details)}
 ${messages.subscriptionId(`\`${subscription.id}\``)}`;
+}
+
+async function resolveChannelKind(deps: CommandDeps, channelId: string): Promise<ChannelKind | null> {
+  try {
+    return (await deps.channelKind?.(channelId)) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export function createSubscribeAutocomplete(deps: CommandDeps): InteractionHandler {

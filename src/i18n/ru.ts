@@ -30,6 +30,7 @@ export const ru: Messages = {
   botPermissionsMissing: (permissions) => `Мне не хватает прав в этом канале: ${permissions}.`,
   subscribeNeedsFilter: 'Укажите хотя бы одно из owner, mod, category или source, чтобы подписка не совпадала со всем подряд.',
   subscribeThreadPerModDigest: 'thread_per_mod работает только с режимом immediate. Укажите mode: immediate.',
+  subscribeChannelKindUnknown: 'Не удалось определить, форум это или текстовый канал. Попробуйте позже.',
   subscribeIntervalImmediate: 'interval применяется только в режиме digest.',
   sourceNotConfigured: (source) => `Этот бот не опрашивает ${source}.`,
   invalidOptions: (details) => `Некоторые параметры неверны: ${details}`,

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Store } from '../../core/ports.ts';
-import type { SourceConfig, Subscription } from '../../core/types.ts';
+import type { ChannelKind, SourceConfig, Subscription } from '../../core/types.ts';
 import { en } from '../../i18n/en.ts';
 import type { Messages } from '../../i18n/index.ts';
 import { MemoryStore } from '../../testing/memory-store.ts';
@@ -86,11 +86,19 @@ export interface Harness<S extends Store = MemoryStore> {
   followUp(): string;
 }
 
-export function harness<S extends Store = MemoryStore>(options: { messages?: Messages; ids?: string[]; sources?: SourceConfig[]; store?: S; now?: () => Date } = {}): Harness<S> {
+export function harness<S extends Store = MemoryStore>(
+  options: { messages?: Messages; ids?: string[]; sources?: SourceConfig[]; store?: S; now?: () => Date; channelKind?: (channelId: string) => Promise<ChannelKind | null> } = {},
+): Harness<S> {
   const store = options.store ?? (new MemoryStore() as unknown as S);
   const ids = [...(options.ids ?? [])];
   let counter = 0;
-  const deps: CommandDeps = { store, sources: options.sources ?? SOURCES, newId: () => ids.shift() ?? `id-${(counter += 1)}`, now: options.now ?? (() => NOW) };
+  const deps: CommandDeps = {
+    store,
+    sources: options.sources ?? SOURCES,
+    newId: () => ids.shift() ?? `id-${(counter += 1)}`,
+    now: options.now ?? (() => NOW),
+    channelKind: options.channelKind ?? (async () => 'text'),
+  };
   const registry = createCommandRegistry(deps);
   const finished: Json[] = [];
   const pending: Promise<unknown>[] = [];

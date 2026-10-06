@@ -46,6 +46,7 @@ describe('/subscribe', () => {
         label: 'RandyKnapp',
         createdBy: USER_ID,
         threadPerMod: false,
+        channelKind: 'text',
         filter: { packages: ['RandyKnapp'] },
         mode: 'digest',
         digestIntervalMin: 30,
@@ -133,6 +134,40 @@ ID: \`abc123\``);
       await h.run(command('subscribe', { owner: 'a', mode: 'immediate', thread_per_mod: true }, { channel: inThread().channel }));
       expect(stored(h)[0]).toMatchObject({ channelId: CHANNEL_ID, threadId: null, threadPerMod: true });
       expect(h.followUp()).toContain(`<#${CHANNEL_ID}> (immediate, thread per mod ·`);
+    });
+
+    describe('channel kind', () => {
+      it('is text without asking Discord when the command ran in a text channel', async () => {
+        const asked: string[] = [];
+        const h = harness({ channelKind: async (id) => (asked.push(id), 'forum') });
+        await h.run(command('subscribe', { owner: 'a' }));
+        expect(stored(h)[0]).toMatchObject({ channelKind: 'text' });
+        expect(asked).toEqual([]);
+      });
+
+      it('is what Discord says about the parent when the command ran in a thread', async () => {
+        const asked: string[] = [];
+        const h = harness({ channelKind: async (id) => (asked.push(id), 'forum') });
+        await h.run(command('subscribe', { owner: 'a', mode: 'immediate', thread_per_mod: true }, { channel: inThread().channel }));
+        expect(stored(h)[0]).toMatchObject({ channelId: CHANNEL_ID, channelKind: 'forum', threadPerMod: true });
+        expect(asked).toEqual([CHANNEL_ID]);
+      });
+
+      it.each([
+        ['cannot tell', async () => null],
+        ['fails', async () => Promise.reject(new Error('offline'))],
+      ])('refuses thread_per_mod in a thread when Discord %s, and stores nothing', async (_name, channelKind) => {
+        const h = harness({ channelKind });
+        await h.run(command('subscribe', { owner: 'a', mode: 'immediate', thread_per_mod: true }, { channel: inThread().channel }));
+        expect(h.followUp()).toBe(en.subscribeChannelKindUnknown);
+        expect(stored(h)).toEqual([]);
+      });
+
+      it('still binds a plain subscription to a thread when Discord cannot tell, storing text', async () => {
+        const h = harness({ channelKind: async () => null });
+        await h.run(command('subscribe', { owner: 'a' }, { channel: inThread().channel }));
+        expect(stored(h)[0]).toMatchObject({ threadId: THREAD_ID, channelKind: 'text' });
+      });
     });
 
     it('uses the parent from the signed payload, never an option', async () => {

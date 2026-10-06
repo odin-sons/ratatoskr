@@ -2,7 +2,7 @@
 import { eventId } from '../core/ids.ts';
 import type { Renderer, RenderContext } from '../core/drain.ts';
 import type { Language } from '../i18n/index.ts';
-import type { Clock, PollContext, PollResult, SendResult, SendTarget, Sender, SourceAdapter } from '../core/ports.ts';
+import type { Clock, ForumPostResult, OpenThreadResult, PollContext, PollResult, SendResult, SendTarget, Sender, SourceAdapter } from '../core/ports.ts';
 import type {
   AppConfig,
   CapUsage,
@@ -68,16 +68,63 @@ export const rateLimited = (retryAfterSeconds: number | null): SendResult => ({
 export const serverError = (status = 500): SendResult => ({ ok: false, retryable: true, retryAfterSeconds: null, status });
 export const clientError = (status = 404): SendResult => ({ ok: false, retryable: false, status });
 
-/** Records every call. Scripted results are consumed in order; once empty, `fallback` applies. */
+const fakeSnowflake = (n: number): string => String(900_000_000_000_000_000n + BigInt(n));
+
+export interface ForumPostCall {
+  channelId: string;
+  name: string;
+  payload: DiscordMessage;
+}
+
+export interface ThreadOpenCall {
+  channelId: string;
+  messageId: string;
+  name: string;
+}
+
+/**
+ * Records every call. Scripted results are consumed in order; once empty, `fallback` applies. A bot target is accepted
+ * with a fresh message id, a forum post and an opened thread with fresh ids; their scripted results have their own queues.
+ */
 export class FakeSender implements Sender {
   readonly calls: SentCall[] = [];
+  readonly forumPosts: ForumPostCall[] = [];
+  readonly threadOpens: ThreadOpenCall[] = [];
+  /** Every request in call order: `send`, `post` (forum post) or `open` (thread on a message). */
+  readonly ops: ('send' | 'post' | 'open')[] = [];
   /** Includes failed attempts; results returned so far. */
   readonly results: SendResult[] = [];
   private queue: SendResult[] = [];
-  fallback: (call: SentCall, index: number) => SendResult = () => SEND_OK;
+  private postQueue: ForumPostResult[] = [];
+  private openQueue: OpenThreadResult[] = [];
+  private nextId = 1;
+  /** Target kinds `canSend` refuses. */
+  readonly unavailable = new Set<SendTarget['kind']>();
+  fallback: (call: SentCall, index: number) => SendResult = (call) =>
+    call.target.kind === 'bot'
+      ? { ok: true, messageId: this.freshId(), channelId: call.target.threadId ? call.target.threadId : call.target.channelId }
+      : SEND_OK;
+
+  canSend(target: SendTarget): boolean {
+    return !this.unavailable.has(target.kind);
+  }
+
+  freshId(): string {
+    return fakeSnowflake(this.nextId++);
+  }
 
   enqueue(...results: SendResult[]): this {
     this.queue.push(...results);
+    return this;
+  }
+
+  enqueuePost(...results: ForumPostResult[]): this {
+    this.postQueue.push(...results);
+    return this;
+  }
+
+  enqueueOpen(...results: OpenThreadResult[]): this {
+    this.openQueue.push(...results);
     return this;
   }
 
@@ -85,9 +132,22 @@ export class FakeSender implements Sender {
     const call: SentCall = { target, webhookUrl: target.kind === 'webhook' ? target.url : '', payload, threadId: target.threadId };
     const index = this.calls.length;
     this.calls.push(call);
+    this.ops.push('send');
     const result = this.queue.shift() ?? this.fallback(call, index);
     this.results.push(result);
     return result;
+  }
+
+  async createForumPost(channelId: string, name: string, payload: DiscordMessage): Promise<ForumPostResult> {
+    this.forumPosts.push({ channelId, name, payload });
+    this.ops.push('post');
+    return this.postQueue.shift() ?? { ok: true, threadId: this.freshId(), messageId: this.freshId() };
+  }
+
+  async openThreadOnMessage(channelId: string, messageId: string, name: string): Promise<OpenThreadResult> {
+    this.threadOpens.push({ channelId, messageId, name });
+    this.ops.push('open');
+    return this.openQueue.shift() ?? { ok: true, threadId: this.freshId() };
   }
 
   callsTo(webhookUrl: string): SentCall[] {
@@ -269,6 +329,20 @@ export function makeSubscription(overrides: Partial<Omit<Subscription, 'webhookU
     id: 'sub-1',
     guildId: 'guild-1',
     webhookUrl: 'https://discord.invalid/api/webhooks/1/token',
+    filter: {},
+    mode: 'immediate',
+    digestIntervalMin: 30,
+    enabled: true,
+    ...overrides,
+  };
+}
+
+export function makeBotSubscription(overrides: Partial<Subscription> = {}): Subscription {
+  return {
+    id: 'bot-1',
+    guildId: 'guild-1',
+    transport: 'bot',
+    channelId: '123456789012345678',
     filter: {},
     mode: 'immediate',
     digestIntervalMin: 30,

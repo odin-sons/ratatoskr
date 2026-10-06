@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { DISCORD_API_BASE, DISCORD_ERROR_CODE, DISCORD_SEND_TIMEOUT_MS, DISCORD_THREAD_NAME_MAX, PROJECT } from '../core/constants.ts';
-import type { Sender, SendResult, SendTarget } from '../core/ports.ts';
+import type { ForumPostResult, OpenThreadResult, Sender, SendFailure, SendResult, SendTarget } from '../core/ports.ts';
 import type { DiscordMessage } from '../core/types.ts';
 import { isSnowflake } from './guards.ts';
 
@@ -9,13 +9,7 @@ const USER_AGENT = `DiscordBot (${PROJECT.repoUrl}, ${PROJECT.version})`;
 // Unbound global fetch throws "Illegal invocation" in Workers.
 const defaultFetch: typeof fetch = (input, init) => fetch(input, init);
 
-export type BotFailure = Extract<SendResult, { ok: false }>;
-
-export type ForumPostResult = { ok: true; threadId: string; messageId: string } | BotFailure;
-
-export type OpenThreadResult = { ok: true; threadId: string } | BotFailure;
-
-const REJECTED: BotFailure = Object.freeze({ ok: false, retryable: false, status: 0 });
+const REJECTED: SendFailure = Object.freeze({ ok: false, retryable: false, status: 0 });
 
 export class BotSender implements Sender {
   private readonly token: string;
@@ -66,7 +60,7 @@ export class BotSender implements Sender {
     body: unknown,
     channelId: string,
     threadTarget: boolean,
-  ): Promise<{ ok: true; status: number; body: unknown } | { ok: false; failure: BotFailure }> {
+  ): Promise<{ ok: true; status: number; body: unknown } | { ok: false; failure: SendFailure }> {
     let res: Response;
     try {
       res = await this.fetchImpl(`${DISCORD_API_BASE}${path}`, {
@@ -90,12 +84,13 @@ export class BotSender implements Sender {
     }
     if (res.status >= 500) return { ok: false, failure: { ok: false, retryable: true, retryAfterSeconds: null, status: res.status } };
     const code = (payload as { code?: unknown } | null)?.code;
+    if (code === DISCORD_ERROR_CODE.threadAlreadyCreated) return { ok: false, failure: { ok: false, retryable: false, status: res.status, threadExists: true } };
     const gone = res.status === 404 || code === DISCORD_ERROR_CODE.unknownChannel || (threadTarget && code === DISCORD_ERROR_CODE.threadArchived);
     return { ok: false, failure: gone ? { ok: false, retryable: false, status: res.status, gone: true } : { ok: false, retryable: false, status: res.status } };
   }
 }
 
-function reject(reason: string): BotFailure {
+function reject(reason: string): SendFailure {
   console.warn(`discord bot send rejected: ${reason}`);
   return REJECTED;
 }

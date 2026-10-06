@@ -693,6 +693,7 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
         label: 'Valheim news',
         createdBy: 'user-1',
         threadPerMod: true,
+        channelKind: 'forum',
         pausedUntil: 0,
         filter: { kinds: ['new'] },
         mode: 'immediate',
@@ -721,6 +722,7 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
             label: null,
             createdBy: null,
             threadPerMod: false,
+            channelKind: 'text',
             pausedUntil: 0,
           },
         ]);
@@ -818,7 +820,7 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
         expect((await store.takeDue(NOW, 10)).map((d) => d.row.subscriptionId)).toEqual(['other', 'other']);
         await store.commit(batch([e1, e2], [row('bot-1', e1), row('bot-1', e2)]));
         expect((await store.takeDue(NOW, 10)).map((d) => `${d.row.subscriptionId}:${d.row.eventId}`).sort()).toEqual(
-          [`other:${e1.id}`, `other:${e3.id}`].sort(),
+          [`bot-1:${e1.id}`, `other:${e1.id}`, `other:${e3.id}`].sort(),
         );
       });
 
@@ -904,14 +906,28 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
     });
 
     describe('takeDue with bot subscriptions', () => {
-      it('never returns rows of a bot subscription, so they cannot occupy the limit', async () => {
+      it('returns the rows of a bot subscription next to webhook rows, oldest first', async () => {
         const { store } = await setup();
-        await store.createSubscription({ id: 'bot-q', guildId: 'guild-1', transport: 'bot', channelId: 'chan-1', filter: {}, mode: 'immediate', digestIntervalMin: 30, enabled: true });
-        const botEvents = [event(1), event(2), event(3)];
-        const hookEvent = event(4);
-        await store.commit(batch([...botEvents, hookEvent], [...botEvents.map((e) => row('bot-q', e)), row(SUB, hookEvent, { nextAttemptAt: NOW })]));
-        const due = await store.takeDue(NOW, 2);
-        expect(due.map((d) => d.row.subscriptionId)).toEqual([SUB]);
+        await store.createSubscription({ id: 'bot-q', guildId: 'guild-1', transport: 'bot', channelId: 'chan-1', threadId: 'thread-1', channelKind: 'forum', filter: {}, mode: 'immediate', digestIntervalMin: 30, enabled: true });
+        const botEvent = event(1);
+        const hookEvent = event(2);
+        await store.commit(batch([botEvent, hookEvent], [row('bot-q', botEvent), row(SUB, hookEvent, { nextAttemptAt: NOW })]));
+        const due = await store.takeDue(NOW, 10);
+        expect(due.map((d) => d.row.subscriptionId).sort()).toEqual(['bot-q', SUB].sort());
+        expect(due.find((d) => d.row.subscriptionId === 'bot-q')!.subscription).toMatchObject({
+          transport: 'bot',
+          channelId: 'chan-1',
+          threadId: 'thread-1',
+          channelKind: 'forum',
+        });
+      });
+
+      it('skips the rows of a disabled bot subscription', async () => {
+        const { store } = await setup();
+        await store.createSubscription({ id: 'bot-q', guildId: 'guild-1', transport: 'bot', channelId: 'chan-1', filter: {}, mode: 'immediate', digestIntervalMin: 30, enabled: false });
+        const botEvent = event(1);
+        await store.commit(batch([botEvent], [row('bot-q', botEvent)]));
+        expect(await store.takeDue(NOW, 10)).toEqual([]);
       });
     });
 

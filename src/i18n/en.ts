@@ -30,6 +30,7 @@ export const en: Messages = {
   botPermissionsMissing: (permissions) => `I am missing permissions in this channel: ${permissions}.`,
   subscribeNeedsFilter: 'Give at least one of owner, mod, category or source, so the subscription does not match everything.',
   subscribeThreadPerModDigest: 'thread_per_mod works only with mode immediate. Set mode to immediate.',
+  subscribeChannelKindUnknown: 'Could not tell whether the parent channel is a forum or a text channel. Try again later.',
   subscribeIntervalImmediate: 'interval applies only to mode digest.',
   sourceNotConfigured: (source) => `This bot does not poll ${source}.`,
   invalidOptions: (details) => `Some options are not valid: ${details}`,

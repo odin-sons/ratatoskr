@@ -181,10 +181,22 @@ export type SendResult =
     }
   | { ok: false; retryable: true; retryAfterSeconds: number | null; status: number }
   /** 4xx other than 429: bad webhook, deleted channel. Do not retry. `gone`: the channel or thread is missing or archived. */
-  | { ok: false; retryable: false; status: number; gone?: true };
+  | { ok: false; retryable: false; status: number; gone?: true; threadExists?: true };
+
+export type SendFailure = Extract<SendResult, { ok: false }>;
+
+export type ForumPostResult = { ok: true; threadId: string; messageId: string } | SendFailure;
+
+export type OpenThreadResult = { ok: true; threadId: string } | SendFailure;
 
 export interface Sender {
   send(target: SendTarget, payload: DiscordMessage): Promise<SendResult>;
+  /** False when this sender cannot deliver to `target` right now; the drain then reschedules without sending. */
+  canSend?(target: SendTarget): boolean;
+  /** Bot only: one request creates the post and its starter message. */
+  createForumPost?(channelId: string, name: string, payload: DiscordMessage): Promise<ForumPostResult>;
+  /** Bot only: opens a thread on an existing message; post into it with `send` and its `threadId`. */
+  openThreadOnMessage?(channelId: string, messageId: string, name: string): Promise<OpenThreadResult>;
 }
 
 // ---------------------------------------------------------------------------

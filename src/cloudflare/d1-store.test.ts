@@ -402,6 +402,7 @@ describe('D1 adapter', () => {
           label: null,
           createdBy: null,
           threadPerMod: false,
+          channelKind: 'text',
           pausedUntil: 0,
           filter: { kinds: ['new'], allowNsfw: true },
           mode: 'digest',
@@ -424,9 +425,9 @@ describe('D1 adapter', () => {
 
   describe('bot subscriptions', () => {
     it('maps every bot column and leaves the webhook null', async () => {
-      await store.createSubscription({ ...botSubscription('bot1'), threadId: '222233334444555566', pausedUntil: 1_800_000_000 });
+      await store.createSubscription({ ...botSubscription('bot1'), threadId: '222233334444555566', pausedUntil: 1_800_000_000, channelKind: 'forum' });
       const [sub] = await store.listSubscriptions();
-      expect(sub).toEqual({ ...botSubscription('bot1'), webhookUrl: null, threadId: '222233334444555566', pausedUntil: 1_800_000_000 });
+      expect(sub).toEqual({ ...botSubscription('bot1'), webhookUrl: null, threadId: '222233334444555566', pausedUntil: 1_800_000_000, channelKind: 'forum' });
     });
 
     it('stores text with quotes and SQL fragments literally', async () => {
@@ -471,12 +472,12 @@ describe('D1 adapter', () => {
       }
     });
 
-    it('takeDue leaves the rows of a bot subscription alone', async () => {
-      await store.createSubscription(botSubscription('bot1'));
+    it('takeDue returns the rows of a bot subscription with its channel kind', async () => {
+      await store.createSubscription({ ...botSubscription('bot1'), channelKind: 'forum' });
       const e = ev(pkg('A-One'));
       await store.commit(batch({ packages: [e.pkg], events: [e], outbox: [ob('bot1', e)] }));
-      expect(await store.takeDue('2026-09-19T00:00:00.000Z', 10)).toEqual([]);
-      expect(count(shim, 'outbox')).toBe(1);
+      const due = await store.takeDue('2026-09-19T00:00:00.000Z', 10);
+      expect(due.map((d) => d.subscription)).toEqual([expect.objectContaining({ id: 'bot1', transport: 'bot', channelKind: 'forum' })]);
     });
   });
 

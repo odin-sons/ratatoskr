@@ -29,6 +29,7 @@ export const CHANNEL_TYPE = {
   publicThread: 11,
   privateThread: 12,
   guildForum: 15,
+  guildMedia: 16,
 } as const;
 
 /** Source: Discord developer docs, "Permissions" (bit positions of the permission flags). */

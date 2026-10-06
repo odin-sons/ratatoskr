@@ -6,7 +6,9 @@
 -- `packages.downloads` existed needs migrations/0002_package_download_url_and_downloads.sql once, and one created before
 -- `packages.likes` and `packages.website_url` existed needs migrations/0003_package_likes_and_website.sql once, and one
 -- created before `subscriptions.thread_id` existed needs migrations/0004_subscription_thread_id.sql once, and one
--- created before the bot columns of `subscriptions` existed needs migrations/0005_bot_subscriptions.sql once, before this file, and one created before `/info` needs migrations/0007_mod_threads_thread_index.sql once (applying this file creates the same index).
+-- created before the bot columns of `subscriptions` existed needs migrations/0005_bot_subscriptions.sql once, one created
+-- before `subscriptions.channel_kind` existed needs migrations/0006_subscription_channel_kind.sql once, and one created before `/info`
+-- needs migrations/0007_mod_threads_thread_index.sql once (applying this file creates the same index); run them before this file.
 
 CREATE TABLE IF NOT EXISTS sources (
   id TEXT PRIMARY KEY,
@@ -70,6 +72,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   enabled INTEGER NOT NULL DEFAULT 1,
   thread_per_mod INTEGER NOT NULL DEFAULT 0,
   paused_until INTEGER NOT NULL DEFAULT 0,
+  channel_kind TEXT NOT NULL DEFAULT 'text' CHECK (channel_kind IN ('text', 'forum')),
   CHECK ((transport = 'webhook' AND webhook_url IS NOT NULL) OR (transport = 'bot' AND channel_id IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_subscriptions_enabled ON subscriptions (enabled);
