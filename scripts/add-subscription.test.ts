@@ -8,11 +8,11 @@ import {
   shellDoubleQuote,
   sqlString,
 } from './add-subscription.ts';
-import type { Subscription } from '../src/core/types.ts';
+import type { WebhookSubscription } from '../src/core/types.ts';
 
 const WEBHOOK = 'https://discord.com/api/webhooks/123456789012345678/abc_DEF-123';
 
-function sub(overrides: Partial<Subscription> = {}): Subscription {
+function sub(overrides: Partial<WebhookSubscription> = {}): WebhookSubscription {
   return {
     id: 'sub-1',
     guildId: '123456789012345678',

@@ -147,6 +147,21 @@ export const DELIVERED_RETENTION_DAYS = 7;
 /** Most delivered outbox rows deleted per reconcile run. */
 export const OUTBOX_PURGE_BATCH = 1000;
 
+/** Bot message records are kept this long for the message command, then purged by reconciliation. Source: docs/spec.md "Bot data". */
+export const MESSAGE_RETENTION_DAYS = 7;
+
+/** Most message records deleted per reconcile run. */
+export const MESSAGE_PURGE_BATCH = 1000;
+
+/** Shortest prefix an autocomplete search runs for; a shorter one returns nothing. Source: docs/spec.md "Bot data". */
+export const AUTOCOMPLETE_MIN_PREFIX = 2;
+
+/** Choices per autocomplete response. Source: Discord developer docs, application command option choices (25). */
+export const AUTOCOMPLETE_MAX_RESULTS = 25;
+
+/** Index entries one owner search reads at most, so its D1 rows read stay bounded whatever the prefix matches. */
+export const AUTOCOMPLETE_OWNER_SCAN_LIMIT = 300;
+
 /** Proportional re-renders tried when a digest exceeds its message allowance, before the prefix is halved. */
 export const DIGEST_FIT_ATTEMPTS = 3;
 

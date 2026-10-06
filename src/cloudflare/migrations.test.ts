@@ -12,6 +12,7 @@ const MIGRATION = readFileSync(join(ROOT, 'migrations/0001_outbox_delivered_at.s
 const MIGRATION_DOWNLOAD_URL = readFileSync(join(ROOT, 'migrations/0002_package_download_url_and_downloads.sql'), 'utf8');
 const MIGRATION_LIKES_WEBSITE = readFileSync(join(ROOT, 'migrations/0003_package_likes_and_website.sql'), 'utf8');
 const MIGRATION_THREAD_ID = readFileSync(join(ROOT, 'migrations/0004_subscription_thread_id.sql'), 'utf8');
+const MIGRATION_BOT = readFileSync(join(ROOT, 'migrations/0005_bot_subscriptions.sql'), 'utf8');
 
 const SOURCE = 'thunderstore:valheim';
 const NOW = '2026-09-19T12:00:00.000Z';
@@ -67,12 +68,12 @@ const indexNames = (shim: D1Shim): string[] =>
 
 describe('schema upgrade from a database without outbox.delivered_at', () => {
   it('schema.sql alone cannot upgrade it', () => {
-    expect(() => legacyDatabase().db.exec(SCHEMA)).toThrow(/delivered_at/);
+    expect(() => legacyDatabase().db.exec(SCHEMA)).toThrow(/delivered_at|channel_id/);
   });
 
   it('the migration adds the column and both partial indexes, then schema.sql applies cleanly, twice', () => {
     const shim = legacyDatabase();
-    shim.db.exec(MIGRATION);
+    for (const migration of [MIGRATION, MIGRATION_THREAD_ID, MIGRATION_BOT]) shim.db.exec(migration);
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
     const names = indexNames(shim);
@@ -87,6 +88,7 @@ describe('schema upgrade from a database without outbox.delivered_at', () => {
     shim.db.exec(MIGRATION_DOWNLOAD_URL);
     shim.db.exec(MIGRATION_LIKES_WEBSITE);
     shim.db.exec(MIGRATION_THREAD_ID);
+    shim.db.exec(MIGRATION_BOT);
     shim.db.exec(SCHEMA);
     const store = new D1Store(shim.asD1());
 
@@ -225,7 +227,7 @@ describe('schema upgrade from a database without packages.likes and packages.web
 
   it('applies to a database whose columns arrived through every earlier migration, in order', async () => {
     const shim = legacyDatabase();
-    for (const migration of [MIGRATION, MIGRATION_DOWNLOAD_URL, MIGRATION_LIKES_WEBSITE, MIGRATION_THREAD_ID]) shim.db.exec(migration);
+    for (const migration of [MIGRATION, MIGRATION_DOWNLOAD_URL, MIGRATION_LIKES_WEBSITE, MIGRATION_THREAD_ID, MIGRATION_BOT]) shim.db.exec(migration);
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
     const columns = (shim.db.prepare("SELECT name FROM pragma_table_info('packages')").all() as { name: string }[]).map((r) => r.name);
     expect(columns).toEqual(expect.arrayContaining(['download_url', 'downloads', 'likes', 'website_url']));
@@ -257,7 +259,7 @@ function databaseWithoutThreadId(): D1Shim {
 
 describe('schema upgrade from a database without subscriptions.thread_id', () => {
   it('the fixture really lacks the column and the current queries fail on it', async () => {
-    expect(SCHEMA_BEFORE_THREAD_ID).not.toMatch(/^ +thread_id TEXT/m);
+    expect(SCHEMA_BEFORE_THREAD_ID).not.toMatch(/^ +thread_id TEXT,$/m);
     await expect(new D1Store(databaseWithoutThreadId().asD1()).takeDue(NOW, 10)).rejects.toThrow(/thread_id/);
   });
 
@@ -278,5 +280,117 @@ describe('schema upgrade from a database without subscriptions.thread_id', () =>
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
     expect(() => shim.db.exec(MIGRATION_THREAD_ID)).toThrow(/duplicate column/);
+  });
+});
+
+/** Database shape before the bot columns existed: the current schema with the pre-0005 `subscriptions` table. */
+const SCHEMA_BEFORE_BOT = SCHEMA.replace(
+  /CREATE TABLE IF NOT EXISTS subscriptions \([\s\S]*?\n\);\nCREATE INDEX IF NOT EXISTS idx_subscriptions_enabled[^\n]*\nCREATE INDEX IF NOT EXISTS idx_subscriptions_channel[^\n]*\nCREATE INDEX IF NOT EXISTS idx_subscriptions_guild[^\n]*\n/,
+  `CREATE TABLE IF NOT EXISTS subscriptions (
+  id TEXT PRIMARY KEY,
+  guild_id TEXT NOT NULL,
+  webhook_url TEXT NOT NULL,
+  thread_id TEXT,
+  filter TEXT NOT NULL DEFAULT '{}',
+  mode TEXT NOT NULL DEFAULT 'digest' CHECK (mode IN ('immediate', 'digest')),
+  digest_interval_min INTEGER,
+  enabled INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_enabled ON subscriptions (enabled);
+`,
+);
+
+function databaseBeforeBot(): D1Shim {
+  const shim = new D1Shim();
+  shim.db.exec(SCHEMA_BEFORE_BOT);
+  const id = eventId(SOURCE, 'Owner-Mod', '1.0.0');
+  shim.db
+    .prepare('INSERT INTO packages (source, package_id, store, latest_version, name, owner, url, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(SOURCE, 'Owner-Mod', 'thunderstore', '1.0.0', 'Mod', 'Owner', 'https://thunderstore.invalid/Owner/Mod/', NOW);
+  shim.db
+    .prepare('INSERT INTO events (id, source, package_id, kind, version_to, release_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(id, SOURCE, 'Owner-Mod', 'new', '1.0.0', 'owner|mod|1.0.0', NOW);
+  shim.db
+    .prepare('INSERT INTO subscriptions (id, guild_id, webhook_url, thread_id, filter, mode, digest_interval_min, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run('sub1', 'g', 'https://discord.invalid/api/webhooks/1/tok', '222233334444555566', '{"kinds":["new"]}', 'immediate', null, 1);
+  shim.db
+    .prepare('INSERT INTO subscriptions (id, guild_id, webhook_url, filter, mode, digest_interval_min, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run('off', 'g', 'https://discord.invalid/api/webhooks/2/tok', '{}', 'digest', 15, 0);
+  shim.db
+    .prepare('INSERT INTO outbox (id, subscription_id, event_id, attempts, next_attempt_at) VALUES (?, ?, ?, ?, ?)')
+    .run(outboxId('sub1', id), 'sub1', id, 1, NOW);
+  return shim;
+}
+
+describe('schema upgrade from a database without the bot columns of subscriptions', () => {
+  it('the fixture really lacks the bot columns and the current queries fail on it', async () => {
+    expect(SCHEMA_BEFORE_BOT).not.toMatch(/channel_id TEXT,$/m);
+    expect(SCHEMA_BEFORE_BOT).not.toMatch(/paused_until/);
+    await expect(new D1Store(databaseBeforeBot().asD1()).takeDue(NOW, 10)).rejects.toThrow(/transport|channel_id|paused_until/);
+  });
+
+  it('adds the bot columns with their defaults and keeps every existing row, filter and queued delivery', async () => {
+    const shim = databaseBeforeBot();
+    shim.db.exec(MIGRATION_BOT);
+    const info = (name: string) =>
+      shim.db.prepare("SELECT \"notnull\" AS required, dflt_value AS dflt FROM pragma_table_info('subscriptions') WHERE name = ?").get(name);
+    expect(info('webhook_url')).toEqual({ required: 0, dflt: null });
+    expect(info('transport')).toEqual({ required: 1, dflt: "'webhook'" });
+    expect(info('thread_per_mod')).toEqual({ required: 1, dflt: '0' });
+    expect(info('paused_until')).toEqual({ required: 1, dflt: '0' });
+    for (const column of ['channel_id', 'label', 'created_by']) expect(info(column)).toEqual({ required: 0, dflt: null });
+
+    const store = new D1Store(shim.asD1());
+    const [due] = await store.takeDue(NOW, 10);
+    expect(due!.row).toMatchObject({ subscriptionId: 'sub1', attempts: 1 });
+    expect(due!.subscription).toEqual({
+      id: 'sub1',
+      guildId: 'g',
+      transport: 'webhook',
+      webhookUrl: 'https://discord.invalid/api/webhooks/1/tok',
+      channelId: null,
+      threadId: '222233334444555566',
+      label: null,
+      createdBy: null,
+      threadPerMod: false,
+      pausedUntil: 0,
+      filter: { kinds: ['new'] },
+      mode: 'immediate',
+      digestIntervalMin: 30,
+      enabled: true,
+    });
+    expect((await store.listSubscriptions()).map((s) => s.id)).toEqual(['sub1']);
+    expect((await store.listSubscriptionsByGuild('g')).map((s) => s.id).sort()).toEqual(['off', 'sub1']);
+  });
+
+  it('accepts a bot subscription without a webhook afterwards and rejects a row with neither destination', async () => {
+    const shim = databaseBeforeBot();
+    shim.db.exec(MIGRATION_BOT);
+    const store = new D1Store(shim.asD1());
+    await store.createSubscription({ id: 'bot1', guildId: 'g', transport: 'bot', channelId: 'c1', filter: {}, mode: 'digest', digestIntervalMin: 30, enabled: true });
+    expect((await store.listSubscriptionsByChannel('c1')).map((s) => s.id)).toEqual(['bot1']);
+    expect(() => shim.db.prepare("INSERT INTO subscriptions (id, guild_id, transport) VALUES ('x', 'g', 'bot')").run()).toThrow(/CHECK/);
+    expect(() => shim.db.prepare("INSERT INTO subscriptions (id, guild_id) VALUES ('y', 'g')").run()).toThrow(/CHECK/);
+  });
+
+  it('applies schema.sql cleanly afterwards, twice, and leaves the new tables and indexes in place', () => {
+    const shim = databaseBeforeBot();
+    shim.db.exec(MIGRATION_BOT);
+    expect(() => shim.db.exec(SCHEMA)).not.toThrow();
+    expect(() => shim.db.exec(SCHEMA)).not.toThrow();
+    expect(indexNames(shim)).toEqual(
+      expect.arrayContaining(['idx_subscriptions_enabled', 'idx_subscriptions_channel', 'idx_subscriptions_guild', 'idx_packages_owner', 'idx_packages_name', 'idx_messages_created']),
+    );
+    const tables = (shim.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((r) => r.name);
+    expect(tables).toEqual(expect.arrayContaining(['mod_threads', 'messages']));
+    expect(tables).not.toContain('subscriptions_new');
+  });
+
+  it('applies to a database upgraded through every earlier migration, in order', async () => {
+    const shim = legacyDatabase();
+    for (const migration of [MIGRATION, MIGRATION_DOWNLOAD_URL, MIGRATION_LIKES_WEBSITE, MIGRATION_THREAD_ID, MIGRATION_BOT]) shim.db.exec(migration);
+    shim.db.exec(SCHEMA);
+    const [due] = await new D1Store(shim.asD1()).takeDue(NOW, 10);
+    expect(due!.subscription).toMatchObject({ id: 'sub1', transport: 'webhook', pausedUntil: 0, threadPerMod: false });
   });
 });

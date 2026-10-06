@@ -3,7 +3,7 @@ import { DEDUP_WINDOW_HOURS, DEFAULT_DIGEST_INTERVAL_MIN } from './constants.ts'
 import type { CompiledFilter } from './filter.ts';
 import { outboxId, releaseKey } from './ids.ts';
 import type { Store } from './ports.ts';
-import type { ModEvent, OutboxRow, Subscription } from './types.ts';
+import { isPaused, type ModEvent, type OutboxRow, type Subscription } from './types.ts';
 
 export interface CompiledSubscription {
   sub: Subscription;
@@ -41,10 +41,11 @@ export async function fanOut(
   const nowIso = now.toISOString();
   const sinceIso = new Date(now.getTime() - DEDUP_WINDOW_HOURS * 3_600_000).toISOString();
 
+  const active = subs.filter(({ sub }) => !isPaused(sub, now));
   const matched: { event: ModEvent; subs: CompiledSubscription[] }[] = [];
   const keys = new Set<string>();
   for (const event of events) {
-    const receivers = subs.filter(({ filter }) => filter.matches(event));
+    const receivers = active.filter(({ filter }) => filter.matches(event));
     if (receivers.length === 0) continue;
     matched.push({ event, subs: receivers });
     if (receivers.some(({ sub }) => sub.filter.dedupAcrossStores !== false)) keys.add(releaseKey(event.pkg, event.versionTo));

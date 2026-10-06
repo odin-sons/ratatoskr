@@ -4,13 +4,17 @@ import type {
   CapUsage,
   DiscordMessage,
   DueDelivery,
+  MessageRecord,
   ModEvent,
+  ModThread,
   OutboxRow,
+  PackageMatch,
   PackageSnapshot,
   SourceConfig,
   SourceId,
   SourceState,
   Subscription,
+  SubscriptionPatch,
 } from './types.ts';
 
 // ---------------------------------------------------------------------------
@@ -45,7 +49,50 @@ export interface Store {
   /** Persist a fetch that produced no events (304, or nothing new): update etag/last_ok_at only. */
   touchSource(state: SourceState): Promise<void>;
 
+  /** Enabled subscriptions, paused ones included (fan-out skips those). */
   listSubscriptions(): Promise<Subscription[]>;
+
+  /** Inserts a subscription; rejects when the id exists. */
+  createSubscription(sub: Subscription): Promise<void>;
+
+  /** Applies the fields present in `patch`; false when the subscription does not exist. */
+  updateSubscription(id: string, patch: SubscriptionPatch): Promise<boolean>;
+
+  /** Deletes the subscription and its undelivered outbox rows; false when it does not exist. */
+  deleteSubscription(id: string): Promise<boolean>;
+
+  /** Every subscription (disabled and paused included) whose `channelId` is `channelId`. */
+  listSubscriptionsByChannel(channelId: string): Promise<Subscription[]>;
+
+  /** Every subscription (disabled and paused included) of a guild. */
+  listSubscriptionsByGuild(guildId: string): Promise<Subscription[]>;
+
+  getModThread(channelId: string, source: SourceId, packageId: string): Promise<ModThread | null>;
+
+  /** Inserts or replaces the thread of a mod in a channel. */
+  putModThread(thread: ModThread): Promise<void>;
+
+  deleteModThread(channelId: string, source: SourceId, packageId: string): Promise<void>;
+
+  /** Inserts or replaces the record of a bot message. */
+  putMessage(message: MessageRecord): Promise<void>;
+
+  getMessage(messageId: string): Promise<MessageRecord | null>;
+
+  /** Deletes at most `limit` message records created before `olderThanIso`; returns how many were deleted. */
+  purgeMessages(olderThanIso: string, limit: number): Promise<number>;
+
+  /**
+   * Packages whose name starts with `prefix`, ignoring ASCII case, ordered by name. A prefix shorter than
+   * `AUTOCOMPLETE_MIN_PREFIX` returns nothing; at most `AUTOCOMPLETE_MAX_RESULTS` results.
+   */
+  searchPackages(prefix: string): Promise<PackageMatch[]>;
+
+  /**
+   * Distinct owners starting with `prefix`, ignoring ASCII case, ordered alphabetically, with the same minimum length
+   * and cap as `searchPackages`. Reads at most `AUTOCOMPLETE_OWNER_SCAN_LIMIT` index entries.
+   */
+  searchOwners(prefix: string): Promise<string[]>;
 
   /**
    * Events whose `releaseKey` (see ids.ts) is in `releaseKeys`, created at or after `sinceIso`, joined with their

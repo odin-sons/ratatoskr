@@ -13,6 +13,7 @@ import type {
   StoreEmojis,
   StoreKind,
   Subscription,
+  WebhookSubscription,
 } from '../core/types.ts';
 
 export const FIXED_NOW_ISO = '2026-09-19T12:07:00.000Z';
@@ -263,7 +264,7 @@ export function makeEvent(overrides: Partial<Omit<ModEvent, 'pkg'>> & { pkg?: Pa
   };
 }
 
-export function makeSubscription(overrides: Partial<Subscription> = {}): Subscription {
+export function makeSubscription(overrides: Partial<Omit<Subscription, 'webhookUrl'>> & { webhookUrl?: string } = {}): WebhookSubscription {
   return {
     id: 'sub-1',
     guildId: 'guild-1',

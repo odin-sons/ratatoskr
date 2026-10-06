@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
-import { CLOUDFLARE, OUTBOX_MAX_ATTEMPTS } from '../core/constants.ts';
+import { AUTOCOMPLETE_MAX_RESULTS, AUTOCOMPLETE_MIN_PREFIX, AUTOCOMPLETE_OWNER_SCAN_LIMIT, CLOUDFLARE, OUTBOX_MAX_ATTEMPTS } from '../core/constants.ts';
 import { outboxId, releaseKey } from '../core/ids.ts';
 import type { CommitBatch, Store } from '../core/ports.ts';
-import type { ModEvent, OutboxRow, Subscription } from '../core/types.ts';
-import { makeEvent, makeSubscription } from './fakes.ts';
+import type { MessageRecord, ModEvent, ModThread, OutboxRow, PackageSnapshot, Subscription } from '../core/types.ts';
+import { makeEvent, makeSnapshot, makeSubscription } from './fakes.ts';
 
 export interface StoreContractEnv {
   store: Store;
@@ -681,6 +681,388 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
         const env = await setup([makeSubscription({ id: 'a' }), makeSubscription({ id: 'b', webhookUrl: 'https://discord.invalid/api/webhooks/2/t' })]);
         await env.setSubscriptionEnabled('b', false);
         expect((await env.store.listSubscriptions()).map((s) => s.id)).toEqual(['a']);
+      });
+    });
+
+    describe('subscription writes', () => {
+      const botSub = (over: Partial<Subscription> = {}): Subscription => ({
+        id: 'bot-1',
+        guildId: 'guild-1',
+        transport: 'bot',
+        channelId: 'chan-1',
+        label: 'Valheim news',
+        createdBy: 'user-1',
+        threadPerMod: true,
+        pausedUntil: 0,
+        filter: { kinds: ['new'] },
+        mode: 'immediate',
+        digestIntervalMin: 30,
+        enabled: true,
+        ...over,
+      });
+
+      it('creates a bot subscription without a webhook and reads every field back', async () => {
+        const { store } = await setup([]);
+        await store.createSubscription(botSub({ threadId: 'thread-9', pausedUntil: 1_800_000_000 }));
+        expect(await store.listSubscriptionsByChannel('chan-1')).toEqual([
+          { ...botSub({ threadId: 'thread-9', pausedUntil: 1_800_000_000 }), webhookUrl: null },
+        ]);
+      });
+
+      it('creates a webhook subscription with the defaults of an existing one', async () => {
+        const { store } = await setup([]);
+        await store.createSubscription(makeSubscription({ id: 'hook' }));
+        expect(await store.listSubscriptions()).toEqual([
+          {
+            ...makeSubscription({ id: 'hook' }),
+            transport: 'webhook',
+            channelId: null,
+            threadId: null,
+            label: null,
+            createdBy: null,
+            threadPerMod: false,
+            pausedUntil: 0,
+          },
+        ]);
+      });
+
+      it('rejects a second subscription with the same id and keeps the first', async () => {
+        const { store } = await setup([]);
+        await store.createSubscription(botSub());
+        await expect(store.createSubscription(botSub({ label: 'other' }))).rejects.toThrow();
+        expect((await store.listSubscriptionsByChannel('chan-1'))[0]!.label).toBe('Valheim news');
+      });
+
+      it('updates only the fields present in the patch', async () => {
+        const { store } = await setup([]);
+        await store.createSubscription(botSub());
+        expect(
+          await store.updateSubscription('bot-1', {
+            label: 'Renamed',
+            mode: 'digest',
+            digestIntervalMin: 60,
+            filter: { kinds: ['update'] },
+            threadPerMod: false,
+            pausedUntil: Number.MAX_SAFE_INTEGER,
+            threadId: 'thread-2',
+          }),
+        ).toBe(true);
+        expect((await store.listSubscriptionsByChannel('chan-1'))[0]).toMatchObject({
+          label: 'Renamed',
+          mode: 'digest',
+          digestIntervalMin: 60,
+          filter: { kinds: ['update'] },
+          threadPerMod: false,
+          pausedUntil: Number.MAX_SAFE_INTEGER,
+          threadId: 'thread-2',
+          channelId: 'chan-1',
+          createdBy: 'user-1',
+          enabled: true,
+        });
+      });
+
+      it('clears a nullable field when the patch sets it to null and leaves it alone when undefined', async () => {
+        const { store } = await setup([]);
+        await store.createSubscription(botSub({ threadId: 'thread-9' }));
+        await store.updateSubscription('bot-1', { label: undefined, threadId: null });
+        expect((await store.listSubscriptionsByChannel('chan-1'))[0]).toMatchObject({ label: 'Valheim news', threadId: null });
+      });
+
+      it('disabling through an update hides the subscription from listSubscriptions but not from the channel list', async () => {
+        const { store } = await setup([]);
+        await store.createSubscription(botSub());
+        await store.updateSubscription('bot-1', { enabled: false });
+        expect(await store.listSubscriptions()).toEqual([]);
+        expect((await store.listSubscriptionsByChannel('chan-1'))[0]!.enabled).toBe(false);
+      });
+
+      it('reports whether the subscription existed, also for an empty patch', async () => {
+        const { store } = await setup([]);
+        await store.createSubscription(botSub());
+        expect(await store.updateSubscription('missing', { label: 'x' })).toBe(false);
+        expect(await store.updateSubscription('missing', {})).toBe(false);
+        expect(await store.updateSubscription('bot-1', {})).toBe(true);
+      });
+
+      it('lists a paused subscription like any other enabled one', async () => {
+        const { store } = await setup([]);
+        await store.createSubscription(botSub({ pausedUntil: Number.MAX_SAFE_INTEGER }));
+        expect((await store.listSubscriptions()).map((s) => s.id)).toEqual(['bot-1']);
+      });
+
+      it('deletes the subscription and its undelivered outbox rows, keeping delivered rows and other subscriptions', async () => {
+        const { store } = await setup([makeSubscription({ id: 'other' })]);
+        await store.createSubscription(botSub());
+        const [e1, e2, e3] = [event(1), event(2), event(3)];
+        await store.commit(batch([e1, e2, e3], [row('bot-1', e1), row('bot-1', e2), row('other', e1), row('other', e3)]));
+        await store.markDelivered([row('bot-1', e2).id], NOW);
+
+        expect(await store.deleteSubscription('bot-1')).toBe(true);
+
+        expect(await store.listSubscriptionsByChannel('chan-1')).toEqual([]);
+        expect((await store.takeDue(NOW, 10)).map((d) => d.row.subscriptionId)).toEqual(['other', 'other']);
+        await store.commit(batch([e1, e2], [row('bot-1', e1), row('bot-1', e2)]));
+        expect((await store.takeDue(NOW, 10)).map((d) => d.row.subscriptionId)).toEqual(['other', 'other']);
+      });
+
+      it('reports false and changes nothing when the subscription does not exist', async () => {
+        const { store } = await setup([makeSubscription({ id: 'other' })]);
+        const e = event(1);
+        await store.commit(batch([e], [row('other', e)]));
+        expect(await store.deleteSubscription('missing')).toBe(false);
+        expect(await store.takeDue(NOW, 10)).toHaveLength(1);
+      });
+
+      it('lists by channel every subscription of that channel, disabled and paused ones included, and no other', async () => {
+        const { store } = await setup([makeSubscription({ id: 'hook' })]);
+        await store.createSubscription(botSub({ id: 'a' }));
+        await store.createSubscription(botSub({ id: 'b', enabled: false }));
+        await store.createSubscription(botSub({ id: 'c', pausedUntil: Number.MAX_SAFE_INTEGER }));
+        await store.createSubscription(botSub({ id: 'd', channelId: 'chan-2' }));
+        const ids = async (channelId: string): Promise<string[]> => (await store.listSubscriptionsByChannel(channelId)).map((s) => s.id).sort();
+        expect(await ids('chan-1')).toEqual(['a', 'b', 'c']);
+        expect(await ids('chan-2')).toEqual(['d']);
+        expect(await ids('chan-none')).toEqual([]);
+      });
+
+      it('lists by guild the webhook and bot subscriptions of that guild, disabled ones included', async () => {
+        const { store } = await setup([makeSubscription({ id: 'hook', guildId: 'guild-1' }), makeSubscription({ id: 'elsewhere', guildId: 'guild-2' })]);
+        await store.createSubscription(botSub({ id: 'a' }));
+        await store.createSubscription(botSub({ id: 'b', enabled: false }));
+        await store.createSubscription(botSub({ id: 'c', guildId: 'guild-2' }));
+        const ids = async (guildId: string): Promise<string[]> => (await store.listSubscriptionsByGuild(guildId)).map((s) => s.id).sort();
+        expect(await ids('guild-1')).toEqual(['a', 'b', 'hook']);
+        expect(await ids('guild-2')).toEqual(['c', 'elsewhere']);
+        expect(await ids('guild-3')).toEqual([]);
+      });
+    });
+
+    describe('takeDue with bot subscriptions', () => {
+      it('never returns rows of a bot subscription, so they cannot occupy the limit', async () => {
+        const { store } = await setup();
+        await store.createSubscription({ id: 'bot-q', guildId: 'guild-1', transport: 'bot', channelId: 'chan-1', filter: {}, mode: 'immediate', digestIntervalMin: 30, enabled: true });
+        const botEvents = [event(1), event(2), event(3)];
+        const hookEvent = event(4);
+        await store.commit(batch([...botEvents, hookEvent], [...botEvents.map((e) => row('bot-q', e)), row(SUB, hookEvent, { nextAttemptAt: NOW })]));
+        const due = await store.takeDue(NOW, 2);
+        expect(due.map((d) => d.row.subscriptionId)).toEqual([SUB]);
+      });
+    });
+
+    describe('mod threads', () => {
+      const thread = (over: Partial<ModThread> = {}): ModThread => ({
+        channelId: 'chan-1',
+        source: SOURCE,
+        packageId: 'Owner1-Mod1',
+        threadId: 'thread-1',
+        anchorMessageId: 'msg-1',
+        createdAt: T0,
+        ...over,
+      });
+
+      it('returns null for a mod without a thread', async () => {
+        const { store } = await setup();
+        expect(await store.getModThread('chan-1', SOURCE, 'Owner1-Mod1')).toBeNull();
+      });
+
+      it('round-trips a thread, with and without an anchor message', async () => {
+        const { store } = await setup();
+        await store.putModThread(thread());
+        await store.putModThread(thread({ packageId: 'Owner2-Mod2', anchorMessageId: null }));
+        expect(await store.getModThread('chan-1', SOURCE, 'Owner1-Mod1')).toEqual(thread());
+        expect(await store.getModThread('chan-1', SOURCE, 'Owner2-Mod2')).toEqual(thread({ packageId: 'Owner2-Mod2', anchorMessageId: null }));
+      });
+
+      it('keeps one thread per channel, source and package, and put replaces it', async () => {
+        const { store } = await setup();
+        await store.putModThread(thread());
+        await store.putModThread(thread({ threadId: 'thread-2', anchorMessageId: 'msg-2', createdAt: NOW }));
+        await store.putModThread(thread({ channelId: 'chan-2', threadId: 'thread-other' }));
+        await store.putModThread(thread({ source: 'hexium:valheim', threadId: 'thread-hexium' }));
+        expect(await store.getModThread('chan-1', SOURCE, 'Owner1-Mod1')).toEqual(thread({ threadId: 'thread-2', anchorMessageId: 'msg-2', createdAt: NOW }));
+        expect((await store.getModThread('chan-2', SOURCE, 'Owner1-Mod1'))!.threadId).toBe('thread-other');
+        expect((await store.getModThread('chan-1', 'hexium:valheim', 'Owner1-Mod1'))!.threadId).toBe('thread-hexium');
+      });
+
+      it('deletes only the addressed thread and tolerates one that does not exist', async () => {
+        const { store } = await setup();
+        await store.putModThread(thread());
+        await store.putModThread(thread({ channelId: 'chan-2' }));
+        await store.deleteModThread('chan-1', SOURCE, 'Owner1-Mod1');
+        await store.deleteModThread('chan-1', SOURCE, 'Owner1-Mod1');
+        expect(await store.getModThread('chan-1', SOURCE, 'Owner1-Mod1')).toBeNull();
+        expect(await store.getModThread('chan-2', SOURCE, 'Owner1-Mod1')).not.toBeNull();
+      });
+    });
+
+    describe('message map', () => {
+      const message = (id: string, over: Partial<MessageRecord> = {}): MessageRecord => ({
+        messageId: id,
+        channelId: 'chan-1',
+        source: SOURCE,
+        packageId: 'Owner1-Mod1',
+        eventId: 'event-1',
+        createdAt: T0,
+        ...over,
+      });
+
+      it('returns null for an unknown message', async () => {
+        const { store } = await setup();
+        expect(await store.getMessage('missing')).toBeNull();
+      });
+
+      it('round-trips a record, with and without an event', async () => {
+        const { store } = await setup();
+        await store.putMessage(message('m1'));
+        await store.putMessage(message('m2', { eventId: null }));
+        expect(await store.getMessage('m1')).toEqual(message('m1'));
+        expect(await store.getMessage('m2')).toEqual(message('m2', { eventId: null }));
+      });
+
+      it('replaces the record when the same message is put again', async () => {
+        const { store } = await setup();
+        await store.putMessage(message('m1'));
+        await store.putMessage(message('m1', { packageId: 'Owner2-Mod2', createdAt: NOW }));
+        expect(await store.getMessage('m1')).toEqual(message('m1', { packageId: 'Owner2-Mod2', createdAt: NOW }));
+      });
+
+      it('purges records created before the cutoff and keeps the rest', async () => {
+        const { store } = await setup();
+        await store.putMessage(message('old', { createdAt: '2026-09-01T00:00:00.000Z' }));
+        await store.putMessage(message('edge', { createdAt: '2026-09-10T00:00:00.000Z' }));
+        await store.putMessage(message('new', { createdAt: NOW }));
+        expect(await store.purgeMessages('2026-09-10T00:00:00.000Z', 100)).toBe(1);
+        expect(await store.getMessage('old')).toBeNull();
+        expect(await store.getMessage('edge')).not.toBeNull();
+        expect(await store.getMessage('new')).not.toBeNull();
+      });
+
+      it('deletes at most `limit` records per call', async () => {
+        const { store } = await setup();
+        for (let i = 0; i < 5; i++) await store.putMessage(message(`m${i}`, { createdAt: '2026-09-01T00:00:00.000Z' }));
+        expect(await store.purgeMessages('2026-09-10T00:00:00.000Z', 2)).toBe(2);
+        expect(await store.purgeMessages('2026-09-10T00:00:00.000Z', 2)).toBe(2);
+        expect(await store.purgeMessages('2026-09-10T00:00:00.000Z', 2)).toBe(1);
+        expect(await store.purgeMessages('2026-09-10T00:00:00.000Z', 2)).toBe(0);
+      });
+    });
+
+    describe('autocomplete search', () => {
+      async function seed(store: Store, packages: { owner: string; name: string; source?: string }[]): Promise<void> {
+        const bySource = new Map<string, PackageSnapshot[]>();
+        for (const p of packages) {
+          const source = p.source ?? SOURCE;
+          const list = bySource.get(source) ?? [];
+          list.push(makeSnapshot({ source, owner: p.owner, name: p.name }));
+          bySource.set(source, list);
+        }
+        for (const [source, list] of bySource) await store.commit({ source, packages: list, events: [], outbox: [], state: { ...state, id: source } });
+      }
+
+      it('returns nothing for a prefix shorter than the minimum', async () => {
+        const { store } = await setup();
+        await seed(store, [{ owner: 'Alpha', name: 'Axe' }]);
+        for (const prefix of ['', 'a', 'A']) {
+          expect(await store.searchPackages(prefix)).toEqual([]);
+          expect(await store.searchOwners(prefix)).toEqual([]);
+        }
+        expect(AUTOCOMPLETE_MIN_PREFIX).toBe(2);
+      });
+
+      it('finds packages by name prefix ignoring case, ordered by name, and not by a substring', async () => {
+        const { store } = await setup();
+        await seed(store, [
+          { owner: 'Bob', name: 'Warfare' },
+          { owner: 'Ann', name: 'warp' },
+          { owner: 'Cid', name: 'WARDEN' },
+          { owner: 'Dee', name: 'Stewardship' },
+          { owner: 'Eve', name: 'War' },
+        ]);
+        expect((await store.searchPackages('wAr')).map((p) => p.name)).toEqual(['War', 'WARDEN', 'Warfare', 'warp']);
+        expect((await store.searchPackages('wa')).map((p) => p.name)).toEqual(['War', 'WARDEN', 'Warfare', 'warp']);
+        expect(await store.searchPackages('zz')).toEqual([]);
+      });
+
+      it('returns source, package id, owner and name of each match, across sources', async () => {
+        const { store } = await setup();
+        await seed(store, [
+          { owner: 'Ann', name: 'Epic', source: SOURCE },
+          { owner: 'Ann', name: 'Epic', source: 'hexium:valheim' },
+        ]);
+        const found = await store.searchPackages('Ep');
+        expect(found.map((p) => ({ source: p.source, packageId: p.packageId, owner: p.owner, name: p.name })).sort((a, b) => a.source.localeCompare(b.source))).toEqual([
+          { source: 'hexium:valheim', packageId: 'Ann-Epic', owner: 'Ann', name: 'Epic' },
+          { source: SOURCE, packageId: 'Ann-Epic', owner: 'Ann', name: 'Epic' },
+        ]);
+      });
+
+      it('treats LIKE wildcards in the prefix literally', async () => {
+        const { store } = await setup();
+        await seed(store, [
+          { owner: 'Ann', name: 'a_b' },
+          { owner: 'Bob', name: 'axb' },
+          { owner: 'Cid', name: '100%' },
+          { owner: 'Dee', name: '1000' },
+        ]);
+        expect((await store.searchPackages('a_')).map((p) => p.name)).toEqual(['a_b']);
+        expect((await store.searchPackages('10')).map((p) => p.name).sort()).toEqual(['100%', '1000']);
+        expect((await store.searchPackages('1%')).map((p) => p.name)).toEqual([]);
+      });
+
+      it('caps the package results', async () => {
+        const { store } = await setup();
+        await seed(store, Array.from({ length: AUTOCOMPLETE_MAX_RESULTS + 5 }, (_, i) => ({ owner: `Own${i}`, name: `Mod${String(i).padStart(2, '0')}` })));
+        const found = await store.searchPackages('Mod');
+        expect(found).toHaveLength(AUTOCOMPLETE_MAX_RESULTS);
+        expect(found[0]!.name).toBe('Mod00');
+        expect(found[AUTOCOMPLETE_MAX_RESULTS - 1]!.name).toBe(`Mod${AUTOCOMPLETE_MAX_RESULTS - 1}`);
+      });
+
+      it('finds distinct owners by prefix ignoring case, alphabetically', async () => {
+        const { store } = await setup();
+        await seed(store, [
+          { owner: 'Randy', name: 'One' },
+          { owner: 'Randy', name: 'Two' },
+          { owner: 'randy', name: 'Three', source: 'hexium:valheim' },
+          { owner: 'RaGnar', name: 'Four' },
+          { owner: 'Zed', name: 'Five' },
+          { owner: 'Bran', name: 'Six' },
+        ]);
+        const owners = await store.searchOwners('RA');
+        expect(owners.map((o) => o.toLowerCase())).toEqual(['ragnar', 'randy']);
+        expect(await store.searchOwners('qq')).toEqual([]);
+      });
+
+      it('caps the owner results', async () => {
+        const { store } = await setup();
+        await seed(store, Array.from({ length: AUTOCOMPLETE_MAX_RESULTS + 5 }, (_, i) => ({ owner: `Crew${String(i).padStart(2, '0')}`, name: `Mod${i}` })));
+        const owners = await store.searchOwners('Cr');
+        expect(owners).toHaveLength(AUTOCOMPLETE_MAX_RESULTS);
+        expect(owners[0]).toBe('Crew00');
+      });
+
+      it('lists an owner with many packages once', async () => {
+        const { store } = await setup();
+        await seed(store, Array.from({ length: 40 }, (_, i) => ({ owner: 'Prolific', name: `Mod${i}` })));
+        expect(await store.searchOwners('Pr')).toEqual(['Prolific']);
+      });
+
+      it('reads no more than the scan limit of entries to find owners', async () => {
+        const { store } = await setup();
+        const heavy = Array.from({ length: AUTOCOMPLETE_OWNER_SCAN_LIMIT }, (_, i) => ({ owner: 'Aaa', name: `Mod${i}` }));
+        await seed(store, [...heavy, { owner: 'Aab', name: 'Late' }]);
+        expect(await store.searchOwners('Aa')).toEqual(['Aaa']);
+      });
+    });
+
+    describe('purgeMessages next to purgeDelivered', () => {
+      it('leaves the outbox alone', async () => {
+        const { store } = await setup();
+        const e = event(1);
+        await store.commit(batch([e], [row(SUB, e)]));
+        await store.putMessage({ messageId: 'm1', channelId: 'c', source: SOURCE, packageId: 'p', eventId: null, createdAt: '2026-01-01T00:00:00.000Z' });
+        await store.purgeMessages('2026-09-10T00:00:00.000Z', 10);
+        expect(await store.takeDue(NOW, 10)).toHaveLength(1);
       });
     });
 

@@ -106,10 +106,25 @@ export interface SubscriptionFilter {
 
 export type DeliveryMode = 'immediate' | 'digest';
 
+export type SubscriptionTransport = 'webhook' | 'bot';
+
 export interface Subscription {
   id: string;
   guildId: string;
-  webhookUrl: string;
+  /** Absent only for the `bot` transport. */
+  webhookUrl?: string | null;
+  /** Default `webhook`. */
+  transport?: SubscriptionTransport;
+  /** Destination channel (a text channel or a forum) of a `bot` subscription. */
+  channelId?: string | null;
+  /** Name shown in `/list` and in the `subscription` autocomplete. */
+  label?: string | null;
+  /** Discord user id of the creator. */
+  createdBy?: string | null;
+  /** Write the updates of each mod into that mod's own thread or forum post. */
+  threadPerMod?: boolean;
+  /** Epoch seconds; 0 or absent is not paused, `Number.MAX_SAFE_INTEGER` is an open-ended pause. */
+  pausedUntil?: number;
   /** Deliver into this existing forum post or channel thread instead of the webhook's parent channel. */
   threadId?: string | null;
   filter: SubscriptionFilter;
@@ -117,6 +132,52 @@ export interface Subscription {
   /** Only meaningful for `digest`. Default 30. */
   digestIntervalMin: number;
   enabled: boolean;
+}
+
+/** Fields of a subscription `updateSubscription` may change. */
+export type SubscriptionPatch = Partial<
+  Pick<Subscription, 'filter' | 'mode' | 'digestIntervalMin' | 'enabled' | 'label' | 'threadId' | 'threadPerMod' | 'pausedUntil'>
+>;
+
+/** A subscription that delivers through a Discord webhook. */
+export type WebhookSubscription = Subscription & { webhookUrl: string };
+
+export function hasWebhook(sub: Subscription): sub is WebhookSubscription {
+  return typeof sub.webhookUrl === 'string' && sub.webhookUrl !== '';
+}
+
+export function isPaused(sub: Subscription, now: Date): boolean {
+  return now.getTime() < (sub.pausedUntil ?? 0) * 1000;
+}
+
+/** A mod's thread in one channel, shared by every subscription of that channel. */
+export interface ModThread {
+  channelId: string;
+  source: SourceId;
+  packageId: string;
+  threadId: string;
+  anchorMessageId: string | null;
+  /** ISO-8601, UTC. */
+  createdAt: string;
+}
+
+/** A bot message about one mod, so a message command can find the mod behind it. */
+export interface MessageRecord {
+  messageId: string;
+  channelId: string;
+  source: SourceId;
+  packageId: string;
+  eventId: string | null;
+  /** ISO-8601, UTC. */
+  createdAt: string;
+}
+
+/** A package matched by autocomplete. */
+export interface PackageMatch {
+  source: SourceId;
+  packageId: string;
+  owner: string;
+  name: string;
 }
 
 export interface OutboxRow {

@@ -9,6 +9,8 @@ import {
   CLOUDFLARE,
   DEGRADATION,
   DELIVERED_RETENTION_DAYS,
+  MESSAGE_PURGE_BATCH,
+  MESSAGE_RETENTION_DAYS,
   MS_PER_DAY,
   OUTBOX_PURGE_BATCH,
   SOURCE_STATE_REFRESH_MS,
@@ -172,7 +174,10 @@ export async function runReconcile(deps: TickDeps, scheduledTimeMs: number, reco
   }
   const now = run?.now ?? deps.clock.now();
   await finish(deps, budget, report, jobs, now, [], degradation);
-  if (!paused) report.purged = await purgeDelivered(deps, now);
+  if (!paused) {
+    report.purged = await purgeDelivered(deps, now);
+    await purgeMessages(deps, now);
+  }
   return report;
 }
 
@@ -227,6 +232,15 @@ async function purgeDelivered(deps: TickDeps, now: Date): Promise<number> {
   } catch (err) {
     console.warn(`purge of delivered outbox rows failed: ${sanitizeLogText(errorMessage(err))}`);
     return 0;
+  }
+}
+
+async function purgeMessages(deps: TickDeps, now: Date): Promise<void> {
+  const cutoff = new Date(now.getTime() - MESSAGE_RETENTION_DAYS * MS_PER_DAY).toISOString();
+  try {
+    await deps.store.purgeMessages(cutoff, MESSAGE_PURGE_BATCH);
+  } catch (err) {
+    console.warn(`purge of message records failed: ${sanitizeLogText(errorMessage(err))}`);
   }
 }
 

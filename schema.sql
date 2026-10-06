@@ -5,7 +5,8 @@
 -- needs migrations/0001_outbox_delivered_at.sql once, and one created before `packages.download_url` and
 -- `packages.downloads` existed needs migrations/0002_package_download_url_and_downloads.sql once, and one created before
 -- `packages.likes` and `packages.website_url` existed needs migrations/0003_package_likes_and_website.sql once, and one
--- created before `subscriptions.thread_id` existed needs migrations/0004_subscription_thread_id.sql once, before this file.
+-- created before `subscriptions.thread_id` existed needs migrations/0004_subscription_thread_id.sql once, and one
+-- created before the bot columns of `subscriptions` existed needs migrations/0005_bot_subscriptions.sql once, before this file.
 
 CREATE TABLE IF NOT EXISTS sources (
   id TEXT PRIMARY KEY,
@@ -36,6 +37,8 @@ CREATE TABLE IF NOT EXISTS packages (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (source, package_id)
 );
+CREATE INDEX IF NOT EXISTS idx_packages_owner ON packages (owner COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_packages_name ON packages (name COLLATE NOCASE);
 
 CREATE TABLE IF NOT EXISTS events (
   id TEXT PRIMARY KEY,
@@ -55,14 +58,45 @@ CREATE INDEX IF NOT EXISTS idx_events_release ON events (release_key, created_at
 CREATE TABLE IF NOT EXISTS subscriptions (
   id TEXT PRIMARY KEY,
   guild_id TEXT NOT NULL,
-  webhook_url TEXT NOT NULL,
+  transport TEXT NOT NULL DEFAULT 'webhook' CHECK (transport IN ('webhook', 'bot')),
+  webhook_url TEXT,
+  channel_id TEXT,
   thread_id TEXT,
+  label TEXT,
+  created_by TEXT,
   filter TEXT NOT NULL DEFAULT '{}',
   mode TEXT NOT NULL DEFAULT 'digest' CHECK (mode IN ('immediate', 'digest')),
   digest_interval_min INTEGER,
-  enabled INTEGER NOT NULL DEFAULT 1
+  enabled INTEGER NOT NULL DEFAULT 1,
+  thread_per_mod INTEGER NOT NULL DEFAULT 0,
+  paused_until INTEGER NOT NULL DEFAULT 0,
+  CHECK ((transport = 'webhook' AND webhook_url IS NOT NULL) OR (transport = 'bot' AND channel_id IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_subscriptions_enabled ON subscriptions (enabled);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_channel ON subscriptions (channel_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_guild ON subscriptions (guild_id);
+
+-- One thread per mod and channel, shared by every subscription of that channel.
+CREATE TABLE IF NOT EXISTS mod_threads (
+  channel_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  package_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  anchor_message_id TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (channel_id, source, package_id)
+);
+
+-- Bot messages about one mod; purged after 7 days by the reconcile cron.
+CREATE TABLE IF NOT EXISTS messages (
+  message_id TEXT PRIMARY KEY,
+  channel_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  package_id TEXT NOT NULL,
+  event_id TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_created ON messages (created_at);
 
 CREATE TABLE IF NOT EXISTS outbox (
   id TEXT PRIMARY KEY,

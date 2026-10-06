@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { CLOUDFLARE, DEFAULT_DIGEST_INTERVAL_MIN, OUTBOX_MAX_ATTEMPTS } from '../core/constants.ts';
+import {
+  AUTOCOMPLETE_MAX_RESULTS,
+  AUTOCOMPLETE_MIN_PREFIX,
+  AUTOCOMPLETE_OWNER_SCAN_LIMIT,
+  CLOUDFLARE,
+  DEFAULT_DIGEST_INTERVAL_MIN,
+  OUTBOX_MAX_ATTEMPTS,
+} from '../core/constants.ts';
 import { parseFilter } from '../core/filter.ts';
 import { releaseKey } from '../core/ids.ts';
 import type { CommitBatch, EventDetails, Store } from '../core/ports.ts';
@@ -9,13 +16,18 @@ import type {
   DeliveryMode,
   DueDelivery,
   EventKind,
+  MessageRecord,
   ModEvent,
+  ModThread,
+  PackageMatch,
   PackageSnapshot,
   OutboxRow,
   SourceId,
   SourceState,
   StoreKind,
   Subscription,
+  SubscriptionPatch,
+  SubscriptionTransport,
 } from '../core/types.ts';
 import { D1_MAX_BATCH_STATEMENTS } from './limits.ts';
 
@@ -65,12 +77,36 @@ interface EventCols {
 interface SubscriptionCols {
   id: string;
   guild_id: string;
-  webhook_url: string;
+  transport: string;
+  webhook_url: string | null;
+  channel_id: string | null;
   thread_id: string | null;
+  label: string | null;
+  created_by: string | null;
   filter: string;
   mode: string;
   digest_interval_min: number | null;
   enabled: number;
+  thread_per_mod: number;
+  paused_until: number;
+}
+
+interface ModThreadCols {
+  channel_id: string;
+  source: string;
+  package_id: string;
+  thread_id: string;
+  anchor_message_id: string | null;
+  created_at: string;
+}
+
+interface MessageCols {
+  message_id: string;
+  channel_id: string;
+  source: string;
+  package_id: string;
+  event_id: string | null;
+  created_at: string;
 }
 
 interface OutboxCols {
@@ -144,13 +180,21 @@ const OUTBOX_READ_COLUMNS: readonly (keyof OutboxCols)[] = OUTBOX_WRITE_COLUMNS;
 const SUBSCRIPTION_READ_COLUMNS: readonly (keyof SubscriptionCols)[] = [
   'id',
   'guild_id',
+  'transport',
   'webhook_url',
+  'channel_id',
   'thread_id',
+  'label',
+  'created_by',
   'filter',
   'mode',
   'digest_interval_min',
   'enabled',
+  'thread_per_mod',
+  'paused_until',
 ];
+const MOD_THREAD_COLUMNS = ['channel_id', 'source', 'package_id', 'thread_id', 'anchor_message_id', 'created_at'] as const satisfies readonly (keyof ModThreadCols)[];
+const MESSAGE_COLUMNS = ['message_id', 'channel_id', 'source', 'package_id', 'event_id', 'created_at'] as const satisfies readonly (keyof MessageCols)[];
 
 function selectColumns(table: string, alias: string, columns: readonly string[]): string {
   return columns.map((c) => `${table}.${c} AS ${alias}_${c}`).join(', ');
@@ -163,10 +207,27 @@ const SQL_SOURCE_STATE = `SELECT ${SOURCE_COLUMNS.join(', ')} FROM sources WHERE
 const SQL_SOURCE_UPSERT = `INSERT INTO sources (${SOURCE_COLUMNS.join(', ')}) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET cursor = excluded.cursor, etag = excluded.etag, bootstrapped = excluded.bootstrapped, last_ok_at = excluded.last_ok_at`;
 const SQL_SOURCE_TOUCH = `INSERT INTO sources (${SOURCE_COLUMNS.join(', ')}) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET etag = excluded.etag, last_ok_at = excluded.last_ok_at`;
 const SQL_ALL_KNOWN = 'SELECT package_id, latest_version FROM packages WHERE source = ?';
-const SQL_SUBSCRIPTIONS = `SELECT ${SUBSCRIPTION_READ_COLUMNS.join(', ')} FROM subscriptions WHERE enabled = 1`;
+const SUBSCRIPTION_SELECT = `SELECT ${SUBSCRIPTION_READ_COLUMNS.join(', ')} FROM subscriptions`;
+const SQL_SUBSCRIPTIONS = `${SUBSCRIPTION_SELECT} WHERE enabled = 1`;
+const SQL_SUBSCRIPTIONS_BY_CHANNEL = `${SUBSCRIPTION_SELECT} WHERE channel_id = ?`;
+const SQL_SUBSCRIPTIONS_BY_GUILD = `${SUBSCRIPTION_SELECT} WHERE guild_id = ?`;
+const SQL_CREATE_SUBSCRIPTION = `INSERT INTO subscriptions (${SUBSCRIPTION_READ_COLUMNS.join(', ')}) VALUES (${placeholders(SUBSCRIPTION_READ_COLUMNS.length)})`;
+const SQL_DELETE_SUBSCRIPTION_OUTBOX = 'DELETE FROM outbox WHERE subscription_id = ? AND delivered_at IS NULL';
+const SQL_DELETE_SUBSCRIPTION = 'DELETE FROM subscriptions WHERE id = ?';
+const SQL_SUBSCRIPTION_EXISTS = 'SELECT id FROM subscriptions WHERE id = ?';
+const SQL_GET_MOD_THREAD = `SELECT ${MOD_THREAD_COLUMNS.join(', ')} FROM mod_threads WHERE channel_id = ? AND source = ? AND package_id = ?`;
+const SQL_PUT_MOD_THREAD = `INSERT INTO mod_threads (${MOD_THREAD_COLUMNS.join(', ')}) VALUES (${placeholders(MOD_THREAD_COLUMNS.length)}) ON CONFLICT (channel_id, source, package_id) DO UPDATE SET thread_id = excluded.thread_id, anchor_message_id = excluded.anchor_message_id, created_at = excluded.created_at`;
+const SQL_DELETE_MOD_THREAD = 'DELETE FROM mod_threads WHERE channel_id = ? AND source = ? AND package_id = ?';
+const SQL_GET_MESSAGE = `SELECT ${MESSAGE_COLUMNS.join(', ')} FROM messages WHERE message_id = ?`;
+const SQL_PUT_MESSAGE = `INSERT INTO messages (${MESSAGE_COLUMNS.join(', ')}) VALUES (${placeholders(MESSAGE_COLUMNS.length)}) ON CONFLICT (message_id) DO UPDATE SET channel_id = excluded.channel_id, source = excluded.source, package_id = excluded.package_id, event_id = excluded.event_id, created_at = excluded.created_at`;
+const SQL_PURGE_MESSAGES = 'DELETE FROM messages WHERE message_id IN (SELECT message_id FROM messages WHERE created_at < ? LIMIT ?)';
+const SQL_SEARCH_PACKAGES = 'SELECT source, package_id, owner, name FROM packages WHERE name COLLATE NOCASE >= ? AND name COLLATE NOCASE < ? ORDER BY name COLLATE NOCASE LIMIT ?';
+const SQL_SEARCH_OWNERS = 'SELECT owner FROM packages WHERE owner COLLATE NOCASE >= ? AND owner COLLATE NOCASE < ? ORDER BY owner COLLATE NOCASE LIMIT ?';
+/** Above every UTF-8 sequence, so `prefix + this` bounds the range of names starting with `prefix`. */
+const PREFIX_UPPER_BOUND = '\u{10FFFF}';
 const SUBSCRIPTION_FILTER_IS_OBJECT = "CASE WHEN json_valid(s.filter) THEN json_type(s.filter) = 'object' ELSE 0 END";
 // Unary plus keeps the planner driving from idx_outbox_pending instead of subscriptions.
-const SQL_TAKE_DUE = `SELECT ${selectColumns('o', 'o', OUTBOX_READ_COLUMNS)}, ${selectColumns('s', 's', SUBSCRIPTION_READ_COLUMNS)}, ${EVENT_JOIN_SELECT} FROM outbox o JOIN events e ON e.id = o.event_id ${EVENT_JOIN_PACKAGES} JOIN subscriptions s ON s.id = o.subscription_id WHERE o.parked = 0 AND o.delivered_at IS NULL AND o.next_attempt_at <= ? AND o.attempts < ? AND +s.enabled = 1 AND ${SUBSCRIPTION_FILTER_IS_OBJECT} ORDER BY o.next_attempt_at, o.rowid LIMIT ?`;
+const SQL_TAKE_DUE = `SELECT ${selectColumns('o', 'o', OUTBOX_READ_COLUMNS)}, ${selectColumns('s', 's', SUBSCRIPTION_READ_COLUMNS)}, ${EVENT_JOIN_SELECT} FROM outbox o JOIN events e ON e.id = o.event_id ${EVENT_JOIN_PACKAGES} JOIN subscriptions s ON s.id = o.subscription_id WHERE o.parked = 0 AND o.delivered_at IS NULL AND o.next_attempt_at <= ? AND o.attempts < ? AND +s.enabled = 1 AND s.transport = 'webhook' AND ${SUBSCRIPTION_FILTER_IS_OBJECT} ORDER BY o.next_attempt_at, o.rowid LIMIT ?`;
 const SQL_MARK_DELIVERED_PREFIX = 'UPDATE outbox SET delivered_at = ? WHERE delivered_at IS NULL AND id IN';
 const SQL_PURGE_DELIVERED = 'DELETE FROM outbox WHERE id IN (SELECT id FROM outbox WHERE delivered_at < ? LIMIT ?)';
 const SQL_MARK_FAILED_PREFIX = 'UPDATE outbox SET attempts = attempts + 1, next_attempt_at = ?, parked = MAX(parked, ?) WHERE delivered_at IS NULL AND id IN';
@@ -335,6 +396,108 @@ export class D1Store implements Store {
   async listSubscriptions(): Promise<Subscription[]> {
     const { results } = await this.db.prepare(SQL_SUBSCRIPTIONS).all<SubscriptionCols>();
     return mapValidSubscriptions(results);
+  }
+
+  async createSubscription(sub: Subscription): Promise<void> {
+    await this.db.prepare(SQL_CREATE_SUBSCRIPTION).bind(...subscriptionValues(sub)).run();
+  }
+
+  async updateSubscription(id: string, patch: SubscriptionPatch): Promise<boolean> {
+    const assignments = subscriptionAssignments(patch);
+    if (assignments.length === 0) return (await this.db.prepare(SQL_SUBSCRIPTION_EXISTS).bind(id).first()) !== null;
+    const sql = `UPDATE subscriptions SET ${assignments.map((a) => `${a.column} = ?`).join(', ')} WHERE id = ?`;
+    const result = await this.db.prepare(sql).bind(...assignments.map((a) => a.value), id).run();
+    return result.meta.changes > 0;
+  }
+
+  async deleteSubscription(id: string): Promise<boolean> {
+    const results = await this.db.batch([
+      this.db.prepare(SQL_DELETE_SUBSCRIPTION_OUTBOX).bind(id),
+      this.db.prepare(SQL_DELETE_SUBSCRIPTION).bind(id),
+    ]);
+    return results[1]!.meta.changes > 0;
+  }
+
+  async listSubscriptionsByChannel(channelId: string): Promise<Subscription[]> {
+    const { results } = await this.db.prepare(SQL_SUBSCRIPTIONS_BY_CHANNEL).bind(channelId).all<SubscriptionCols>();
+    return mapValidSubscriptions(results);
+  }
+
+  async listSubscriptionsByGuild(guildId: string): Promise<Subscription[]> {
+    const { results } = await this.db.prepare(SQL_SUBSCRIPTIONS_BY_GUILD).bind(guildId).all<SubscriptionCols>();
+    return mapValidSubscriptions(results);
+  }
+
+  async getModThread(channelId: string, source: SourceId, packageId: string): Promise<ModThread | null> {
+    const row = await this.db.prepare(SQL_GET_MOD_THREAD).bind(channelId, source, packageId).first<ModThreadCols>();
+    if (row === null) return null;
+    return {
+      channelId: row.channel_id,
+      source: row.source,
+      packageId: row.package_id,
+      threadId: row.thread_id,
+      anchorMessageId: row.anchor_message_id,
+      createdAt: row.created_at,
+    };
+  }
+
+  async putModThread(thread: ModThread): Promise<void> {
+    await this.db
+      .prepare(SQL_PUT_MOD_THREAD)
+      .bind(thread.channelId, thread.source, thread.packageId, thread.threadId, thread.anchorMessageId, thread.createdAt)
+      .run();
+  }
+
+  async deleteModThread(channelId: string, source: SourceId, packageId: string): Promise<void> {
+    await this.db.prepare(SQL_DELETE_MOD_THREAD).bind(channelId, source, packageId).run();
+  }
+
+  async putMessage(message: MessageRecord): Promise<void> {
+    await this.db
+      .prepare(SQL_PUT_MESSAGE)
+      .bind(message.messageId, message.channelId, message.source, message.packageId, message.eventId, message.createdAt)
+      .run();
+  }
+
+  async getMessage(messageId: string): Promise<MessageRecord | null> {
+    const row = await this.db.prepare(SQL_GET_MESSAGE).bind(messageId).first<MessageCols>();
+    if (row === null) return null;
+    return {
+      messageId: row.message_id,
+      channelId: row.channel_id,
+      source: row.source,
+      packageId: row.package_id,
+      eventId: row.event_id,
+      createdAt: row.created_at,
+    };
+  }
+
+  async purgeMessages(olderThanIso: string, limit: number): Promise<number> {
+    const result = await this.db.prepare(SQL_PURGE_MESSAGES).bind(olderThanIso, limit).run();
+    return result.meta.changes;
+  }
+
+  async searchPackages(prefix: string): Promise<PackageMatch[]> {
+    if (prefix.length < AUTOCOMPLETE_MIN_PREFIX) return [];
+    const { results } = await this.db
+      .prepare(SQL_SEARCH_PACKAGES)
+      .bind(prefix, prefix + PREFIX_UPPER_BOUND, AUTOCOMPLETE_MAX_RESULTS)
+      .all<{ source: string; package_id: string; owner: string; name: string }>();
+    return results.map((r) => ({ source: r.source, packageId: r.package_id, owner: r.owner, name: r.name }));
+  }
+
+  async searchOwners(prefix: string): Promise<string[]> {
+    if (prefix.length < AUTOCOMPLETE_MIN_PREFIX) return [];
+    const { results } = await this.db
+      .prepare(SQL_SEARCH_OWNERS)
+      .bind(prefix, prefix + PREFIX_UPPER_BOUND, AUTOCOMPLETE_OWNER_SCAN_LIMIT)
+      .all<{ owner: string }>();
+    const owners = new Map<string, string>();
+    for (const { owner } of results) {
+      const folded = owner.replace(/[A-Z]/g, (c) => c.toLowerCase());
+      if (!owners.has(folded)) owners.set(folded, owner);
+    }
+    return [...owners.values()].slice(0, AUTOCOMPLETE_MAX_RESULTS);
   }
 
   async recentEventsByReleaseKeys(releaseKeys: string[], sinceIso: string): Promise<Map<string, ModEvent[]>> {
@@ -514,6 +677,38 @@ function mapSourceState(row: SourceCols): SourceState {
   };
 }
 
+function subscriptionValues(s: Subscription): (string | number | null)[] {
+  return [
+    s.id,
+    s.guildId,
+    s.transport ?? 'webhook',
+    s.webhookUrl ?? null,
+    s.channelId ?? null,
+    s.threadId ?? null,
+    s.label ?? null,
+    s.createdBy ?? null,
+    JSON.stringify(s.filter),
+    s.mode,
+    s.digestIntervalMin,
+    s.enabled ? 1 : 0,
+    s.threadPerMod ? 1 : 0,
+    s.pausedUntil ?? 0,
+  ];
+}
+
+function subscriptionAssignments(patch: SubscriptionPatch): { column: string; value: string | number | null }[] {
+  const out: { column: string; value: string | number | null }[] = [];
+  if (patch.filter !== undefined) out.push({ column: 'filter', value: JSON.stringify(patch.filter) });
+  if (patch.mode !== undefined) out.push({ column: 'mode', value: patch.mode });
+  if (patch.digestIntervalMin !== undefined) out.push({ column: 'digest_interval_min', value: patch.digestIntervalMin });
+  if (patch.enabled !== undefined) out.push({ column: 'enabled', value: patch.enabled ? 1 : 0 });
+  if (patch.label !== undefined) out.push({ column: 'label', value: patch.label });
+  if (patch.threadId !== undefined) out.push({ column: 'thread_id', value: patch.threadId });
+  if (patch.threadPerMod !== undefined) out.push({ column: 'thread_per_mod', value: patch.threadPerMod ? 1 : 0 });
+  if (patch.pausedUntil !== undefined) out.push({ column: 'paused_until', value: patch.pausedUntil });
+  return out;
+}
+
 function mapSubscription(row: SubscriptionCols): Subscription | null {
   let parsed: unknown;
   try {
@@ -523,11 +718,18 @@ function mapSubscription(row: SubscriptionCols): Subscription | null {
   }
   const filter = parseFilter(parsed);
   if (filter === null || (row.mode !== 'immediate' && row.mode !== 'digest')) return null;
+  if (row.transport !== 'webhook' && row.transport !== 'bot') return null;
   return {
     id: row.id,
     guildId: row.guild_id,
+    transport: row.transport as SubscriptionTransport,
     webhookUrl: row.webhook_url,
+    channelId: row.channel_id,
     threadId: row.thread_id,
+    label: row.label,
+    createdBy: row.created_by,
+    threadPerMod: row.thread_per_mod === 1,
+    pausedUntil: row.paused_until,
     filter,
     mode: row.mode as DeliveryMode,
     digestIntervalMin: row.digest_interval_min ?? DEFAULT_DIGEST_INTERVAL_MIN,
