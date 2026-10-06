@@ -8,7 +8,7 @@ import type {
   EventKind,
   SourceConfig,
   StoreKind,
-  Subscription,
+  WebhookSubscription,
   SubscriptionFilter,
 } from '../src/core/types.ts';
 
@@ -59,7 +59,7 @@ export type ConfigResult =
   | { ok: false; errors: string[] };
 
 export type SubscriptionResult =
-  | { ok: true; subscription: Subscription }
+  | { ok: true; subscription: WebhookSubscription }
   | { ok: false; errors: string[] };
 
 function isRecord(v: unknown): v is Record<string, unknown> {

@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { OUTBOX_MAX_ATTEMPTS } from '../core/constants.ts';
+import { AUTOCOMPLETE_MAX_RESULTS, AUTOCOMPLETE_MIN_PREFIX, AUTOCOMPLETE_OWNER_SCAN_LIMIT, OUTBOX_MAX_ATTEMPTS } from '../core/constants.ts';
 import { releaseKey } from '../core/ids.ts';
 import type { CommitBatch, EventDetails, Store } from '../core/ports.ts';
 import type {
   AlertState,
   DueDelivery,
+  MessageRecord,
   ModEvent,
+  ModThread,
   OutboxRow,
+  PackageMatch,
   PackageSnapshot,
   SourceId,
   SourceState,
   Subscription,
+  SubscriptionPatch,
 } from '../core/types.ts';
 
 export interface StoredOutboxRow extends OutboxRow {
@@ -21,6 +25,7 @@ export interface StoredOutboxRow extends OutboxRow {
 }
 
 const pkgKey = (source: SourceId, packageId: string): string => `${source}|${packageId}`;
+const threadKey = (channelId: string, source: SourceId, packageId: string): string => `${channelId}|${source}|${packageId}`;
 const pairKey = (subscriptionId: string, eventId: string): string => `${subscriptionId}|${eventId}`;
 
 /** Map-backed `Store` that follows the port contract, including UNIQUE(subscription, event) idempotency. */
@@ -31,6 +36,8 @@ export class MemoryStore implements Store {
   readonly subscriptions = new Map<string, Subscription>();
   readonly outbox = new Map<string, StoredOutboxRow>();
   readonly alertStates = new Map<string, AlertState>();
+  readonly modThreads = new Map<string, ModThread>();
+  readonly messages = new Map<string, MessageRecord>();
 
   private readonly pairs = new Set<string>();
   private seq = 0;
@@ -45,7 +52,7 @@ export class MemoryStore implements Store {
   }
 
   addSubscription(sub: Subscription): void {
-    this.subscriptions.set(sub.id, sub);
+    this.subscriptions.set(sub.id, withDefaults(sub));
   }
 
   seedPackages(source: SourceId, versions: Record<string, string>): void {
@@ -115,6 +122,91 @@ export class MemoryStore implements Store {
     return [...this.subscriptions.values()].filter((s) => s.enabled).map((s) => ({ ...s }));
   }
 
+  async createSubscription(sub: Subscription): Promise<void> {
+    if (this.subscriptions.has(sub.id)) throw new Error(`subscription ${sub.id} already exists`);
+    this.subscriptions.set(sub.id, withDefaults(sub));
+  }
+
+  async updateSubscription(id: string, patch: SubscriptionPatch): Promise<boolean> {
+    const current = this.subscriptions.get(id);
+    if (!current) return false;
+    const defined = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
+    this.subscriptions.set(id, withDefaults({ ...current, ...defined }));
+    return true;
+  }
+
+  async deleteSubscription(id: string): Promise<boolean> {
+    for (const row of this.outboxRows()) {
+      if (row.subscriptionId !== id || row.delivered) continue;
+      this.outbox.delete(row.id);
+      this.pairs.delete(pairKey(row.subscriptionId, row.eventId));
+    }
+    return this.subscriptions.delete(id);
+  }
+
+  async listSubscriptionsByChannel(channelId: string): Promise<Subscription[]> {
+    return [...this.subscriptions.values()].filter((s) => s.channelId === channelId).map((s) => ({ ...s }));
+  }
+
+  async listSubscriptionsByGuild(guildId: string): Promise<Subscription[]> {
+    return [...this.subscriptions.values()].filter((s) => s.guildId === guildId).map((s) => ({ ...s }));
+  }
+
+  async getModThread(channelId: string, source: SourceId, packageId: string): Promise<ModThread | null> {
+    const thread = this.modThreads.get(threadKey(channelId, source, packageId));
+    return thread ? { ...thread } : null;
+  }
+
+  async putModThread(thread: ModThread): Promise<void> {
+    this.modThreads.set(threadKey(thread.channelId, thread.source, thread.packageId), { ...thread });
+  }
+
+  async deleteModThread(channelId: string, source: SourceId, packageId: string): Promise<void> {
+    this.modThreads.delete(threadKey(channelId, source, packageId));
+  }
+
+  async putMessage(message: MessageRecord): Promise<void> {
+    this.messages.set(message.messageId, { ...message });
+  }
+
+  async getMessage(messageId: string): Promise<MessageRecord | null> {
+    const message = this.messages.get(messageId);
+    return message ? { ...message } : null;
+  }
+
+  async purgeMessages(olderThanIso: string, limit: number): Promise<number> {
+    let purged = 0;
+    for (const [id, message] of this.messages) {
+      if (purged >= limit) break;
+      if (message.createdAt >= olderThanIso) continue;
+      this.messages.delete(id);
+      purged += 1;
+    }
+    return purged;
+  }
+
+  async searchPackages(prefix: string): Promise<PackageMatch[]> {
+    if (prefix.length < AUTOCOMPLETE_MIN_PREFIX) return [];
+    const wanted = foldAscii(prefix);
+    return [...this.packages.values()]
+      .filter((p) => foldAscii(p.name).startsWith(wanted))
+      .sort((a, b) => compareFolded(a.name, b.name))
+      .slice(0, AUTOCOMPLETE_MAX_RESULTS)
+      .map((p) => ({ source: p.source, packageId: p.packageId, owner: p.owner, name: p.name }));
+  }
+
+  async searchOwners(prefix: string): Promise<string[]> {
+    if (prefix.length < AUTOCOMPLETE_MIN_PREFIX) return [];
+    const wanted = foldAscii(prefix);
+    const scanned = [...this.packages.values()]
+      .filter((p) => foldAscii(p.owner).startsWith(wanted))
+      .sort((a, b) => compareFolded(a.owner, b.owner))
+      .slice(0, AUTOCOMPLETE_OWNER_SCAN_LIMIT);
+    const owners = new Map<string, string>();
+    for (const p of scanned) if (!owners.has(foldAscii(p.owner))) owners.set(foldAscii(p.owner), p.owner);
+    return [...owners.values()].slice(0, AUTOCOMPLETE_MAX_RESULTS);
+  }
+
   async recentEventsByReleaseKeys(releaseKeys: string[], sinceIso: string): Promise<Map<string, ModEvent[]>> {
     const wanted = new Set(releaseKeys);
     const out = new Map<string, ModEvent[]>();
@@ -144,7 +236,7 @@ export class MemoryStore implements Store {
     for (const stored of due) {
       const subscription = this.subscriptions.get(stored.subscriptionId);
       const event = this.events.get(stored.eventId);
-      if (!subscription || !subscription.enabled || !event) continue;
+      if (!subscription || !subscription.enabled || (subscription.transport ?? 'webhook') !== 'webhook' || !event) continue;
       const { delivered: _d, deliveredAt: _da, parked: _p, seq: _s, ...row } = stored;
       out.push({ row, subscription: { ...subscription }, event: this.joined(event) });
       if (out.length >= limit) break;
@@ -219,6 +311,31 @@ export class MemoryStore implements Store {
   async setAlertState(key: string, state: AlertState): Promise<void> {
     this.alertStates.set(key, { ...state });
   }
+}
+
+/** SQLite's NOCASE folds ASCII letters only. */
+function foldAscii(text: string): string {
+  return text.replace(/[A-Z]/g, (c) => c.toLowerCase());
+}
+
+function compareFolded(a: string, b: string): number {
+  const x = foldAscii(a);
+  const y = foldAscii(b);
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+function withDefaults(sub: Subscription): Subscription {
+  return {
+    ...sub,
+    transport: sub.transport ?? 'webhook',
+    webhookUrl: sub.webhookUrl ?? null,
+    channelId: sub.channelId ?? null,
+    threadId: sub.threadId ?? null,
+    label: sub.label ?? null,
+    createdBy: sub.createdBy ?? null,
+    threadPerMod: sub.threadPerMod ?? false,
+    pausedUntil: sub.pausedUntil ?? 0,
+  };
 }
 
 function stubPackage(source: SourceId, packageId: string, version: string): PackageSnapshot {

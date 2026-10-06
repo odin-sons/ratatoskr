@@ -141,3 +141,41 @@ describe('fanOut', () => {
     });
   });
 });
+
+describe('fanOut: paused subscriptions', () => {
+  const now = new Date('2026-09-19T12:07:00.000Z');
+  const nowSeconds = now.getTime() / 1000;
+  const rowsFor = async (pausedUntil: number | undefined): Promise<string[]> => {
+    const paused = compiled(makeSubscription({ id: 'paused', mode: 'immediate', pausedUntil }));
+    const active = compiled(makeSubscription({ id: 'active', mode: 'immediate' }));
+    const { rows } = await fanOut([makeEvent()], [paused, active], new MemoryStore(), now);
+    return rows.map((r) => r.subscriptionId);
+  };
+
+  it('queues nothing for a subscription paused until a later time, and still serves the others', async () => {
+    expect(await rowsFor(nowSeconds + 60)).toEqual(['active']);
+  });
+
+  it('queues nothing for an open-ended pause', async () => {
+    expect(await rowsFor(Number.MAX_SAFE_INTEGER)).toEqual(['active']);
+  });
+
+  it('resumes by itself once the pause time has passed, the boundary second included', async () => {
+    expect(await rowsFor(nowSeconds)).toEqual(['paused', 'active']);
+    expect(await rowsFor(nowSeconds - 1)).toEqual(['paused', 'active']);
+  });
+
+  it('treats 0 and an absent value as not paused', async () => {
+    expect(await rowsFor(0)).toEqual(['paused', 'active']);
+    expect(await rowsFor(undefined)).toEqual(['paused', 'active']);
+  });
+
+  it('does not queue the events of the pause afterwards', async () => {
+    const paused = compiled(makeSubscription({ id: 'paused', mode: 'immediate', pausedUntil: nowSeconds + 3600 }));
+    const during = await fanOut([makeEvent({ pkg: { owner: 'Au', name: 'During' } })], [paused], new MemoryStore(), now);
+    const after = await fanOut([makeEvent({ pkg: { owner: 'Au', name: 'After' } })], [paused], new MemoryStore(), new Date(now.getTime() + 2 * 3_600_000));
+    expect(during.rows).toEqual([]);
+    expect(after.rows.map((r) => r.subscriptionId)).toEqual(['paused']);
+    expect(after.rows[0]!.eventId).toBe(makeEvent({ pkg: { owner: 'Au', name: 'After' } }).id);
+  });
+});

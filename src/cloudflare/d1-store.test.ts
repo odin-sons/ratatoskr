@@ -10,7 +10,7 @@ import { FakeSender, serverError } from '../testing/fakes.ts';
 import type { CommitBatch } from '../core/ports.ts';
 import { runRedeliveryScenario } from '../testing/redelivery-scenario.ts';
 import { runStoreContract, type StoreContractEnv } from '../testing/store-contract.ts';
-import type { ModEvent, OutboxRow, PackageSnapshot, SourceState } from '../core/types.ts';
+import type { ModEvent, OutboxRow, PackageSnapshot, SourceState, Subscription } from '../core/types.ts';
 import { D1Store } from './d1-store.ts';
 import { D1_MAX_BATCH_STATEMENTS } from './limits.ts';
 import { D1Shim } from './testing/d1-shim.ts';
@@ -86,6 +86,23 @@ function addSub(shim: D1Shim, id: string, over: { enabled?: number; filter?: str
     .run(id, '123456789012345678', `https://discord.com/api/webhooks/123456789012345678/tok-${id}`, over.threadId ?? null, over.filter ?? '{}', over.mode ?? 'digest', over.interval === undefined ? 30 : over.interval, over.enabled ?? 1);
 }
 
+function botSubscription(id: string): Subscription {
+  return {
+    id,
+    guildId: 'guild-1',
+    transport: 'bot',
+    channelId: 'chan-1',
+    label: 'Valheim news',
+    createdBy: 'user-1',
+    threadPerMod: true,
+    pausedUntil: 0,
+    filter: {},
+    mode: 'immediate',
+    digestIntervalMin: 30,
+    enabled: true,
+  };
+}
+
 function createD1Env(): StoreContractEnv {
   const contractShim = new D1Shim();
   contractShim.db.exec(SCHEMA);
@@ -94,7 +111,7 @@ function createD1Env(): StoreContractEnv {
     addSubscription: async (sub) => {
       contractShim.db
         .prepare('INSERT INTO subscriptions (id, guild_id, webhook_url, thread_id, filter, mode, digest_interval_min, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(sub.id, sub.guildId, sub.webhookUrl, sub.threadId ?? null, JSON.stringify(sub.filter), sub.mode, sub.digestIntervalMin, sub.enabled ? 1 : 0);
+        .run(sub.id, sub.guildId, sub.webhookUrl ?? null, sub.threadId ?? null, JSON.stringify(sub.filter), sub.mode, sub.digestIntervalMin, sub.enabled ? 1 : 0);
     },
     setSubscriptionEnabled: async (id, enabled) => {
       contractShim.db.prepare('UPDATE subscriptions SET enabled = ? WHERE id = ?').run(enabled ? 1 : 0, id);
@@ -378,8 +395,14 @@ describe('D1 adapter', () => {
         {
           id: 's1',
           guildId: '123456789012345678',
+          transport: 'webhook',
           webhookUrl: 'https://discord.com/api/webhooks/123456789012345678/tok-s1',
+          channelId: null,
           threadId: null,
+          label: null,
+          createdBy: null,
+          threadPerMod: false,
+          pausedUntil: 0,
           filter: { kinds: ['new'], allowNsfw: true },
           mode: 'digest',
           digestIntervalMin: 30,
@@ -396,6 +419,64 @@ describe('D1 adapter', () => {
         ['s1', '222233334444555566'],
         ['s2', null],
       ]);
+    });
+  });
+
+  describe('bot subscriptions', () => {
+    it('maps every bot column and leaves the webhook null', async () => {
+      await store.createSubscription({ ...botSubscription('bot1'), threadId: '222233334444555566', pausedUntil: 1_800_000_000 });
+      const [sub] = await store.listSubscriptions();
+      expect(sub).toEqual({ ...botSubscription('bot1'), webhookUrl: null, threadId: '222233334444555566', pausedUntil: 1_800_000_000 });
+    });
+
+    it('stores text with quotes and SQL fragments literally', async () => {
+      const label = "x'; DROP TABLE subscriptions; --";
+      await store.createSubscription({ ...botSubscription('bot1'), label });
+      await store.updateSubscription('bot1', { label: `${label}!` });
+      expect((await store.listSubscriptionsByChannel('chan-1'))[0]!.label).toBe(`${label}!`);
+      expect(count(shim, 'subscriptions')).toBe(1);
+    });
+
+    it('updates only the named columns in one statement', async () => {
+      await store.createSubscription(botSubscription('bot1'));
+      shim.preparedSql.length = 0;
+      await store.updateSubscription('bot1', { label: 'y', pausedUntil: 9 });
+      expect(shim.preparedSql).toEqual(['UPDATE subscriptions SET label = ?, paused_until = ? WHERE id = ?']);
+    });
+
+    it('deletes the subscription and its undelivered outbox rows in one transactional batch', async () => {
+      addSub(shim, 'sub1');
+      const delivered = ev(pkg('A-One'));
+      const pending = ev(pkg('B-Two'));
+      await store.commit(batch({ packages: [delivered.pkg, pending.pkg], events: [delivered, pending], outbox: [ob('sub1', delivered), ob('sub1', pending)] }));
+      await store.markDelivered([ob('sub1', delivered).id], '2026-09-19T00:00:00.000Z');
+      shim.batchSizes.length = 0;
+      expect(await store.deleteSubscription('sub1')).toBe(true);
+      expect(shim.batchSizes).toEqual([2]);
+      expect(count(shim, 'subscriptions')).toBe(0);
+      expect(shim.db.prepare('SELECT event_id FROM outbox').all()).toEqual([{ event_id: delivered.id }]);
+    });
+
+    it('skips a bot row with an unknown transport or a bad filter in the channel and guild lists', async () => {
+      await store.createSubscription(botSubscription('good'));
+      shim.db.exec('PRAGMA ignore_check_constraints = ON');
+      shim.db.prepare("INSERT INTO subscriptions (id, guild_id, transport, channel_id, filter) VALUES ('odd', 'guild-1', 'carrier-pigeon', 'chan-1', '{}')").run();
+      shim.db.prepare("INSERT INTO subscriptions (id, guild_id, transport, channel_id, filter) VALUES ('bad', 'guild-1', 'bot', 'chan-1', '{not json')").run();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        expect((await store.listSubscriptionsByChannel('chan-1')).map((s) => s.id)).toEqual(['good']);
+        expect((await store.listSubscriptionsByGuild('guild-1')).map((s) => s.id)).toEqual(['good']);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('takeDue leaves the rows of a bot subscription alone', async () => {
+      await store.createSubscription(botSubscription('bot1'));
+      const e = ev(pkg('A-One'));
+      await store.commit(batch({ packages: [e.pkg], events: [e], outbox: [ob('bot1', e)] }));
+      expect(await store.takeDue('2026-09-19T00:00:00.000Z', 10)).toEqual([]);
+      expect(count(shim, 'outbox')).toBe(1);
     });
   });
 
@@ -658,6 +739,19 @@ describe('D1 adapter', () => {
       await spy.getKnownVersions(SOURCE, ['Owner-Name']);
       await spy.getAllKnownVersions(SOURCE);
       await spy.listSubscriptions();
+      await spy.createSubscription(botSubscription('bot1'));
+      await spy.updateSubscription('bot1', { label: 'x', pausedUntil: 5 });
+      await spy.updateSubscription('bot1', {});
+      await spy.listSubscriptionsByChannel('chan-1');
+      await spy.listSubscriptionsByGuild('guild-1');
+      await spy.putModThread({ channelId: 'chan-1', source: SOURCE, packageId: 'Owner-Name', threadId: 't1', anchorMessageId: null, createdAt: '2026-09-19T00:00:00.000Z' });
+      await spy.getModThread('chan-1', SOURCE, 'Owner-Name');
+      await spy.deleteModThread('chan-1', SOURCE, 'Owner-Name');
+      await spy.putMessage({ messageId: 'm1', channelId: 'chan-1', source: SOURCE, packageId: 'Owner-Name', eventId: e.id, createdAt: '2026-09-19T00:00:00.000Z' });
+      await spy.getMessage('m1');
+      await spy.purgeMessages('2026-09-20T00:00:00.000Z', 10);
+      await spy.searchPackages('Na');
+      await spy.searchOwners('Ow');
       await spy.recentEventsByReleaseKeys(['k'], '2026-01-01T00:00:00.000Z');
       await spy.takeDue('2026-09-19T00:00:00.000Z', 10);
       await spy.markFailedMany([o.id], '2026-09-19T00:00:00.000Z', false);
@@ -669,9 +763,10 @@ describe('D1 adapter', () => {
       await spy.purgeDelivered('2026-09-20T00:00:00.000Z', 10);
       await spy.setAlertState('k', { level: 1, notifiedAt: '2026-09-19T00:00:00.000Z' });
       await spy.getAlertStates(['k']);
+      await spy.deleteSubscription('bot1');
 
       const distinct = [...new Set(shim.preparedSql)];
-      expect(distinct.length).toBeGreaterThanOrEqual(12);
+      expect(distinct.length).toBeGreaterThanOrEqual(25);
 
       const failures: string[] = [];
       for (const sql of distinct) {
@@ -728,6 +823,58 @@ describe('D1 adapter', () => {
       expect(shim.batchSizes).toHaveLength(1);
       expect(shim.batchSizes[0]).toBeLessThanOrEqual(5);
       for (const sql of shim.preparedSql) expect((sql.match(/\?/g) ?? []).length).toBeLessThanOrEqual(100);
+    });
+
+    const planOf = (sql: string, ...params: unknown[]): string[] =>
+      (shim.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...(params as never[])) as { detail: string }[]).map((r) => r.detail);
+
+    it('searchPackages ranges over the case-insensitive name index and needs no sort', async () => {
+      await store.searchPackages('Na');
+      const plan = planOf(shim.preparedSql.find((q) => q.includes('FROM packages WHERE name COLLATE NOCASE'))!, 'Na', 'Na\u{10FFFF}', 25);
+      expect(plan.some((d) => d.includes('SEARCH packages USING INDEX idx_packages_name'))).toBe(true);
+      expect(plan.some((d) => d.includes('TEMP B-TREE'))).toBe(false);
+    });
+
+    it('searchOwners ranges over the owner index alone, as a covering index, and needs no sort', async () => {
+      await store.searchOwners('Ow');
+      const plan = planOf(shim.preparedSql.find((q) => q.includes('SELECT owner FROM packages'))!, 'Ow', 'Ow\u{10FFFF}', 500);
+      expect(plan.some((d) => d.includes('SEARCH packages USING COVERING INDEX idx_packages_owner'))).toBe(true);
+      expect(plan.some((d) => d.includes('TEMP B-TREE'))).toBe(false);
+    });
+
+    it('a prefix below the minimum length sends no query at all', async () => {
+      shim.preparedSql.length = 0;
+      expect(await store.searchPackages('a')).toEqual([]);
+      expect(await store.searchOwners('')).toEqual([]);
+      expect(shim.preparedSql).toEqual([]);
+    });
+
+    it('lists subscriptions by channel and by guild through their indexes', async () => {
+      await store.listSubscriptionsByChannel('chan-1');
+      await store.listSubscriptionsByGuild('guild-1');
+      expect(planOf(shim.preparedSql.find((q) => q.endsWith('WHERE channel_id = ?'))!, 'chan-1').some((d) => d.includes('idx_subscriptions_channel'))).toBe(true);
+      expect(planOf(shim.preparedSql.find((q) => q.endsWith('WHERE guild_id = ?'))!, 'guild-1').some((d) => d.includes('idx_subscriptions_guild'))).toBe(true);
+    });
+
+    it('purgeMessages deletes through the created_at index', async () => {
+      await store.purgeMessages('2026-09-20T00:00:00.000Z', 10);
+      const plan = planOf(shim.preparedSql.find((q) => q.startsWith('DELETE FROM messages'))!, '2026-09-20T00:00:00.000Z', 10);
+      expect(plan.some((d) => d.includes('idx_messages_created'))).toBe(true);
+    });
+
+    it('deleteSubscription finds the outbox rows through the (subscription, event) unique index', async () => {
+      await store.deleteSubscription('sub1');
+      const plan = planOf(shim.preparedSql.find((q) => q.startsWith('DELETE FROM outbox WHERE subscription_id'))!, 'sub1');
+      expect(plan.some((d) => d.includes('SEARCH') && d.includes('autoindex'))).toBe(true);
+    });
+
+    it('mod thread and message lookups go through their primary keys', async () => {
+      await store.getModThread('c', SOURCE, 'p');
+      await store.getMessage('m');
+      for (const sql of shim.preparedSql.filter((q) => q.includes('FROM mod_threads') || q.includes('FROM messages WHERE message_id = ?'))) {
+        const plan = planOf(sql, ...Array.from({ length: (sql.match(/\?/g) ?? []).length }, () => 'x'));
+        expect(plan.some((d) => d.startsWith('SEARCH') && d.includes('autoindex'))).toBe(true);
+      }
     });
 
     it('purgeDelivered deletes through the delivered index', async () => {

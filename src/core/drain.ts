@@ -8,7 +8,8 @@ import type { SendResult, SendTarget, Sender, Store } from './ports.ts';
 import { targetKey } from './send-target.ts';
 import { sanitizeLogText } from './report.ts';
 import type { Language } from '../i18n/index.ts';
-import type { DiscordMessage, DueDelivery, ModEvent, OutboxRow, StoreEmojis, Subscription } from './types.ts';
+import { hasWebhook } from './types.ts';
+import type { DiscordMessage, DueDelivery, ModEvent, OutboxRow, StoreEmojis, WebhookSubscription } from './types.ts';
 
 /** Presentation settings handed to every render call. */
 export interface RenderContext {
@@ -170,13 +171,15 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainReport> {
     return drain.report;
   }
 
-  const groups = new Map<string, { sub: Subscription; items: DueDelivery[] }>();
+  const groups = new Map<string, { sub: WebhookSubscription; items: DueDelivery[] }>();
   const rowsByWebhook = new Map<string, string[]>();
   for (const item of due) {
-    let group = groups.get(item.subscription.id);
-    if (group === undefined) groups.set(item.subscription.id, (group = { sub: item.subscription, items: [] }));
+    const sub = item.subscription;
+    if (!hasWebhook(sub)) continue;
+    let group = groups.get(sub.id);
+    if (group === undefined) groups.set(sub.id, (group = { sub, items: [] }));
     group.items.push(item);
-    const key = subscriptionKey(item.subscription);
+    const key = subscriptionKey(sub);
     const webhookRows = rowsByWebhook.get(key);
     if (webhookRows === undefined) rowsByWebhook.set(key, [item.row.id]);
     else webhookRows.push(item.row.id);
@@ -202,7 +205,7 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainReport> {
   return drain.report;
 }
 
-async function deliverGroup(drain: Drain, sub: Subscription, items: DueDelivery[]): Promise<void> {
+async function deliverGroup(drain: Drain, sub: WebhookSubscription, items: DueDelivery[]): Promise<void> {
   const filter = compileFilter(sub.filter);
   const current: DueDelivery[] = [];
   const stale: string[] = [];
@@ -224,11 +227,11 @@ async function deliverGroup(drain: Drain, sub: Subscription, items: DueDelivery[
   }
 }
 
-function subscriptionTarget(sub: Subscription): SendTarget {
+function subscriptionTarget(sub: WebhookSubscription): SendTarget {
   return { kind: 'webhook', url: sub.webhookUrl, threadId: sub.threadId };
 }
 
-function subscriptionKey(sub: Subscription): string {
+function subscriptionKey(sub: WebhookSubscription): string {
   return targetKey(subscriptionTarget(sub));
 }
 
@@ -243,7 +246,7 @@ function allowance(drain: Drain, webhook: string): number {
   return Math.max(0, room);
 }
 
-function renderContext(deps: DrainDeps, sub: Subscription): RenderContext {
+function renderContext(deps: DrainDeps, sub: WebhookSubscription): RenderContext {
   const context: RenderContext = {};
   if (deps.storeEmojis !== undefined) context.storeEmojis = deps.storeEmojis;
   if (deps.ratatoskrEmoji !== undefined) context.ratatoskrEmoji = deps.ratatoskrEmoji;
@@ -252,7 +255,7 @@ function renderContext(deps: DrainDeps, sub: Subscription): RenderContext {
   return context;
 }
 
-async function deliverImmediate(drain: Drain, sub: Subscription, entry: CollapsedDelivery): Promise<void> {
+async function deliverImmediate(drain: Drain, sub: WebhookSubscription, entry: CollapsedDelivery): Promise<void> {
   const { renderer, now } = drain.deps;
   if (allowance(drain, subscriptionKey(sub)) < 1) {
     drain.report.deferred += entry.rows.length;
@@ -286,7 +289,7 @@ async function deliverImmediate(drain: Drain, sub: Subscription, entry: Collapse
  * rendered with only the mod page button; null when the failure is another one, no send is left, or the
  * message has nothing more to drop.
  */
-function reducedMessage(drain: Drain, sub: Subscription, event: ModEvent, message: DiscordMessage, failure: SendFailure): DiscordMessage | null {
+function reducedMessage(drain: Drain, sub: WebhookSubscription, event: ModEvent, message: DiscordMessage, failure: SendFailure): DiscordMessage | null {
   const { result } = failure;
   if (result.retryable || result.status !== 400 || message.components === undefined || allowance(drain, subscriptionKey(sub)) < 1) return null;
   try {
@@ -317,7 +320,7 @@ function cappedDetailed(entries: readonly CollapsedDelivery[], isWatchlistHit: (
   return (event: ModEvent): boolean => detailedIds.has(event.id);
 }
 
-async function deliverDigest(drain: Drain, sub: Subscription, kept: CollapsedDelivery[], filter: CompiledFilter): Promise<void> {
+async function deliverDigest(drain: Drain, sub: WebhookSubscription, kept: CollapsedDelivery[], filter: CompiledFilter): Promise<void> {
   const { renderer, now } = drain.deps;
   const context = renderContext(drain.deps, sub);
   const rowCount = (entries: readonly CollapsedDelivery[]): number => entries.reduce((sum, k) => sum + k.rows.length, 0);

@@ -1116,3 +1116,35 @@ describe('drain: subscription changelog opt-out', () => {
     expect(payload).not.toContain('fixed a thing');
   });
 });
+
+describe('drainOutbox: bot subscriptions', () => {
+  const botSub: Subscription = {
+    id: 'bot-1',
+    guildId: 'guild-1',
+    transport: 'bot',
+    channelId: 'chan-1',
+    filter: {},
+    mode: 'immediate',
+    digestIntervalMin: 30,
+    enabled: true,
+  };
+
+  it('leaves the rows of a subscription without a webhook queued and keeps delivering the webhook ones', async () => {
+    const h = makeHarness();
+    const [forBot, forHook] = evs(2);
+    await enqueue(h, botSub, [forBot!]);
+    await enqueue(h, makeSubscription({ id: 'hook' }), [forHook!]);
+    await drain(h);
+    expect(h.sender.calls).toHaveLength(1);
+    expect(h.store.pendingRows().map((r) => r.subscriptionId)).toEqual(['bot-1']);
+  });
+
+  it('does not let queued bot rows crowd a webhook row out of the batch', async () => {
+    const h = makeHarness();
+    const bot = evs(TICK_BUDGET.maxOutboxRows + 1, 'B');
+    await enqueue(h, botSub, bot);
+    await enqueue(h, makeSubscription({ id: 'hook' }), evs(1, 'H'), '2026-09-19T12:07:00.000Z');
+    await drain(h);
+    expect(h.sender.calls).toHaveLength(1);
+  });
+});

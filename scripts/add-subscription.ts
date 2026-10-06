@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_DIGEST_INTERVAL_MIN } from '../src/core/constants.ts';
-import type { Subscription } from '../src/core/types.ts';
+import type { WebhookSubscription } from '../src/core/types.ts';
 import { FILTER_FLAG_OPTIONS, FILTER_FLAGS_NOTE, FILTER_FLAGS_USAGE, resolveFilter, type FilterFlagValues } from './filter-flags.ts';
 import { SNOWFLAKE_RE, SUBSCRIPTION_ID_RE, validateSubscription } from './validate-config.ts';
 import { defaultDatabaseName, isValidDatabaseName } from './wrangler-config.ts';
@@ -53,7 +53,7 @@ export interface CliOptions {
 }
 
 export type SubscriptionPlan =
-  | { ok: true; subscription: Subscription; sql: string }
+  | { ok: true; subscription: WebhookSubscription; sql: string }
   | { ok: false; errors: string[] };
 
 export function sqlString(value: string): string {
@@ -61,7 +61,7 @@ export function sqlString(value: string): string {
 }
 
 /** A plain INSERT: a duplicate id must fail loudly, never replace an existing subscription. */
-export function buildInsertSql(sub: Subscription): string {
+export function buildInsertSql(sub: WebhookSubscription): string {
   return (
     'INSERT INTO subscriptions (id, guild_id, webhook_url, thread_id, filter, mode, digest_interval_min, enabled) VALUES (' +
     [
