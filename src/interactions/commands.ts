@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { createExcludeCommand, createFilterAutocomplete, createFilterCommand, createIncludeCommand } from './commands/filter-edit.ts';
 import { createInfoAutocomplete, createInfoCommand, createModInfoCommand } from './commands/info.ts';
 import { createListCommand, createListPager, LIST_COMPONENT_PREFIX } from './commands/list.ts';
 import { createContinueCommand, createPauseCommand } from './commands/pause.ts';
@@ -21,6 +22,12 @@ export function createCommandRegistry(deps: CommandDeps): HandlerRegistry {
   registry.autocompletes.set('pause', createUnsubscribeAutocomplete(deps));
   registry.commands.set('continue', createContinueCommand(deps));
   registry.autocompletes.set('continue', createUnsubscribeAutocomplete(deps));
+  registry.commands.set('filter', createFilterCommand(deps));
+  registry.autocompletes.set('filter', createFilterAutocomplete(deps));
+  registry.commands.set('include', createIncludeCommand(deps));
+  registry.autocompletes.set('include', createFilterAutocomplete(deps));
+  registry.commands.set('exclude', createExcludeCommand(deps));
+  registry.autocompletes.set('exclude', createFilterAutocomplete(deps));
   registry.commands.set('list', createListCommand(deps));
   registry.components.set(LIST_COMPONENT_PREFIX, createListPager(deps));
   registry.commands.set(INFO_COMMAND_NAME, createInfoCommand(deps));

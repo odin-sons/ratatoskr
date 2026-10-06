@@ -82,6 +82,26 @@ export interface Messages {
   filterSources(list: string): string;
   filterOnlyNew: string;
   filterOnlyUpdates: string;
+  /** `/filter`, `/include` and `/exclude`; `name` is the subscription name. */
+  yes: string;
+  no: string;
+  includeNeedsOption: string;
+  includeNothingToWiden: string;
+  includeDuplicate(name: string): string;
+  includeLimit(max: number): string;
+  included(name: string, what: string): string;
+  excludeNeedsOption: string;
+  excludeLimit(max: number): string;
+  excludeAlready(name: string): string;
+  excluded(name: string, what: string): string;
+  filterRuleNotFound(n: number): string;
+  filterEntryNotFound(entry: string): string;
+  filterChanged(name: string): string;
+  filterShowTitle(name: string): string;
+  filterShowMatches(summary: string): string;
+  filterShowRulesTitle: string;
+  filterShowExcluded(list: string): string;
+  filterShowFlags(adult: string, changelog: string): string;
   /** `/info` and the "Mod info" message command. */
   infoNeedsMod: string;
   infoMessageUnknown: string;

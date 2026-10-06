@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { DISCORD_INTERACTION, SUBSCRIBE_TEXT_OPTION_MAX, SUBSCRIPTION_LABEL_MAX } from '../core/constants.ts';
+import { ALSO_MATCH_MAX_RULES, DISCORD_INTERACTION, SUBSCRIBE_TEXT_OPTION_MAX, SUBSCRIPTION_LABEL_MAX } from '../core/constants.ts';
 import { PAUSE_DURATION_OPTION_MAX } from '../core/pause.ts';
 import { DIGEST_INTERVAL_MAX_BOUND, DIGEST_INTERVAL_MIN_BOUND } from '../core/validation.ts';
 
@@ -115,6 +115,37 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   ]),
   command('continue', 'Resume the updates of a paused subscription, or of all subscriptions here', [
     { type: OPTION_TYPE.string, name: 'subscription', description: 'The subscription to resume (default: all here)', autocomplete: true },
+  ]),
+  command('filter', 'Show or change what a subscription matches', [
+    { type: OPTION_TYPE.string, name: 'subscription', description: 'The subscription', required: true, autocomplete: true },
+    {
+      type: OPTION_TYPE.string,
+      name: 'kind',
+      description: 'Which events to deliver',
+      choices: [
+        { name: 'New mods', value: 'new' },
+        { name: 'Updates', value: 'update' },
+        { name: 'Both', value: 'both' },
+      ],
+    },
+    { type: OPTION_TYPE.string, name: 'source', description: 'Restrict to one store, or all', choices: [...SUBSCRIBE_SOURCE_CHOICES, { name: 'All stores', value: 'all' }] },
+    { type: OPTION_TYPE.boolean, name: 'nsfw', description: 'Deliver adult content too' },
+    { type: OPTION_TYPE.boolean, name: 'changelog', description: 'Show the changelog excerpt' },
+    { type: OPTION_TYPE.integer, name: 'remove_rule', description: 'Number of an extra rule to remove', min_value: 1, max_value: ALSO_MATCH_MAX_RULES },
+    { type: OPTION_TYPE.string, name: 'remove', description: 'An owner, mod or category to remove from the filter', max_length: SUBSCRIBE_TEXT_OPTION_MAX },
+  ]),
+  command('include', 'Also deliver a mod, an author or a category', [
+    { type: OPTION_TYPE.string, name: 'subscription', description: 'The subscription', required: true, autocomplete: true },
+    { type: OPTION_TYPE.string, name: 'owner', description: 'Every mod of this author', autocomplete: true, max_length: SUBSCRIBE_TEXT_OPTION_MAX },
+    { type: OPTION_TYPE.string, name: 'mod', description: 'One mod', autocomplete: true, max_length: SUBSCRIBE_TEXT_OPTION_MAX },
+    { type: OPTION_TYPE.string, name: 'category', description: 'Mods in this category', max_length: SUBSCRIBE_TEXT_OPTION_MAX },
+    { type: OPTION_TYPE.string, name: 'source', description: 'Only this store', choices: [...SUBSCRIBE_SOURCE_CHOICES] },
+  ]),
+  command('exclude', 'Never deliver a mod, an author or a category', [
+    { type: OPTION_TYPE.string, name: 'subscription', description: 'The subscription', required: true, autocomplete: true },
+    { type: OPTION_TYPE.string, name: 'owner', description: 'Every mod of this author', autocomplete: true, max_length: SUBSCRIBE_TEXT_OPTION_MAX },
+    { type: OPTION_TYPE.string, name: 'mod', description: 'One mod', autocomplete: true, max_length: SUBSCRIBE_TEXT_OPTION_MAX },
+    { type: OPTION_TYPE.string, name: 'category', description: 'Mods in this category', max_length: SUBSCRIBE_TEXT_OPTION_MAX },
   ]),
   command('list', 'List the subscriptions here', [{ type: OPTION_TYPE.boolean, name: 'all', description: 'The whole server instead of this channel' }]),
   readOnly(

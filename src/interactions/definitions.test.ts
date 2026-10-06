@@ -9,8 +9,8 @@ const CHAT_COMMANDS = COMMAND_DEFINITIONS.filter((c): c is ChatCommandDefinition
 const NAME = /^[\p{Ll}\p{Lo}\p{N}_-]{1,32}$/u;
 
 describe('command definitions', () => {
-  it('describe subscribe, unsubscribe, pause, continue, list, info and the Mod info message command', () => {
-    expect(COMMAND_DEFINITIONS.map((c) => c.name)).toEqual(['subscribe', 'unsubscribe', 'pause', 'continue', 'list', 'info', 'Mod info']);
+  it('describe subscribe, unsubscribe, pause, continue, filter, include, exclude, list, info and the Mod info message command', () => {
+    expect(COMMAND_DEFINITIONS.map((c) => c.name)).toEqual(['subscribe', 'unsubscribe', 'pause', 'continue', 'filter', 'include', 'exclude', 'list', 'info', 'Mod info']);
   });
 
   it('are served by the registry: every command, and every autocomplete option, has a handler', () => {

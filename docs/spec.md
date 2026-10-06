@@ -494,9 +494,9 @@ label.
 | `/pause` | Stops notifications of the chosen subscription, or of every subscription here when none is given. `for` takes a duration (for example `2h` or `3d`); without it the pause is open-ended. While paused, fan-out treats the subscription as disabled, so nothing is queued, and undelivered outbox rows are removed as on `/unsubscribe`. Events that happen during the pause are not delivered afterwards. A row that a tick queues at the very moment of the pause is held until the pause ends (rare). |
 | `/continue` | Ends the pause now. A pause with `for` also ends by itself once `paused_until` has passed; no cron is involved. |
 | `/list` | Ephemeral list of the channel's subscriptions (`all:true`: the whole server) with label, mode, thread flag and a filter summary; pages when it does not fit. |
-| `/filter` | Edits any field of the chosen subscription's filter, and lists or removes single `alsoMatch` rules. |
-| `/include` | Widens: adds a mod, an author (stored as a bare-owner `packages` entry) or a category as an `alsoMatch` rule. |
-| `/exclude` | Narrows: adds to `excludePackages` or `excludeCategories`. |
+| `/filter` | Without options, shows the chosen subscription's filter, its numbered extra rules and its exclusions. With options it changes `kind`, `source` (a store, or `all`), `nsfw` and `changelog`, removes extra rule number `remove_rule`, or removes an owner, mod or category (`remove`) from any list. |
+| `/include` | Widens: adds a mod, an author (stored as a bare-owner `packages` entry), a category or a store as an `alsoMatch` rule; options given together form one rule (AND), `owner` with `mod` is refused, and a `mod` must exist. |
+| `/exclude` | Narrows: adds an owner or mod to `excludePackages` and a category to `excludeCategories` (at most 100 entries each; a `mod` must exist). |
 | `/info` | Shows a mod: name, author, latest version, store, links, downloads and likes where the source has them, and the last changelog. `mod` autocompletes; inside a mod's thread it is optional (the thread is matched to its mod through `mod_threads`). Open to every member, answered inline and ephemerally; NSFW mods are never shown. |
 | Mod info (message command) | Same answer for the mod behind a message, found through `messages`. A digest message with several mods asks for `/info`. |
 

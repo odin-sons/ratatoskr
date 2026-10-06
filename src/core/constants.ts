@@ -195,6 +195,9 @@ export const MAX_SUBSCRIPTIONS_TOTAL = 200;
 /** Most `alsoMatch` rules one subscription filter may hold. Source: product limit, docs/spec.md "Filter rules". */
 export const ALSO_MATCH_MAX_RULES = 20;
 
+/** Most entries `/exclude` keeps in each of `excludePackages` and `excludeCategories`. Source: product limit. */
+export const EXCLUDE_LIST_MAX = 100;
+
 /** Longest `label` of a bot subscription. */
 export const SUBSCRIPTION_LABEL_MAX = 100;
 
