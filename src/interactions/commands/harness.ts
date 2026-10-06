@@ -16,6 +16,7 @@ import type { CommandDeps } from './deps.ts';
 export { APP_ID, CHANNEL_ID, GUILD_ID, THREAD_ID };
 export const PARENT_ID = '923456789012345678';
 export const USER_ID = '323456789012345678';
+export const NOW = new Date('2026-09-19T12:00:00.000Z');
 
 export const MANAGE = String(PERMISSION.manageChannels);
 export const ALL_BOT_PERMISSIONS = String(
@@ -85,11 +86,11 @@ export interface Harness<S extends Store = MemoryStore> {
   followUp(): string;
 }
 
-export function harness<S extends Store = MemoryStore>(options: { messages?: Messages; ids?: string[]; sources?: SourceConfig[]; store?: S } = {}): Harness<S> {
+export function harness<S extends Store = MemoryStore>(options: { messages?: Messages; ids?: string[]; sources?: SourceConfig[]; store?: S; now?: () => Date } = {}): Harness<S> {
   const store = options.store ?? (new MemoryStore() as unknown as S);
   const ids = [...(options.ids ?? [])];
   let counter = 0;
-  const deps: CommandDeps = { store, sources: options.sources ?? SOURCES, newId: () => ids.shift() ?? `id-${(counter += 1)}` };
+  const deps: CommandDeps = { store, sources: options.sources ?? SOURCES, newId: () => ids.shift() ?? `id-${(counter += 1)}`, now: options.now ?? (() => NOW) };
   const registry = createCommandRegistry(deps);
   const finished: Json[] = [];
   const pending: Promise<unknown>[] = [];

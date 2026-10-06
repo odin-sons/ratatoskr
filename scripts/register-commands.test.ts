@@ -80,6 +80,7 @@ describe('the script', () => {
     const result = run(['--dry-run'], {});
     expect(result.status).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual(JSON.parse(JSON.stringify(COMMAND_DEFINITIONS)));
+    expect(JSON.parse(result.stdout).map((c: { name: string }) => c.name)).toEqual(['subscribe', 'unsubscribe', 'pause', 'continue', 'list']);
   });
 
   it('exits non-zero without the credentials, saying which are needed and nothing secret', () => {

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { DISCORD_INTERACTION, SUBSCRIBE_TEXT_OPTION_MAX, SUBSCRIPTION_LABEL_MAX } from '../core/constants.ts';
+import { PAUSE_DURATION_OPTION_MAX } from '../core/pause.ts';
 import { DIGEST_INTERVAL_MAX_BOUND, DIGEST_INTERVAL_MIN_BOUND } from '../core/validation.ts';
 
 /** Source: Discord developer docs, "Application Commands" (Application Command Option Type, Application Command Type). */
@@ -84,6 +85,13 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   ]),
   command('unsubscribe', 'Remove a subscription', [
     { type: OPTION_TYPE.string, name: 'subscription', description: 'The subscription to remove', required: true, autocomplete: true },
+  ]),
+  command('pause', 'Pause the updates of a subscription, or of all subscriptions here', [
+    { type: OPTION_TYPE.string, name: 'subscription', description: 'The subscription to pause (default: all here)', autocomplete: true },
+    { type: OPTION_TYPE.string, name: 'for', description: 'How long, such as 30m, 2h or 3d (default: until /continue)', max_length: PAUSE_DURATION_OPTION_MAX },
+  ]),
+  command('continue', 'Resume the updates of a paused subscription, or of all subscriptions here', [
+    { type: OPTION_TYPE.string, name: 'subscription', description: 'The subscription to resume (default: all here)', autocomplete: true },
   ]),
   command('list', 'List the subscriptions here', [{ type: OPTION_TYPE.boolean, name: 'all', description: 'The whole server instead of this channel' }]),
 ];

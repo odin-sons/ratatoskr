@@ -8,12 +8,12 @@ import { MemoryStore } from '../testing/memory-store.ts';
 const NAME = /^[\p{Ll}\p{Lo}\p{N}_-]{1,32}$/u;
 
 describe('command definitions', () => {
-  it('describe subscribe, unsubscribe and list', () => {
-    expect(COMMAND_DEFINITIONS.map((c) => c.name)).toEqual(['subscribe', 'unsubscribe', 'list']);
+  it('describe subscribe, unsubscribe, pause, continue and list', () => {
+    expect(COMMAND_DEFINITIONS.map((c) => c.name)).toEqual(['subscribe', 'unsubscribe', 'pause', 'continue', 'list']);
   });
 
   it('are served by the registry: every command, and every autocomplete option, has a handler', () => {
-    const registry = createCommandRegistry({ store: new MemoryStore(), sources: [], newId: () => 'x' });
+    const registry = createCommandRegistry({ store: new MemoryStore(), sources: [], newId: () => 'x', now: () => new Date() });
     for (const definition of COMMAND_DEFINITIONS) {
       expect(registry.commands.has(definition.name), definition.name).toBe(true);
       if (definition.options?.some((o) => o.autocomplete)) expect(registry.autocompletes.has(definition.name), definition.name).toBe(true);
@@ -66,6 +66,16 @@ describe('command definitions', () => {
   it('require the subscription of unsubscribe and autocomplete it', () => {
     const unsubscribe = COMMAND_DEFINITIONS.find((c) => c.name === 'unsubscribe')!;
     expect(unsubscribe.options).toEqual([expect.objectContaining({ name: 'subscription', required: true, autocomplete: true })]);
+  });
+
+  it('give pause an optional autocompleted subscription and a short optional duration, and continue the subscription alone', () => {
+    const named = (name: string) => COMMAND_DEFINITIONS.find((c) => c.name === name)!;
+    expect(named('pause').options).toEqual([
+      expect.objectContaining({ name: 'subscription', autocomplete: true }),
+      expect.objectContaining({ name: 'for', type: OPTION_TYPE.string, max_length: 10 }),
+    ]);
+    expect(named('continue').options).toEqual([expect.objectContaining({ name: 'subscription', autocomplete: true })]);
+    for (const option of [...named('pause').options!, ...named('continue').options!]) expect(option.required).toBeFalsy();
   });
 
   it('never combine autocomplete with fixed choices, which Discord rejects', () => {

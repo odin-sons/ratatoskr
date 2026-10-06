@@ -213,6 +213,7 @@ const SQL_SUBSCRIPTIONS_BY_CHANNEL = `${SUBSCRIPTION_SELECT} WHERE channel_id = 
 const SQL_SUBSCRIPTIONS_BY_GUILD = `${SUBSCRIPTION_SELECT} WHERE guild_id = ?`;
 const SQL_COUNT_SUBSCRIPTIONS = 'SELECT COUNT(*) AS n FROM subscriptions WHERE enabled IN (0, 1)';
 const SQL_CREATE_SUBSCRIPTION = `INSERT INTO subscriptions (${SUBSCRIPTION_READ_COLUMNS.join(', ')}) VALUES (${placeholders(SUBSCRIPTION_READ_COLUMNS.length)})`;
+const SQL_SET_PAUSED_UNTIL = 'UPDATE subscriptions SET paused_until = ? WHERE id = ?';
 const SQL_DELETE_SUBSCRIPTION_OUTBOX = 'DELETE FROM outbox WHERE subscription_id = ? AND delivered_at IS NULL';
 const SQL_DELETE_SUBSCRIPTION = 'DELETE FROM subscriptions WHERE id = ?';
 const SQL_SUBSCRIPTION_EXISTS = 'SELECT id FROM subscriptions WHERE id = ?';
@@ -229,7 +230,7 @@ const SQL_SEARCH_OWNERS = 'SELECT owner FROM packages WHERE owner COLLATE NOCASE
 const PREFIX_UPPER_BOUND = '\u{10FFFF}';
 const SUBSCRIPTION_FILTER_IS_OBJECT = "CASE WHEN json_valid(s.filter) THEN json_type(s.filter) = 'object' ELSE 0 END";
 // Unary plus keeps the planner driving from idx_outbox_pending instead of subscriptions.
-const SQL_TAKE_DUE = `SELECT ${selectColumns('o', 'o', OUTBOX_READ_COLUMNS)}, ${selectColumns('s', 's', SUBSCRIPTION_READ_COLUMNS)}, ${EVENT_JOIN_SELECT} FROM outbox o JOIN events e ON e.id = o.event_id ${EVENT_JOIN_PACKAGES} JOIN subscriptions s ON s.id = o.subscription_id WHERE o.parked = 0 AND o.delivered_at IS NULL AND o.next_attempt_at <= ? AND o.attempts < ? AND +s.enabled = 1 AND s.transport = 'webhook' AND ${SUBSCRIPTION_FILTER_IS_OBJECT} ORDER BY o.next_attempt_at, o.rowid LIMIT ?`;
+const SQL_TAKE_DUE = `SELECT ${selectColumns('o', 'o', OUTBOX_READ_COLUMNS)}, ${selectColumns('s', 's', SUBSCRIPTION_READ_COLUMNS)}, ${EVENT_JOIN_SELECT} FROM outbox o JOIN events e ON e.id = o.event_id ${EVENT_JOIN_PACKAGES} JOIN subscriptions s ON s.id = o.subscription_id WHERE o.parked = 0 AND o.delivered_at IS NULL AND o.next_attempt_at <= ? AND o.attempts < ? AND +s.enabled = 1 AND s.paused_until <= CAST(strftime('%s', ?) AS INTEGER) AND s.transport = 'webhook' AND ${SUBSCRIPTION_FILTER_IS_OBJECT} ORDER BY o.next_attempt_at, o.rowid LIMIT ?`;
 const SQL_MARK_DELIVERED_PREFIX = 'UPDATE outbox SET delivered_at = ? WHERE delivered_at IS NULL AND id IN';
 const SQL_PURGE_DELIVERED = 'DELETE FROM outbox WHERE id IN (SELECT id FROM outbox WHERE delivered_at < ? LIMIT ?)';
 const SQL_MARK_FAILED_PREFIX = 'UPDATE outbox SET attempts = attempts + 1, next_attempt_at = ?, parked = MAX(parked, ?) WHERE delivered_at IS NULL AND id IN';
@@ -420,6 +421,16 @@ export class D1Store implements Store {
     return results[1]!.meta.changes > 0;
   }
 
+  async setPausedUntil(subscriptionIds: string[], until: number): Promise<void> {
+    const statements = [...new Set(subscriptionIds)].map((id) => this.db.prepare(SQL_SET_PAUSED_UNTIL).bind(until, id));
+    for (const group of chunk(statements, D1_MAX_BATCH_STATEMENTS)) await this.db.batch(group);
+  }
+
+  async clearUndelivered(subscriptionIds: string[]): Promise<void> {
+    const statements = [...new Set(subscriptionIds)].map((id) => this.db.prepare(SQL_DELETE_SUBSCRIPTION_OUTBOX).bind(id));
+    for (const group of chunk(statements, D1_MAX_BATCH_STATEMENTS)) await this.db.batch(group);
+  }
+
   async listSubscriptionsByChannel(channelId: string): Promise<Subscription[]> {
     const { results } = await this.db.prepare(SQL_SUBSCRIPTIONS_BY_CHANNEL).bind(channelId).all<SubscriptionCols>();
     return mapValidSubscriptions(results);
@@ -530,7 +541,7 @@ export class D1Store implements Store {
   }
 
   async takeDue(nowIso: string, limit: number): Promise<DueDelivery[]> {
-    const { results } = await this.db.prepare(SQL_TAKE_DUE).bind(nowIso, OUTBOX_MAX_ATTEMPTS, limit).all<DueJoinRow>();
+    const { results } = await this.db.prepare(SQL_TAKE_DUE).bind(nowIso, OUTBOX_MAX_ATTEMPTS, nowIso, limit).all<DueJoinRow>();
     const subscriptions = new Map<string, Subscription | null>();
     const due: DueDelivery[] = [];
     for (const row of results) {

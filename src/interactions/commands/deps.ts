@@ -8,6 +8,7 @@ export interface CommandDeps {
   /** Enabled sources of this deployment; `/subscribe source:` maps a store to these. */
   sources: readonly SourceConfig[];
   newId: () => string;
+  now: () => Date;
 }
 
 const ID_CHARS = 10;

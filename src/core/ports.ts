@@ -61,6 +61,12 @@ export interface Store {
   /** Deletes the subscription and its undelivered outbox rows; false when it does not exist. */
   deleteSubscription(id: string): Promise<boolean>;
 
+  /** Sets `pausedUntil` of these subscriptions; ids that do not exist are ignored. */
+  setPausedUntil(subscriptionIds: string[], until: number): Promise<void>;
+
+  /** Deletes the undelivered outbox rows of these subscriptions, which stay in place. */
+  clearUndelivered(subscriptionIds: string[]): Promise<void>;
+
   /** Every subscription (disabled and paused included) whose `channelId` is `channelId`. */
   listSubscriptionsByChannel(channelId: string): Promise<Subscription[]>;
 

@@ -110,8 +110,8 @@ function createD1Env(): StoreContractEnv {
     store: new D1Store(contractShim.asD1()),
     addSubscription: async (sub) => {
       contractShim.db
-        .prepare('INSERT INTO subscriptions (id, guild_id, webhook_url, thread_id, filter, mode, digest_interval_min, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(sub.id, sub.guildId, sub.webhookUrl ?? null, sub.threadId ?? null, JSON.stringify(sub.filter), sub.mode, sub.digestIntervalMin, sub.enabled ? 1 : 0);
+        .prepare('INSERT INTO subscriptions (id, guild_id, webhook_url, thread_id, filter, mode, digest_interval_min, enabled, paused_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(sub.id, sub.guildId, sub.webhookUrl ?? null, sub.threadId ?? null, JSON.stringify(sub.filter), sub.mode, sub.digestIntervalMin, sub.enabled ? 1 : 0, sub.pausedUntil ?? 0);
     },
     setSubscriptionEnabled: async (id, enabled) => {
       contractShim.db.prepare('UPDATE subscriptions SET enabled = ? WHERE id = ?').run(enabled ? 1 : 0, id);
@@ -765,6 +765,8 @@ describe('D1 adapter', () => {
       await spy.purgeDelivered('2026-09-20T00:00:00.000Z', 10);
       await spy.setAlertState('k', { level: 1, notifiedAt: '2026-09-19T00:00:00.000Z' });
       await spy.getAlertStates(['k']);
+      await spy.setPausedUntil(['bot1'], 7);
+      await spy.clearUndelivered(['bot1']);
       await spy.deleteSubscription('bot1');
 
       const distinct = [...new Set(shim.preparedSql)];

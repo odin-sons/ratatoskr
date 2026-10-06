@@ -88,6 +88,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         store: new D1Store(env.DB),
         sources: (config as AppConfig).sources.filter((source) => source.enabled),
         newId: randomSubscriptionId,
+        now: () => new Date(),
       }),
       messages: getMessages(parseLanguage(env.LANGUAGE)),
       fetch: globalThis.fetch.bind(globalThis),
