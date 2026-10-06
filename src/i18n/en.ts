@@ -22,5 +22,11 @@ export const en: Messages = {
   page: (index, total) => `(${index}/${total})`,
   thousandsSeparator: ',',
   decimalSeparator: '.',
+  unknownCommand: 'Unknown command.',
+  somethingWrong: 'Something went wrong. Try again later.',
+  missingManageChannel: 'You need the Manage Channel permission to use this command.',
+  guildOnly: 'This command works only in a server channel.',
+  unsupportedChannel: 'This command does not work in this kind of channel. Use it in a text channel, a thread or a forum post.',
+  botPermissionsMissing: (permissions) => `I am missing permissions in this channel: ${permissions}.`,
   byteUnits: ['B', 'KB', 'MB', 'GB', 'TB'],
 };

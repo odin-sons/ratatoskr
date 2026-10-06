@@ -79,8 +79,8 @@ afterEach(() => {
 });
 
 describe('worker', () => {
-  it('exposes only scheduled (no fetch handler)', () => {
-    expect(Object.keys(worker)).toEqual(['scheduled']);
+  it('exposes fetch for the interactions endpoint and scheduled for the crons', () => {
+    expect(Object.keys(worker).sort()).toEqual(['fetch', 'scheduled']);
   });
 
   it('routes the tick cron to runTick with deps built from env', async () => {
@@ -306,7 +306,7 @@ describe('worker', () => {
     const wrangler = JSON.parse(json) as Record<string, unknown> & { triggers: { crons: string[] } };
     expect(wrangler.triggers.crons).toEqual([TICK_CRON, RECONCILE_CRON]);
     expect(wrangler.main).toBe('src/cloudflare/worker.ts');
-    expect(wrangler.workers_dev).toBe(false);
+    expect(wrangler.workers_dev).toBe(true);
     expect(wrangler.preview_urls).toBe(false);
     expect(wrangler.routes).toBeUndefined();
   });
