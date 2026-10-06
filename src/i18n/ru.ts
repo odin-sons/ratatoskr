@@ -66,5 +66,7 @@ export const ru: Messages = {
   filterSources: (list) => `источники ${list}`,
   filterOnlyNew: 'только новые',
   filterOnlyUpdates: 'только обновления',
+  infoNeedsMod: 'Выберите мод или запустите команду в ветке мода.',
+  infoMessageUnknown: 'Не могу понять, о каком моде это сообщение: оно слишком старое, содержит несколько модов или не моё. Используйте /info и выберите мод.',
   byteUnits: ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'],
 };

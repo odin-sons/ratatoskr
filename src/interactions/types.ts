@@ -9,6 +9,10 @@ export interface InteractionChannel {
 
 export interface InteractionData {
   name?: string;
+  /** Application command type; 3 is a message command. */
+  type?: number;
+  /** The message a message command was used on. */
+  target_id?: string;
   custom_id?: string;
   options?: unknown[];
 }
@@ -52,8 +56,11 @@ function parseData(value: unknown): InteractionData | undefined {
   if (!isRecord(value)) return undefined;
   const name = text(value.name);
   const customId = text(value.custom_id);
+  const targetId = snowflake(value.target_id);
   return {
     ...(name === undefined ? {} : { name }),
+    ...(typeof value.type === 'number' && Number.isInteger(value.type) ? { type: value.type } : {}),
+    ...(targetId === undefined ? {} : { target_id: targetId }),
     ...(customId === undefined ? {} : { custom_id: customId }),
     ...(Array.isArray(value.options) ? { options: value.options as unknown[] } : {}),
   };

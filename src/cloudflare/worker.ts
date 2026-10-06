@@ -82,6 +82,7 @@ async function dispatchSafely(controller: ScheduledController, env: Env): Promis
 
 async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   try {
+    const ratatoskrEmoji = parseRatatoskrEmoji(env.RATATOSKR_EMOJI);
     return await handleInteractionRequest(request, {
       publicKey: env.DISCORD_PUBLIC_KEY,
       registry: createCommandRegistry({
@@ -89,6 +90,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         sources: (config as AppConfig).sources.filter((source) => source.enabled),
         newId: randomSubscriptionId,
         now: () => new Date(),
+        storeEmojis: parseStoreEmojis(env.STORE_EMOJIS),
+        ...(ratatoskrEmoji === undefined ? {} : { ratatoskrEmoji }),
       }),
       messages: getMessages(parseLanguage(env.LANGUAGE)),
       fetch: globalThis.fetch.bind(globalThis),

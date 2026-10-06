@@ -10,6 +10,7 @@ import {
   AUTOCOMPLETE_OWNER_SCAN_LIMIT,
   CADENCE,
   D1_FREE,
+  MAX_SUBSCRIPTIONS_PER_GUILD,
   MS_PER_DAY,
   TICK_BUDGET,
 } from './constants.ts';
@@ -57,13 +58,17 @@ describe('worst-case D1 writes of the bot tables', () => {
   const SUBSCRIPTION_EDITS_PER_DAY = 500;
 
   const messageWrites = SENDS_PER_DAY * writesPerRow('messages') * 2;
-  const threadWrites = SENDS_PER_DAY * writesPerRow('mod_threads');
+  const NEW_MODS_PER_DAY = 50;
+  const GUILDS_IN_SPEC_VOLUME = 2;
+  const THREAD_CHANNELS = GUILDS_IN_SPEC_VOLUME * MAX_SUBSCRIPTIONS_PER_GUILD;
+  const threadsPerDay = Math.min(SENDS_PER_DAY, NEW_MODS_PER_DAY * THREAD_CHANNELS);
+  const threadWrites = threadsPerDay * writesPerRow('mod_threads');
   const packageIndexWrites = PACKAGE_UPSERTS_PER_DAY * (writesPerRow('packages') - 2);
   const subscriptionWrites = SUBSCRIPTION_EDITS_PER_DAY * writesPerRow('subscriptions');
 
   it('counts the indexes the schema really has', () => {
     expect(writesPerRow('messages')).toBe(3);
-    expect(writesPerRow('mod_threads')).toBe(2);
+    expect(writesPerRow('mod_threads')).toBe(3);
     expect(writesPerRow('packages')).toBe(4);
   });
 
@@ -72,7 +77,8 @@ describe('worst-case D1 writes of the bot tables', () => {
     expect(messageWrites).toBeLessThanOrEqual(D1_FREE.rowsWrittenPerDay / 2);
   });
 
-  it('a new mod thread on every send stays within a sixth of the daily row-write limit', () => {
+  it('a thread per new mod and thread channel stays within a sixth of the daily row-write limit', () => {
+    expect(threadsPerDay).toBe(5_000);
     expect(threadWrites).toBeLessThanOrEqual(D1_FREE.rowsWrittenPerDay / 6);
   });
 

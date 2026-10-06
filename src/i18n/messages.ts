@@ -81,6 +81,9 @@ export interface Messages {
   filterSources(list: string): string;
   filterOnlyNew: string;
   filterOnlyUpdates: string;
+  /** `/info` and the "Mod info" message command. */
+  infoNeedsMod: string;
+  infoMessageUnknown: string;
   /** B, KB, MB, GB, TB. */
   byteUnits: readonly [string, string, string, string, string];
 }

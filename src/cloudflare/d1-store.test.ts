@@ -747,12 +747,16 @@ describe('D1 adapter', () => {
       await spy.countSubscriptions();
       await spy.putModThread({ channelId: 'chan-1', source: SOURCE, packageId: 'Owner-Name', threadId: 't1', anchorMessageId: null, createdAt: '2026-09-19T00:00:00.000Z' });
       await spy.getModThread('chan-1', SOURCE, 'Owner-Name');
+      await spy.getModThreadByThreadId('chan-1', 't1');
       await spy.deleteModThread('chan-1', SOURCE, 'Owner-Name');
       await spy.putMessage({ messageId: 'm1', channelId: 'chan-1', source: SOURCE, packageId: 'Owner-Name', eventId: e.id, createdAt: '2026-09-19T00:00:00.000Z' });
       await spy.getMessage('m1');
       await spy.purgeMessages('2026-09-20T00:00:00.000Z', 10);
       await spy.searchPackages('Na');
+      await spy.searchPackages('Na', { sfwOnly: true });
       await spy.searchOwners('Ow');
+      await spy.getPackagesById('Owner-Name', [SOURCE, 'hexium:valheim']);
+      await spy.getEventById(e.id);
       await spy.packageExists('Owner-Name', [SOURCE, 'hexium:valheim']);
       await spy.recentEventsByReleaseKeys(['k'], '2026-01-01T00:00:00.000Z');
       await spy.takeDue('2026-09-19T00:00:00.000Z', 10);
@@ -839,6 +843,13 @@ describe('D1 adapter', () => {
       expect(plan.some((d) => d.includes('TEMP B-TREE'))).toBe(false);
     });
 
+    it('the safe-for-work search keeps the name index range and needs no sort', async () => {
+      await store.searchPackages('Na', { sfwOnly: true });
+      const plan = planOf(shim.preparedSql.find((q) => q.includes('is_nsfw = 0 ORDER BY'))!, 'Na', 'Na\u{10FFFF}', 25);
+      expect(plan.some((d) => d.includes('SEARCH packages USING INDEX idx_packages_name'))).toBe(true);
+      expect(plan.some((d) => d.startsWith('SCAN') || d.includes('TEMP B-TREE'))).toBe(false);
+    });
+
     it('searchOwners ranges over the owner index alone, as a covering index, and needs no sort', async () => {
       await store.searchOwners('Ow');
       const plan = planOf(shim.preparedSql.find((q) => q.includes('SELECT owner FROM packages'))!, 'Ow', 'Ow\u{10FFFF}', 500);
@@ -879,6 +890,27 @@ describe('D1 adapter', () => {
         const plan = planOf(sql, ...Array.from({ length: (sql.match(/\?/g) ?? []).length }, () => 'x'));
         expect(plan.some((d) => d.startsWith('SEARCH') && d.includes('autoindex'))).toBe(true);
       }
+    });
+
+    it('the package lookup goes through the primary key, once per source', async () => {
+      await store.getPackagesById('Owner-Name', [SOURCE, 'hexium:valheim']);
+      const sql = shim.preparedSql.find((q) => q.includes('FROM packages WHERE source IN'))!;
+      const plan = planOf(sql, SOURCE, 'hexium:valheim', 'Owner-Name');
+      expect(plan.some((d) => d.startsWith('SEARCH packages') && d.includes('autoindex') && d.includes('package_id=?'))).toBe(true);
+    });
+
+    it('an event is read through its primary key, and its package through the package key', async () => {
+      await store.getEventById('a');
+      const sql = shim.preparedSql.find((q) => q.includes('WHERE e.id = ?'))!;
+      const plan = planOf(sql, 'a');
+      expect(plan.some((d) => d.startsWith('SEARCH e') && d.includes('autoindex'))).toBe(true);
+      expect(plan.some((d) => d.startsWith('SEARCH p') && d.includes('autoindex'))).toBe(true);
+    });
+
+    it('the mod of a thread is found through the (channel, thread) index', async () => {
+      await store.getModThreadByThreadId('c', 't1');
+      const plan = planOf(shim.preparedSql.find((q) => q.includes('FROM mod_threads WHERE channel_id = ? AND thread_id = ?'))!, 'c', 't1');
+      expect(plan.some((d) => d.includes('SEARCH') && d.includes('USING INDEX idx_mod_threads_thread (channel_id=? AND thread_id=?)'))).toBe(true);
     });
 
     it('purgeDelivered deletes through the delivered index', async () => {

@@ -66,5 +66,7 @@ export const en: Messages = {
   filterSources: (list) => `sources ${list}`,
   filterOnlyNew: 'new only',
   filterOnlyUpdates: 'updates only',
+  infoNeedsMod: 'Pick a mod, or run this command inside a mod thread.',
+  infoMessageUnknown: 'I cannot tell which mod this message is about: it is too old, covers several mods or is not mine. Use /info and pick the mod.',
   byteUnits: ['B', 'KB', 'MB', 'GB', 'TB'],
 };

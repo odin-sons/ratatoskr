@@ -177,6 +177,11 @@ export class MemoryStore implements Store {
     this.modThreads.set(threadKey(thread.channelId, thread.source, thread.packageId), { ...thread });
   }
 
+  async getModThreadByThreadId(channelId: string, threadId: string): Promise<ModThread | null> {
+    for (const thread of this.modThreads.values()) if (thread.channelId === channelId && thread.threadId === threadId) return { ...thread };
+    return null;
+  }
+
   async deleteModThread(channelId: string, source: SourceId, packageId: string): Promise<void> {
     this.modThreads.delete(threadKey(channelId, source, packageId));
   }
@@ -201,11 +206,11 @@ export class MemoryStore implements Store {
     return purged;
   }
 
-  async searchPackages(prefix: string): Promise<PackageMatch[]> {
+  async searchPackages(prefix: string, options: { sfwOnly?: boolean } = {}): Promise<PackageMatch[]> {
     if (prefix.length < AUTOCOMPLETE_MIN_PREFIX) return [];
     const wanted = foldAscii(prefix);
     return [...this.packages.values()]
-      .filter((p) => foldAscii(p.name).startsWith(wanted))
+      .filter((p) => foldAscii(p.name).startsWith(wanted) && !(options.sfwOnly === true && p.isNsfw))
       .sort((a, b) => compareFolded(a.name, b.name))
       .slice(0, AUTOCOMPLETE_MAX_RESULTS)
       .map((p) => ({ source: p.source, packageId: p.packageId, owner: p.owner, name: p.name }));
@@ -213,6 +218,18 @@ export class MemoryStore implements Store {
 
   async packageExists(packageId: string, sources: SourceId[]): Promise<boolean> {
     return sources.some((source) => this.packages.has(pkgKey(source, packageId)));
+  }
+
+  async getPackagesById(packageId: string, sources: SourceId[]): Promise<PackageSnapshot[]> {
+    return sources.flatMap((source) => {
+      const pkg = this.packages.get(pkgKey(source, packageId));
+      return pkg ? [{ ...pkg }] : [];
+    });
+  }
+
+  async getEventById(eventId: string): Promise<ModEvent | null> {
+    const event = this.events.get(eventId);
+    return event === undefined ? null : this.joined(event);
   }
 
   async searchOwners(prefix: string): Promise<string[]> {

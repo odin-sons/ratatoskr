@@ -6,6 +6,7 @@ import { DIGEST_INTERVAL_MAX_BOUND, DIGEST_INTERVAL_MIN_BOUND } from '../core/va
 /** Source: Discord developer docs, "Application Commands" (Application Command Option Type, Application Command Type). */
 export const OPTION_TYPE = { string: 3, integer: 4, boolean: 5 } as const;
 const CHAT_INPUT = 1;
+const MESSAGE_COMMAND = 3;
 
 export interface CommandChoice {
   name: string;
@@ -24,16 +25,32 @@ export interface CommandOptionDefinition {
   max_length?: number;
 }
 
-export interface CommandDefinition {
+export interface ChatCommandDefinition {
   name: string;
   description: string;
   type: typeof CHAT_INPUT;
-  default_member_permissions: string;
+  /** Absent: everyone may use the command. */
+  default_member_permissions?: string;
   dm_permission: false;
   options?: CommandOptionDefinition[];
 }
 
-const command = (name: string, description: string, options?: CommandOptionDefinition[]): CommandDefinition => ({
+/** A message context-menu command; Discord requires an empty description. */
+export interface MessageCommandDefinition {
+  name: string;
+  description: '';
+  type: typeof MESSAGE_COMMAND;
+  default_member_permissions?: string;
+  dm_permission: false;
+  options?: undefined;
+}
+
+export type CommandDefinition = ChatCommandDefinition | MessageCommandDefinition;
+
+export const INFO_COMMAND_NAME = 'info';
+export const MOD_INFO_COMMAND_NAME = 'Mod info';
+
+const command = (name: string, description: string, options?: CommandOptionDefinition[]): ChatCommandDefinition => ({
   name,
   description,
   type: CHAT_INPUT,
@@ -47,6 +64,12 @@ export const SUBSCRIBE_SOURCE_CHOICES: readonly CommandChoice[] = [
   { name: 'Hexium', value: 'hexium' },
   { name: 'Nexus Mods', value: 'nexus' },
 ];
+
+/** Reading mod info is harmless, so `/info` and "Mod info" are open to every member, unlike the commands that change subscriptions. */
+const readOnly = (definition: ChatCommandDefinition): ChatCommandDefinition => {
+  const { default_member_permissions: _restricted, ...open } = definition;
+  return open;
+};
 
 export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   command('subscribe', 'Get mod updates in this channel, thread or forum post', [
@@ -94,4 +117,10 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     { type: OPTION_TYPE.string, name: 'subscription', description: 'The subscription to resume (default: all here)', autocomplete: true },
   ]),
   command('list', 'List the subscriptions here', [{ type: OPTION_TYPE.boolean, name: 'all', description: 'The whole server instead of this channel' }]),
+  readOnly(
+    command(INFO_COMMAND_NAME, 'Show details of a mod', [
+      { type: OPTION_TYPE.string, name: 'mod', description: 'The mod (optional inside a mod thread)', autocomplete: true, max_length: SUBSCRIBE_TEXT_OPTION_MAX },
+    ]),
+  ),
+  { name: MOD_INFO_COMMAND_NAME, description: '', type: MESSAGE_COMMAND, dm_permission: false },
 ];

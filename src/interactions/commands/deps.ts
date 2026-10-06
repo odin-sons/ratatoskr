@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Store } from '../../core/ports.ts';
-import type { SourceConfig } from '../../core/types.ts';
+import type { SourceConfig, StoreEmojis } from '../../core/types.ts';
 
 /** What the command handlers need from the outside; tests pass real in-memory implementations. */
 export interface CommandDeps {
@@ -8,6 +8,9 @@ export interface CommandDeps {
   /** Enabled sources of this deployment; `/subscribe source:` maps a store to these. */
   sources: readonly SourceConfig[];
   newId: () => string;
+  /** Presentation of `/info` answers, as for delivered messages. */
+  storeEmojis?: StoreEmojis;
+  ratatoskrEmoji?: string;
   now: () => Date;
 }
 

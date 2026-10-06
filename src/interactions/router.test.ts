@@ -233,3 +233,19 @@ describe('finishDeferred', () => {
     });
   });
 });
+
+describe('message command payload', () => {
+  it('keeps the command type and the target message, and drops a target that is not a snowflake', () => {
+    expect(make({ data: { name: 'Mod info', type: 3, target_id: '123456789012345678' } }).data).toEqual({ name: 'Mod info', type: 3, target_id: '123456789012345678' });
+    expect(make({ data: { name: 'Mod info', type: 3, target_id: '../x' } }).data).toEqual({ name: 'Mod info', type: 3 });
+    expect(make({ data: { name: 'x', type: 'three' } }).data).toEqual({ name: 'x' });
+  });
+
+  it('routes a message command by its name', async () => {
+    const registry = createRegistry();
+    registry.commands.set('Mod info', (interaction) => reply({ content: String(interaction.data?.target_id) }));
+    const { ctx } = setup();
+    const response = await routeInteraction(registry, make({ data: { name: 'Mod info', type: 3, target_id: '123456789012345678' } }), ctx);
+    expect(response.data?.content).toBe('123456789012345678');
+  });
+});

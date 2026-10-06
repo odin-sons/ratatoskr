@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
 import { AUTOCOMPLETE_MAX_RESULTS, AUTOCOMPLETE_MIN_PREFIX, AUTOCOMPLETE_OWNER_SCAN_LIMIT, CLOUDFLARE, OUTBOX_MAX_ATTEMPTS } from '../core/constants.ts';
-import { outboxId, releaseKey } from '../core/ids.ts';
+import { eventId, outboxId, releaseKey } from '../core/ids.ts';
 import type { CommitBatch, Store } from '../core/ports.ts';
 import type { MessageRecord, ModEvent, ModThread, OutboxRow, PackageSnapshot, Subscription } from '../core/types.ts';
 import { makeEvent, makeSnapshot, makeSubscription } from './fakes.ts';
@@ -1013,6 +1013,95 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
       });
     });
 
+    describe('mod lookup by thread', () => {
+      const thread = (over: Partial<ModThread> = {}): ModThread => ({
+        channelId: 'chan-1',
+        source: SOURCE,
+        packageId: 'Owner1-Mod1',
+        threadId: 'thread-1',
+        anchorMessageId: null,
+        createdAt: T0,
+        ...over,
+      });
+
+      it('finds the mod behind a thread of the channel and returns null for any other id or channel', async () => {
+        const { store } = await setup();
+        await store.putModThread(thread());
+        await store.putModThread(thread({ packageId: 'Owner2-Mod2', threadId: 'thread-2', anchorMessageId: 'msg-2' }));
+        await store.putModThread(thread({ channelId: 'chan-2', packageId: 'Owner3-Mod3', threadId: 'thread-3' }));
+        expect(await store.getModThreadByThreadId('chan-1', 'thread-2')).toEqual(thread({ packageId: 'Owner2-Mod2', threadId: 'thread-2', anchorMessageId: 'msg-2' }));
+        expect(await store.getModThreadByThreadId('chan-1', 'thread-1')).toEqual(thread());
+        expect(await store.getModThreadByThreadId('chan-2', 'thread-3')).toEqual(thread({ channelId: 'chan-2', packageId: 'Owner3-Mod3', threadId: 'thread-3' }));
+        expect(await store.getModThreadByThreadId('chan-1', 'thread-3')).toBeNull();
+        expect(await store.getModThreadByThreadId('chan-3', 'thread-1')).toBeNull();
+        expect(await store.getModThreadByThreadId('chan-1', '')).toBeNull();
+      });
+
+      it('follows a thread that was replaced and forgets a deleted one', async () => {
+        const { store } = await setup();
+        await store.putModThread(thread());
+        await store.putModThread(thread({ threadId: 'thread-2' }));
+        expect(await store.getModThreadByThreadId('chan-1', 'thread-1')).toBeNull();
+        expect((await store.getModThreadByThreadId('chan-1', 'thread-2'))!.packageId).toBe('Owner1-Mod1');
+        await store.deleteModThread('chan-1', SOURCE, 'Owner1-Mod1');
+        expect(await store.getModThreadByThreadId('chan-1', 'thread-2')).toBeNull();
+      });
+    });
+
+    describe('package and event lookup', () => {
+      const HEXIUM = 'hexium:valheim';
+
+      async function seedMod(store: Store): Promise<ModEvent[]> {
+        const v1 = makeEvent({ kind: 'new', createdAt: '2026-09-10T00:00:00.000Z', pkg: { owner: 'Bob', name: 'Warfare', version: '1.0.0' } });
+        const v2 = makeEvent({
+          kind: 'update',
+          versionFrom: '1.0.0',
+          createdAt: '2026-09-12T00:00:00.000Z',
+          changelog: 'Fixed the sword',
+          changelogUrl: 'https://thunderstore.invalid/changelog',
+          pkg: { owner: 'Bob', name: 'Warfare', version: '1.1.0', categories: ['Weapons'], downloads: 42, likes: 7, downloadUrl: 'https://thunderstore.invalid/dl', websiteUrl: 'https://site.invalid/' },
+        });
+        await store.commit(batch([v1, v2], [], { packages: [v1.pkg, v2.pkg] }));
+        return [v1, v2];
+      }
+
+      it('returns the packages with this id in the order of the requested sources, with every stored field', async () => {
+        const { store } = await setup();
+        await seedMod(store);
+        const hexium = makeSnapshot({ source: HEXIUM, owner: 'Bob', name: 'Warfare', version: '2.0.0' });
+        await store.commit({ source: HEXIUM, packages: [hexium], events: [], outbox: [], state: { ...state, id: HEXIUM } });
+        const found = await store.getPackagesById(hexium.packageId, [HEXIUM, SOURCE]);
+        expect(found.map((p) => [p.source, p.version])).toEqual([[HEXIUM, '2.0.0'], [SOURCE, '1.1.0']]);
+        expect(found[1]).toMatchObject({ owner: 'Bob', name: 'Warfare', categories: ['Weapons'], downloads: 42, likes: 7, downloadUrl: 'https://thunderstore.invalid/dl', websiteUrl: 'https://site.invalid/', isNsfw: false });
+        expect((await store.getPackagesById(hexium.packageId, [SOURCE])).map((p) => p.source)).toEqual([SOURCE]);
+      });
+
+      it('returns nothing for an unknown id, a source without it, no sources, or a different letter case', async () => {
+        const { store } = await setup();
+        await seedMod(store);
+        const id = makeSnapshot({ owner: 'Bob', name: 'Warfare' }).packageId;
+        expect(await store.getPackagesById('Bob-Nothing', [SOURCE])).toEqual([]);
+        expect(await store.getPackagesById(id, [HEXIUM])).toEqual([]);
+        expect(await store.getPackagesById(id, [])).toEqual([]);
+        expect(await store.getPackagesById(id.toLowerCase(), [SOURCE])).toEqual([]);
+      });
+
+      it('returns an event by its id, with its changelog, joined with the stored package', async () => {
+        const { store } = await setup();
+        const [, v2] = await seedMod(store);
+        const found = await store.getEventById(v2!.id);
+        expect(found).toMatchObject({ id: v2!.id, kind: 'update', versionFrom: '1.0.0', versionTo: '1.1.0', changelog: 'Fixed the sword', changelogUrl: 'https://thunderstore.invalid/changelog' });
+        expect(found!.pkg).toMatchObject({ packageId: v2!.pkg.packageId, downloads: 42, likes: 7 });
+      });
+
+      it('returns null for an event that does not exist', async () => {
+        const { store } = await setup();
+        await seedMod(store);
+        expect(await store.getEventById(eventId(SOURCE, 'Bob-Nothing', '1.0.0'))).toBeNull();
+        expect(await store.getEventById('')).toBeNull();
+      });
+    });
+
     describe('autocomplete search', () => {
       async function seed(store: Store, packages: { owner: string; name: string; source?: string }[]): Promise<void> {
         const bySource = new Map<string, PackageSnapshot[]>();
@@ -1060,6 +1149,15 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
         expect((await store.searchPackages('wAr')).map((p) => p.name)).toEqual(['War', 'WARDEN', 'Warfare', 'warp']);
         expect((await store.searchPackages('wa')).map((p) => p.name)).toEqual(['War', 'WARDEN', 'Warfare', 'warp']);
         expect(await store.searchPackages('zz')).toEqual([]);
+      });
+
+      it('leaves NSFW packages out only when asked to', async () => {
+        const { store } = await setup();
+        const nsfw = makeSnapshot({ owner: 'Eve', name: 'Warlock', isNsfw: true });
+        await store.commit({ source: SOURCE, packages: [makeSnapshot({ owner: 'Bob', name: 'Warfare' }), nsfw], events: [], outbox: [], state });
+        expect((await store.searchPackages('war')).map((p) => p.name)).toEqual(['Warfare', 'Warlock']);
+        expect((await store.searchPackages('war', { sfwOnly: true })).map((p) => p.name)).toEqual(['Warfare']);
+        expect((await store.searchPackages('war', { sfwOnly: false })).map((p) => p.name)).toEqual(['Warfare', 'Warlock']);
       });
 
       it('returns source, package id, owner and name of each match, across sources', async () => {

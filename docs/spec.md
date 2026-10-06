@@ -459,7 +459,9 @@ Two tables hold what the bot learns when it sends:
 
 - `mod_threads (channel_id, source, package_id, thread_id, anchor_message_id,
   created_at)`, primary key `(channel_id, source, package_id)`: one thread per
-  mod and channel, shared by every subscription of that channel.
+  mod and channel, shared by every subscription of that channel. Migration
+  `0007` adds `idx_mod_threads_thread (channel_id, thread_id)`, which `/info`
+  uses to find the mod of the thread it runs in.
 - `messages (message_id, channel_id, source, package_id, event_id, created_at)`,
   primary key `message_id`: written for immediate messages and for posts that
   belong to one mod, read by `/info` and the "Mod info" message command. Rows
@@ -492,7 +494,7 @@ label.
 | `/filter` | Edits any field of the chosen subscription's filter, and lists or removes single `alsoMatch` rules. |
 | `/include` | Widens: adds a mod, an author (stored as a bare-owner `packages` entry) or a category as an `alsoMatch` rule. |
 | `/exclude` | Narrows: adds to `excludePackages` or `excludeCategories`. |
-| `/info` | Shows a mod: name, author, latest version, store, links, downloads and likes where the source has them, and the last changelog. `mod` autocompletes; inside a mod's thread it is optional. |
+| `/info` | Shows a mod: name, author, latest version, store, links, downloads and likes where the source has them, and the last changelog. `mod` autocompletes; inside a mod's thread it is optional (the thread is matched to its mod through `mod_threads`). Open to every member, answered inline and ephemerally; NSFW mods are never shown. |
 | Mod info (message command) | Same answer for the mod behind a message, found through `messages`. A digest message with several mods asks for `/info`. |
 
 `pnpm register-commands` registers the set with Discord. Everything a command

@@ -6,7 +6,7 @@
 -- `packages.downloads` existed needs migrations/0002_package_download_url_and_downloads.sql once, and one created before
 -- `packages.likes` and `packages.website_url` existed needs migrations/0003_package_likes_and_website.sql once, and one
 -- created before `subscriptions.thread_id` existed needs migrations/0004_subscription_thread_id.sql once, and one
--- created before the bot columns of `subscriptions` existed needs migrations/0005_bot_subscriptions.sql once, before this file.
+-- created before the bot columns of `subscriptions` existed needs migrations/0005_bot_subscriptions.sql once, before this file, and one created before `/info` needs migrations/0007_mod_threads_thread_index.sql once (applying this file creates the same index).
 
 CREATE TABLE IF NOT EXISTS sources (
   id TEXT PRIMARY KEY,
@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS mod_threads (
   created_at TEXT NOT NULL,
   PRIMARY KEY (channel_id, source, package_id)
 );
+CREATE INDEX IF NOT EXISTS idx_mod_threads_thread ON mod_threads (channel_id, thread_id);
 
 -- Bot messages about one mod; purged after 7 days by the reconcile cron.
 CREATE TABLE IF NOT EXISTS messages (

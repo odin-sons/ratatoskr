@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import {
-  AUTOCOMPLETE_MAX_RESULTS,
   DEFAULT_DIGEST_INTERVAL_MIN,
-  DISCORD_INTERACTION,
   MAX_SUBSCRIPTIONS_PER_CHANNEL,
   MAX_SUBSCRIPTIONS_PER_GUILD,
   MAX_SUBSCRIPTIONS_TOTAL,
@@ -23,11 +21,12 @@ import { stripUnsafeChars } from '../../text/sanitize.ts';
 import { SUBSCRIBE_BOT_PERMISSIONS } from '../constants.ts';
 import { checkBotPermissions, hasManageChannel, requireManageChannel } from '../permissions.ts';
 import { parseOptions, type CommandOptions } from '../options.ts';
-import { autocomplete, reply, type AutocompleteChoice, type InteractionResponse } from '../responses.ts';
+import { autocomplete, reply, type InteractionResponse } from '../responses.ts';
 import type { InteractionHandler } from '../router.ts';
 import { resolveTarget } from '../target.ts';
 import type { CommandDeps } from './deps.ts';
 import { deferWork } from './defer-work.ts';
+import { modChoices } from './mod-choices.ts';
 import { describeDestination, describeMode, display, summarizeFilter } from './view.ts';
 
 interface Plan {
@@ -177,12 +176,7 @@ export function createSubscribeAutocomplete(deps: CommandDeps): InteractionHandl
       return autocomplete((await deps.store.searchOwners(prefix)).map((owner) => ({ name: owner, value: owner })));
     }
     if (focused?.name === 'mod') {
-      const choices = new Map<string, AutocompleteChoice>();
-      for (const match of await deps.store.searchPackages(prefix)) {
-        if (match.packageId.length > DISCORD_INTERACTION.choiceValueMax || choices.has(match.packageId)) continue;
-        choices.set(match.packageId, { name: `${match.name} (${match.owner})`, value: match.packageId });
-      }
-      return autocomplete([...choices.values()].slice(0, AUTOCOMPLETE_MAX_RESULTS));
+      return autocomplete(await modChoices(deps.store, prefix));
     }
     return autocomplete([]);
   };

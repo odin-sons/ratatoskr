@@ -81,6 +81,9 @@ export interface Store {
   /** Inserts or replaces the thread of a mod in a channel. */
   putModThread(thread: ModThread): Promise<void>;
 
+  /** The mod whose thread (or forum post) in `channelId` is `threadId`; null when no mod owns it. Index-backed by `(channel_id, thread_id)`. */
+  getModThreadByThreadId(channelId: string, threadId: string): Promise<ModThread | null>;
+
   deleteModThread(channelId: string, source: SourceId, packageId: string): Promise<void>;
 
   /** Inserts or replaces the record of a bot message. */
@@ -93,12 +96,18 @@ export interface Store {
 
   /**
    * Packages whose name starts with `prefix`, ignoring ASCII case, ordered by name. A prefix shorter than
-   * `AUTOCOMPLETE_MIN_PREFIX` returns nothing; at most `AUTOCOMPLETE_MAX_RESULTS` results.
+   * `AUTOCOMPLETE_MIN_PREFIX` returns nothing; at most `AUTOCOMPLETE_MAX_RESULTS` results. `sfwOnly` leaves NSFW packages out.
    */
-  searchPackages(prefix: string): Promise<PackageMatch[]>;
+  searchPackages(prefix: string, options?: { sfwOnly?: boolean }): Promise<PackageMatch[]>;
 
   /** Whether a package with exactly this id is known in one of `sources`. */
   packageExists(packageId: string, sources: SourceId[]): Promise<boolean>;
+
+  /** The packages with exactly this id in `sources`, in the order of `sources`. */
+  getPackagesById(packageId: string, sources: SourceId[]): Promise<PackageSnapshot[]>;
+
+  /** The event with this id (see `eventId`) joined with its package as currently stored; null when there is none. */
+  getEventById(eventId: string): Promise<ModEvent | null>;
 
   /**
    * Distinct owners starting with `prefix`, ignoring ASCII case, ordered alphabetically, with the same minimum length
