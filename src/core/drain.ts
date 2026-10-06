@@ -4,7 +4,8 @@ import { DISCORD, MAX_DETAILED_PER_DIGEST, OUTBOX_BACKOFF, OUTBOX_MAX_ATTEMPTS, 
 import { fitDigestPrefix, type DigestFit } from './digest-fit.ts';
 import { compileFilter, type CompiledFilter } from './filter.ts';
 import { releaseKey } from './ids.ts';
-import type { SendResult, Sender, Store } from './ports.ts';
+import type { SendResult, SendTarget, Sender, Store } from './ports.ts';
+import { targetKey } from './send-target.ts';
 import { sanitizeLogText } from './report.ts';
 import type { Language } from '../i18n/index.ts';
 import type { DiscordMessage, DueDelivery, ModEvent, OutboxRow, StoreEmojis, Subscription } from './types.ts';
@@ -175,8 +176,9 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainReport> {
     let group = groups.get(item.subscription.id);
     if (group === undefined) groups.set(item.subscription.id, (group = { sub: item.subscription, items: [] }));
     group.items.push(item);
-    const webhookRows = rowsByWebhook.get(item.subscription.webhookUrl);
-    if (webhookRows === undefined) rowsByWebhook.set(item.subscription.webhookUrl, [item.row.id]);
+    const key = subscriptionKey(item.subscription);
+    const webhookRows = rowsByWebhook.get(key);
+    if (webhookRows === undefined) rowsByWebhook.set(key, [item.row.id]);
     else webhookRows.push(item.row.id);
   }
 
@@ -222,6 +224,14 @@ async function deliverGroup(drain: Drain, sub: Subscription, items: DueDelivery[
   }
 }
 
+function subscriptionTarget(sub: Subscription): SendTarget {
+  return { kind: 'webhook', url: sub.webhookUrl, threadId: sub.threadId };
+}
+
+function subscriptionKey(sub: Subscription): string {
+  return targetKey(subscriptionTarget(sub));
+}
+
 /** Messages still allowed for `webhook` in this tick: per-tick cap, per-webhook cap and the shared budget. */
 function allowance(drain: Drain, webhook: string): number {
   if (drain.blocked.has(webhook)) return 0;
@@ -244,7 +254,7 @@ function renderContext(deps: DrainDeps, sub: Subscription): RenderContext {
 
 async function deliverImmediate(drain: Drain, sub: Subscription, entry: CollapsedDelivery): Promise<void> {
   const { renderer, now } = drain.deps;
-  if (allowance(drain, sub.webhookUrl) < 1) {
+  if (allowance(drain, subscriptionKey(sub)) < 1) {
     drain.report.deferred += entry.rows.length;
     return;
   }
@@ -255,12 +265,12 @@ async function deliverImmediate(drain: Drain, sub: Subscription, entry: Collapse
     await parkUnrenderable(drain, [entry]);
     return;
   }
-  let failure = await sendAll(drain, sub.webhookUrl, [message], sub.threadId);
+  let failure = await sendAll(drain, subscriptionTarget(sub), [message]);
   if (failure !== null) {
     const reduced = reducedMessage(drain, sub, entry.delivery.event, message, failure);
     if (reduced !== null) {
       drain.report.failed -= 1;
-      failure = await sendAll(drain, sub.webhookUrl, [reduced], sub.threadId);
+      failure = await sendAll(drain, subscriptionTarget(sub), [reduced]);
       if (failure === null) {
         drain.report.degraded += 1;
         console.warn(`outbox degraded immediate message event=${sanitizeLogText(entry.delivery.event.id)}: sent without optional buttons`);
@@ -268,7 +278,7 @@ async function deliverImmediate(drain: Drain, sub: Subscription, entry: Collapse
     }
   }
   if (failure === null) await markDelivered(drain, entry.rows.map((r) => r.id));
-  else await failRows(drain, entry.rows, failure, sub.webhookUrl);
+  else await failRows(drain, entry.rows, failure, subscriptionKey(sub));
 }
 
 /**
@@ -278,7 +288,7 @@ async function deliverImmediate(drain: Drain, sub: Subscription, entry: Collapse
  */
 function reducedMessage(drain: Drain, sub: Subscription, event: ModEvent, message: DiscordMessage, failure: SendFailure): DiscordMessage | null {
   const { result } = failure;
-  if (result.retryable || result.status !== 400 || message.components === undefined || allowance(drain, sub.webhookUrl) < 1) return null;
+  if (result.retryable || result.status !== 400 || message.components === undefined || allowance(drain, subscriptionKey(sub)) < 1) return null;
   try {
     const reduced = drain.deps.renderer.renderImmediate(event, { now: drain.deps.now, ...renderContext(drain.deps, sub), optionalButtons: false });
     return JSON.stringify(reduced) === JSON.stringify(message) ? null : reduced;
@@ -311,7 +321,7 @@ async function deliverDigest(drain: Drain, sub: Subscription, kept: CollapsedDel
   const { renderer, now } = drain.deps;
   const context = renderContext(drain.deps, sub);
   const rowCount = (entries: readonly CollapsedDelivery[]): number => entries.reduce((sum, k) => sum + k.rows.length, 0);
-  const room = allowance(drain, sub.webhookUrl);
+  const room = allowance(drain, subscriptionKey(sub));
   if (room < 1) {
     drain.report.deferred += rowCount(kept);
     return;
@@ -337,9 +347,9 @@ async function deliverDigest(drain: Drain, sub: Subscription, kept: CollapsedDel
 
   const sentRows = live.slice(0, found.fit.count).flatMap((k) => k.rows);
   drain.report.deferred += rowCount(live) - sentRows.length;
-  const failure = await sendAll(drain, sub.webhookUrl, found.fit.messages, sub.threadId);
+  const failure = await sendAll(drain, subscriptionTarget(sub), found.fit.messages);
   if (failure === null) await markDelivered(drain, sentRows.map((r) => r.id));
-  else await failRows(drain, sentRows, failure, sub.webhookUrl);
+  else await failRows(drain, sentRows, failure, subscriptionKey(sub));
 }
 
 interface FitOutcome {
@@ -438,9 +448,10 @@ function isolatePoison(
 
 /**
  * Sends in order, stopping at the first failure; returns it, or `null` when every message was accepted.
- * `perWebhook`/`blocked` key on `webhook` alone — never fold `threadId` into that key.
+ * `perWebhook`/`blocked` key on `targetKey` — never fold `threadId` into that key.
  */
-async function sendAll(drain: Drain, webhook: string, messages: DiscordMessage[], threadId?: string | null): Promise<SendFailure | null> {
+async function sendAll(drain: Drain, target: SendTarget, messages: DiscordMessage[]): Promise<SendFailure | null> {
+  const webhook = targetKey(target);
   const { sender, budget } = drain.deps;
   for (const message of messages) {
     let result: SendResult;
@@ -450,7 +461,7 @@ async function sendAll(drain: Drain, webhook: string, messages: DiscordMessage[]
       attempted = false;
     } else {
       try {
-        result = await sender.send(webhook, message, threadId);
+        result = await sender.send(target, message);
       } catch {
         result = TRANSIENT_FAILURE;
       }

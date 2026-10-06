@@ -98,15 +98,25 @@ export interface EventDetails {
 // Discord port.
 // ---------------------------------------------------------------------------
 
+/** `threadId` delivers into an existing forum post or channel thread instead of the parent channel. */
+export type SendTarget =
+  | { kind: 'webhook'; url: string; threadId?: string | null }
+  | { kind: 'bot'; channelId: string; threadId?: string | null };
+
 export type SendResult =
-  | { ok: true }
+  | {
+      ok: true;
+      /** Bot targets only. */
+      messageId?: string;
+      /** Bot targets only: the channel or thread the message landed in. */
+      channelId?: string;
+    }
   | { ok: false; retryable: true; retryAfterSeconds: number | null; status: number }
-  /** 4xx other than 429: bad webhook, deleted channel. Do not retry. */
-  | { ok: false; retryable: false; status: number };
+  /** 4xx other than 429: bad webhook, deleted channel. Do not retry. `gone`: the channel or thread is missing or archived. */
+  | { ok: false; retryable: false; status: number; gone?: true };
 
 export interface Sender {
-  /** `threadId` delivers into an existing forum post or channel thread instead of the webhook's parent channel. */
-  send(webhookUrl: string, payload: DiscordMessage, threadId?: string | null): Promise<SendResult>;
+  send(target: SendTarget, payload: DiscordMessage): Promise<SendResult>;
 }
 
 // ---------------------------------------------------------------------------

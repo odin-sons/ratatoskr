@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { DISCORD_SEND_TIMEOUT_MS, PROJECT } from '../core/constants.ts';
-import type { Sender, SendResult } from '../core/ports.ts';
+import type { Sender, SendResult, SendTarget } from '../core/ports.ts';
 import type { DiscordMessage } from '../core/types.ts';
 import { parseDiscordWebhookUrl } from './guards.ts';
 
@@ -18,7 +18,12 @@ export class DiscordSender implements Sender {
     this.timeoutMs = timeoutMs;
   }
 
-  async send(webhookUrl: string, payload: DiscordMessage, threadId?: string | null): Promise<SendResult> {
+  async send(target: SendTarget, payload: DiscordMessage): Promise<SendResult> {
+    if (target.kind !== 'webhook') {
+      console.warn('discord send rejected: not a webhook target');
+      return { ok: false, retryable: false, status: 0 };
+    }
+    const { url: webhookUrl, threadId } = target;
     const hook = parseDiscordWebhookUrl(webhookUrl);
     if (hook === null) {
       console.warn('discord send rejected: not a discord webhook url');

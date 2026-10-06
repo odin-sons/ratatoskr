@@ -3,11 +3,12 @@ import { inspect } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { formatRunLog } from '../core/report.ts';
 import { runTick } from '../core/tick.ts';
-import type { CapUsage } from '../core/types.ts';
+import type { CapUsage, DiscordMessage } from '../core/types.ts';
 import { FakeAdapter, FIXED_NOW_ISO, makeSubscription, okPoll } from '../testing/fakes.ts';
 import { makeHarness } from '../testing/harness.ts';
 import { createFakeFetch, fixture, json, text, type FakeFetch } from '../sources/__fixtures__/fake-fetch.ts';
 import { NexusAdapter } from '../sources/nexus.ts';
+import { BotSender } from './bot-sender.ts';
 import { DiscordSender } from './discord-sender.ts';
 
 const PREFIX = 'SENTINEL';
@@ -187,8 +188,70 @@ describe('Discord webhook tokens never reach a log, an error or the run log', ()
 
   it('keeps the token out of the output when the webhook URL is not a Discord webhook', async () => {
     const sender = new DiscordSender(createFakeFetch([]).fetch);
-    const result = await sender.send(`https://evil.example/hooks/${HOOK_ID}/${SUB_TOKEN}`, { content: 'x', allowed_mentions: { parse: [] } });
+    const result = await sender.send({ kind: 'webhook', url: `https://evil.example/hooks/${HOOK_ID}/${SUB_TOKEN}` }, { content: 'x', allowed_mentions: { parse: [] } });
     expect(result).toMatchObject({ ok: false, retryable: false });
     expectNoSecret('malformed webhook', consoleOutput(), inspect(result));
+  });
+});
+
+describe('the Discord bot token never reaches a log, an error or a result', () => {
+  const BOT_TOKEN = `${PREFIX}-BOT-TOKEN-9e2b6d41c7a08f35`;
+  const CHANNEL = '223456789012345678';
+  const MESSAGE_ID = '323456789012345678';
+  const MESSAGE: DiscordMessage = { content: 'x', allowed_mentions: { parse: [] } };
+
+  const botEcho = (status: number, extra: Record<string, unknown> = {}, headers: Record<string, string> = {}): Response =>
+    json({ message: `rejected ${BOT_TOKEN}`, ...extra }, { status, headers });
+
+  const BOT_FAILURES: Upstream[] = [
+    ['HTTP 400', () => botEcho(400)],
+    ['HTTP 401', () => botEcho(401)],
+    ['HTTP 403', () => botEcho(403)],
+    ['HTTP 404', () => botEcho(404)],
+    ['HTTP 404 with code 10003', () => botEcho(404, { code: 10003 })],
+    ['HTTP 400 with code 50083', () => botEcho(400, { code: 50083 })],
+    ['HTTP 429 with Retry-After', () => botEcho(429, {}, { 'retry-after': '30' })],
+    ['HTTP 429 with a malformed body', () => new Response(`not json ${BOT_TOKEN}`, { status: 429 })],
+    ['HTTP 500', () => botEcho(500)],
+    ['a body of the wrong shape', () => botEcho(200)],
+    ['a redirect to another host', () => new Response('', { status: 302, headers: { location: 'https://evil.example/collect' } })],
+    ['a network error', () => Promise.reject(new TypeError('fetch failed'))],
+    ['a timeout', () => Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'))],
+  ];
+
+  const operations: [string, (sender: BotSender) => Promise<unknown>][] = [
+    ['send', (s) => s.send({ kind: 'bot', channelId: CHANNEL }, MESSAGE)],
+    ['send into a thread', (s) => s.send({ kind: 'bot', channelId: CHANNEL, threadId: MESSAGE_ID }, MESSAGE)],
+    ['forum post', (s) => s.createForumPost(CHANNEL, 'name', MESSAGE)],
+    ['thread on a message', (s) => s.openThreadOnMessage(CHANNEL, MESSAGE_ID, 'name')],
+  ];
+
+  it('sends the token in the authorization header only (the control that makes the cases below meaningful)', async () => {
+    const fake = createFakeFetch([['discord.com', () => json({ id: MESSAGE_ID })]]);
+    await new BotSender(BOT_TOKEN, fake.fetch).send({ kind: 'bot', channelId: CHANNEL }, MESSAGE);
+    expect(fake.calls).toHaveLength(1);
+    expect(fake.calls[0]!.headers.authorization).toBe(`Bot ${BOT_TOKEN}`);
+    expect(fake.calls[0]!.url).not.toContain(BOT_TOKEN);
+  });
+
+  describe.each(operations)('%s', (_name, run) => {
+    it.each(BOT_FAILURES)('keeps the token out of every output when Discord answers with %s', async (name, respond) => {
+      const fake = createFakeFetch([['discord.com', respond]]);
+      const result = await run(new BotSender(BOT_TOKEN, fake.fetch));
+      expect(fake.calls.length, 'Discord was reached').toBeGreaterThan(0);
+      expectNoSecret(name, consoleOutput(), inspect(result, { depth: 6 }));
+    });
+  });
+
+  it.each([
+    ['a webhook target', (s: BotSender) => s.send({ kind: 'webhook', url: SUB_WEBHOOK }, MESSAGE)],
+    ['a malformed channel id', (s: BotSender) => s.send({ kind: 'bot', channelId: BOT_TOKEN }, MESSAGE)],
+    ['a malformed message id', (s: BotSender) => s.openThreadOnMessage(CHANNEL, BOT_TOKEN, 'name')],
+  ])('keeps the token out of every output for %s', async (name, run) => {
+    const fake = createFakeFetch([]);
+    const result = await run(new BotSender(BOT_TOKEN, fake.fetch));
+    expect(result).toMatchObject({ ok: false, retryable: false });
+    expect(fake.calls).toHaveLength(0);
+    expectNoSecret(name, consoleOutput(), inspect(result));
   });
 });
