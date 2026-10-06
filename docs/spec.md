@@ -398,13 +398,19 @@ their source.
 Guild and channel come only from the signed payload; no command option names
 another channel or guild. Discord runs a command inside a forum post, not in
 the forum's own view, so there the payload's `channel` is the post and
-`channel.parent_id` is the forum. The handler resolves the target channel from
-that: in a forum post it is the forum, so `/subscribe`, `/unsubscribe` and
-`/list` work from any post of the forum; in a text channel it is that channel;
-in a thread of a text channel the command is refused with a message to run it
-in the channel. Commands are registered with the Manage Channel
-default member permission, and the handler checks `member.permissions` again.
-Replies are ephemeral and use `LANGUAGE`.
+`channel.parent_id` is the forum. The handler resolves where the command
+applies:
+
+- in a text channel: that channel;
+- in a forum post or a thread of a text channel: that post or thread (the
+  subscription gets `channel_id` of the parent and `thread_id` of the post), or,
+  with `thread_per_mod`, the parent channel itself, which is the only way to
+  subscribe a whole forum.
+
+`/list` and the `subscription` autocomplete in a thread show the subscriptions
+of that thread and those of its parent channel. Commands are registered with the
+Manage Channel default member permission, and the handler checks
+`member.permissions` again. Replies are ephemeral and use `LANGUAGE`.
 
 ### Delivery targets
 
@@ -435,10 +441,16 @@ nullable, and adds:
 | Column | Meaning |
 |---|---|
 | `transport` | `webhook` (existing rows) or `bot` |
-| `channel_id` | destination channel of a bot subscription (a forum channel or a text channel) |
+| `channel_id` | destination channel of a bot subscription (a text channel or a forum) |
 | `label` | name shown in `/list` and in the `subscription` autocomplete |
 | `created_by` | Discord user id of the creator |
-| `thread_per_mod` | write updates of a mod into the mod's thread (text channels) |
+| `thread_per_mod` | write the updates of each mod into that mod's own thread or forum post |
+| `paused_until` | epoch seconds; `0` is not paused, the maximum safe integer is an open-ended pause |
+
+`thread_id` (migration `0004`) now also serves bot subscriptions: a subscription
+made inside a forum post or a thread delivers into that one post or thread, in
+`immediate` or `digest` mode alike. A subscription with `thread_per_mod` has no
+`thread_id`; its threads are found through `mod_threads`.
 
 Webhook subscriptions keep working unchanged. A bot subscription has no
 `webhook_url`.
@@ -472,8 +484,10 @@ label.
 
 | Command | Effect |
 |---|---|
-| `/subscribe` | Creates a subscription in the current channel. Options: `owner`, `mod` (both autocomplete from `packages`), `category`, `source`, `kind` (`new`, `update`, both), `mode` (`immediate`, `digest`), `interval`, `label`, `thread_per_mod`. Refuses with a message when the bot lacks a permission it needs in the channel (`app_permissions` of the interaction): View Channel, Send Messages (shown as Create Posts in a forum), Embed Links, Send Messages in Threads and Create Public Threads. In a forum it is run inside any post of that forum. |
+| `/subscribe` | Creates a subscription where the command runs (see the resolution rules above). Options: `owner`, `mod` (both autocomplete from `packages`), `category`, `source`, `kind` (`new`, `update`, both), `mode` (`immediate`, `digest`), `interval`, `label`, `thread_per_mod`. Refuses with a message when the bot lacks a permission it needs there (`app_permissions` of the interaction): View Channel, Send Messages (shown as Create Posts in a forum), Embed Links, Send Messages in Threads and Create Public Threads. |
 | `/unsubscribe` | Removes the chosen subscription and its undelivered outbox rows. |
+| `/pause` | Stops notifications of the chosen subscription, or of every subscription here when none is given. `for` takes a duration (for example `2h` or `3d`); without it the pause is open-ended. While paused, fan-out treats the subscription as disabled, so nothing is queued, and undelivered outbox rows are removed as on `/unsubscribe`. Events that happen during the pause are not delivered afterwards. |
+| `/continue` | Ends the pause now. A pause with `for` also ends by itself once `paused_until` has passed; no cron is involved. |
 | `/list` | Ephemeral list of the channel's subscriptions (`all:true`: the whole server) with label, mode, thread flag and a filter summary; pages when it does not fit. |
 | `/filter` | Edits any field of the chosen subscription's filter, and lists or removes single `alsoMatch` rules. |
 | `/include` | Widens: adds a mod, an author (stored as a bare-owner `packages` entry) or a category as an `alsoMatch` rule. |
@@ -509,14 +523,17 @@ with the rest of the batch.
 
 | Channel | Mode | Behavior |
 |---|---|---|
-| Forum | `immediate` | A `new` event creates a post for the mod, titled with the mod name (at most 100 characters). An `update` goes into that post; without one, it creates the post. |
-| Forum | `digest` | Each digest batch becomes one post titled from the locale and the batch time. The first message is the starter; the other messages of the batch are replies. `thread_per_mod` is ignored. |
-| Text channel | `thread_per_mod` | The first message about a mod is its anchor. The first `update` opens a thread on the anchor and posts there. Without an anchor, the update is a plain message and becomes the anchor. |
-| Text channel | otherwise | As before: plain messages. |
+| Forum, `thread_per_mod` | `immediate` | A `new` event creates a post for the mod, titled with the mod name (at most 100 characters). An `update` goes into that post; without one, it creates the post. |
+| Text channel, `thread_per_mod` | `immediate` | The first message about a mod is its anchor. The first `update` opens a thread on the anchor and posts there. Without an anchor, the update is a plain message and becomes the anchor. |
+| Forum post or thread, no `thread_per_mod` | `immediate` or `digest` | Everything the subscription matches goes into that one post or thread. This is how one mod, one author or one category is followed in a forum, and how categories are excluded from a feed. |
+| Text channel, no `thread_per_mod` | `immediate` or `digest` | As before: plain messages in the channel. |
 
-A mod that should have both a thread and a digest line needs two
-subscriptions. A thread that is gone resets its `mod_threads` row, and the
-message goes out as a new post or message. Digest posts are not mapped.
+`thread_per_mod` needs `immediate`: a digest message carries several mods and
+has no single thread. A mod that should have both a thread and a digest line
+needs two subscriptions. A thread that is gone resets its `mod_threads` row, and
+the message goes out as a new post or message; a subscription bound to one post
+whose post is gone fails delivery like any bad destination. Only
+`thread_per_mod` subscriptions write `mod_threads`.
 
 ### Limits and budget
 
@@ -1065,11 +1082,7 @@ Still open:
 2. Measured CPU per tick — needs a real deployment to confirm the 10 ms budget.
 3. Nexus response shapes are unverified (no API key during development).
 4. Persisting `alsoOn` for a release already delivered on another store.
-5. Bot: a digest batch is created as one post, but its remaining messages can be
-   delivered on a later tick (progressive delivery), and the post may have been
-   closed or archived by then. Reopening it needs a permission the bot may lack;
-   the fallback is a new post.
-6. Bot: whether a forum post accepts a Components V2 starter message. Confirm
+5. Bot: whether a forum post accepts a Components V2 starter message. Confirm
    against the live API and record the result in `docs/api-notes.md`.
 
 ### Watch list
