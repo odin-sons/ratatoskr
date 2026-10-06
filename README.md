@@ -138,6 +138,8 @@ Until then, use the manual steps below.
    > `pnpm subscriptions` are deprecated as of 2.0.0 and will be removed in
    > 3.0.0. Manage subscriptions with the bot's slash commands instead.
 
+   The bot, its secrets and its commands are set up in [docs/bot-setup.md](docs/bot-setup.md).
+
    ```sh
    # put the webhook URL into .env (git-ignored, from step 2)
    pnpm add-subscription --guild-id <guild id> --webhook-url-env DISCORD_WEBHOOK_URL
