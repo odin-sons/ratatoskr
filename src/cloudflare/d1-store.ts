@@ -211,6 +211,7 @@ const SUBSCRIPTION_SELECT = `SELECT ${SUBSCRIPTION_READ_COLUMNS.join(', ')} FROM
 const SQL_SUBSCRIPTIONS = `${SUBSCRIPTION_SELECT} WHERE enabled = 1`;
 const SQL_SUBSCRIPTIONS_BY_CHANNEL = `${SUBSCRIPTION_SELECT} WHERE channel_id = ?`;
 const SQL_SUBSCRIPTIONS_BY_GUILD = `${SUBSCRIPTION_SELECT} WHERE guild_id = ?`;
+const SQL_COUNT_SUBSCRIPTIONS = 'SELECT COUNT(*) AS n FROM subscriptions WHERE enabled IN (0, 1)';
 const SQL_CREATE_SUBSCRIPTION = `INSERT INTO subscriptions (${SUBSCRIPTION_READ_COLUMNS.join(', ')}) VALUES (${placeholders(SUBSCRIPTION_READ_COLUMNS.length)})`;
 const SQL_DELETE_SUBSCRIPTION_OUTBOX = 'DELETE FROM outbox WHERE subscription_id = ? AND delivered_at IS NULL';
 const SQL_DELETE_SUBSCRIPTION = 'DELETE FROM subscriptions WHERE id = ?';
@@ -222,6 +223,7 @@ const SQL_GET_MESSAGE = `SELECT ${MESSAGE_COLUMNS.join(', ')} FROM messages WHER
 const SQL_PUT_MESSAGE = `INSERT INTO messages (${MESSAGE_COLUMNS.join(', ')}) VALUES (${placeholders(MESSAGE_COLUMNS.length)}) ON CONFLICT (message_id) DO UPDATE SET channel_id = excluded.channel_id, source = excluded.source, package_id = excluded.package_id, event_id = excluded.event_id, created_at = excluded.created_at`;
 const SQL_PURGE_MESSAGES = 'DELETE FROM messages WHERE message_id IN (SELECT message_id FROM messages WHERE created_at < ? LIMIT ?)';
 const SQL_SEARCH_PACKAGES = 'SELECT source, package_id, owner, name FROM packages WHERE name COLLATE NOCASE >= ? AND name COLLATE NOCASE < ? ORDER BY name COLLATE NOCASE LIMIT ?';
+const sqlPackageExists = (sources: number): string => `SELECT 1 AS found FROM packages WHERE source IN (${placeholders(sources)}) AND package_id = ? LIMIT 1`;
 const SQL_SEARCH_OWNERS = 'SELECT owner FROM packages WHERE owner COLLATE NOCASE >= ? AND owner COLLATE NOCASE < ? ORDER BY owner COLLATE NOCASE LIMIT ?';
 /** Above every UTF-8 sequence, so `prefix + this` bounds the range of names starting with `prefix`. */
 const PREFIX_UPPER_BOUND = '\u{10FFFF}';
@@ -428,6 +430,11 @@ export class D1Store implements Store {
     return mapValidSubscriptions(results);
   }
 
+  async countSubscriptions(): Promise<number> {
+    const row = await this.db.prepare(SQL_COUNT_SUBSCRIPTIONS).first<{ n: number }>();
+    return row?.n ?? 0;
+  }
+
   async getModThread(channelId: string, source: SourceId, packageId: string): Promise<ModThread | null> {
     const row = await this.db.prepare(SQL_GET_MOD_THREAD).bind(channelId, source, packageId).first<ModThreadCols>();
     if (row === null) return null;
@@ -484,6 +491,11 @@ export class D1Store implements Store {
       .bind(prefix, prefix + PREFIX_UPPER_BOUND, AUTOCOMPLETE_MAX_RESULTS)
       .all<{ source: string; package_id: string; owner: string; name: string }>();
     return results.map((r) => ({ source: r.source, packageId: r.package_id, owner: r.owner, name: r.name }));
+  }
+
+  async packageExists(packageId: string, sources: SourceId[]): Promise<boolean> {
+    if (sources.length === 0) return false;
+    return (await this.db.prepare(sqlPackageExists(sources.length)).bind(...sources, packageId).first()) !== null;
   }
 
   async searchOwners(prefix: string): Promise<string[]> {

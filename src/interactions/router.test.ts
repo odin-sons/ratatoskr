@@ -158,6 +158,7 @@ describe('finishDeferred', () => {
     const ctx: HandlerContext = {
       messages: en,
       waitUntil: (p) => void pending.push(p),
+      delay: () => Promise.resolve(),
       fetch: (() => Promise.reject(new TypeError(`fetch failed`))) as unknown as typeof fetch,
     };
     finishDeferred(ctx, make({}), { content: 'x' });
@@ -165,11 +166,70 @@ describe('finishDeferred', () => {
     const logged = JSON.stringify(vi.mocked(console.error).mock.calls);
     expect(logged).not.toContain('SENTINEL');
     expect(logged).not.toContain('/webhooks/');
+    expect(logged).toContain('TypeError');
 
     const failing = createFakeFetch([['discord.com', () => json({ message: TOKEN_SENTINEL }, { status: 500 })]]);
     const p2: Promise<unknown>[] = [];
     finishDeferred({ messages: en, fetch: failing.fetch, waitUntil: (p) => void p2.push(p) }, make({}), { content: 'x' });
     await Promise.all(p2);
     expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('SENTINEL');
+  });
+
+  describe('retrying the follow-up', () => {
+    const run = async (statuses: (number | 'network')[]) => {
+      const delays: number[] = [];
+      const attempts: string[] = [];
+      const pending: Promise<unknown>[] = [];
+      let n = 0;
+      const ctx: HandlerContext = {
+        messages: en,
+        waitUntil: (p) => void pending.push(p),
+        delay: (ms) => {
+          delays.push(ms);
+          return Promise.resolve();
+        },
+        fetch: ((_url: string, init?: RequestInit) => {
+          attempts.push(String(init?.body));
+          const status = statuses[n++] ?? 200;
+          return status === 'network' ? Promise.reject(new TypeError('fetch failed')) : Promise.resolve(new Response('{}', { status }));
+        }) as unknown as typeof fetch,
+      };
+      let works = 0;
+      finishDeferred(ctx, make({}), Promise.resolve().then(() => ({ content: `done ${(works += 1)}` })));
+      await Promise.all(pending);
+      return { delays, attempts, works };
+    };
+
+    it('lands the follow-up after one 404, sending the same body and running the work once', async () => {
+      const { delays, attempts, works } = await run([404]);
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1]).toBe(attempts[0]);
+      expect(JSON.parse(attempts[1]!).content).toBe('done 1');
+      expect(works).toBe(1);
+      expect(delays).toEqual([300]);
+      expect(console.error).not.toHaveBeenCalled();
+    });
+
+    it('retries a network error too, backing off 300 then 600 ms, and gives up after two retries', async () => {
+      const { delays, attempts } = await run(['network', 'network', 'network', 'network']);
+      expect(attempts).toHaveLength(3);
+      expect(delays).toEqual([300, 600]);
+      expect(vi.mocked(console.error).mock.calls).toEqual([['finishing a deferred interaction failed: TypeError']]);
+    });
+
+    it('logs only the status after still failing with 404, never the URL or the token', async () => {
+      const { attempts } = await run([404, 404, 404]);
+      expect(attempts).toHaveLength(3);
+      const logged = JSON.stringify(vi.mocked(console.error).mock.calls);
+      expect(logged).toBe('[["finishing a deferred interaction failed: HTTP 404"]]');
+      expect(logged).not.toContain('SENTINEL');
+      expect(logged).not.toContain('/webhooks/');
+    });
+
+    it.each([400, 401, 403, 500])('does not retry HTTP %d', async (status) => {
+      const { attempts, delays } = await run([status]);
+      expect(attempts).toHaveLength(1);
+      expect(delays).toEqual([]);
+    });
   });
 });

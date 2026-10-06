@@ -5,7 +5,7 @@ import { runReconcile, runTick } from '../core/tick.ts';
 import type { TickDeps, TickReport } from '../core/tick.ts';
 import type { AppConfig } from '../core/types.ts';
 import { getMessages, parseLanguage } from '../i18n/index.ts';
-import { createCommandRegistry } from '../interactions/commands.ts';
+import { createCommandRegistry, randomSubscriptionId } from '../interactions/commands.ts';
 import { handleInteractionRequest } from '../interactions/endpoint.ts';
 import { parseRatatoskrEmoji, parseStoreEmojis } from '../render/index.ts';
 import { createAdapters } from '../sources/index.ts';
@@ -80,13 +80,15 @@ async function dispatchSafely(controller: ScheduledController, env: Env): Promis
   }
 }
 
-const registry = createCommandRegistry();
-
 async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   try {
     return await handleInteractionRequest(request, {
       publicKey: env.DISCORD_PUBLIC_KEY,
-      registry,
+      registry: createCommandRegistry({
+        store: new D1Store(env.DB),
+        sources: (config as AppConfig).sources.filter((source) => source.enabled),
+        newId: randomSubscriptionId,
+      }),
       messages: getMessages(parseLanguage(env.LANGUAGE)),
       fetch: globalThis.fetch.bind(globalThis),
       waitUntil: (promise) => ctx.waitUntil(promise),

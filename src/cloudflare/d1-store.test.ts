@@ -744,6 +744,7 @@ describe('D1 adapter', () => {
       await spy.updateSubscription('bot1', {});
       await spy.listSubscriptionsByChannel('chan-1');
       await spy.listSubscriptionsByGuild('guild-1');
+      await spy.countSubscriptions();
       await spy.putModThread({ channelId: 'chan-1', source: SOURCE, packageId: 'Owner-Name', threadId: 't1', anchorMessageId: null, createdAt: '2026-09-19T00:00:00.000Z' });
       await spy.getModThread('chan-1', SOURCE, 'Owner-Name');
       await spy.deleteModThread('chan-1', SOURCE, 'Owner-Name');
@@ -752,6 +753,7 @@ describe('D1 adapter', () => {
       await spy.purgeMessages('2026-09-20T00:00:00.000Z', 10);
       await spy.searchPackages('Na');
       await spy.searchOwners('Ow');
+      await spy.packageExists('Owner-Name', [SOURCE, 'hexium:valheim']);
       await spy.recentEventsByReleaseKeys(['k'], '2026-01-01T00:00:00.000Z');
       await spy.takeDue('2026-09-19T00:00:00.000Z', 10);
       await spy.markFailedMany([o.id], '2026-09-19T00:00:00.000Z', false);

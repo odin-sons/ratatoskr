@@ -67,6 +67,9 @@ export interface Store {
   /** Every subscription (disabled and paused included) of a guild. */
   listSubscriptionsByGuild(guildId: string): Promise<Subscription[]>;
 
+  /** Number of subscriptions of every transport, disabled and paused included. */
+  countSubscriptions(): Promise<number>;
+
   getModThread(channelId: string, source: SourceId, packageId: string): Promise<ModThread | null>;
 
   /** Inserts or replaces the thread of a mod in a channel. */
@@ -87,6 +90,9 @@ export interface Store {
    * `AUTOCOMPLETE_MIN_PREFIX` returns nothing; at most `AUTOCOMPLETE_MAX_RESULTS` results.
    */
   searchPackages(prefix: string): Promise<PackageMatch[]>;
+
+  /** Whether a package with exactly this id is known in one of `sources`. */
+  packageExists(packageId: string, sources: SourceId[]): Promise<boolean>;
 
   /**
    * Distinct owners starting with `prefix`, ignoring ASCII case, ordered alphabetically, with the same minimum length

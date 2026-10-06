@@ -14,6 +14,7 @@ export const INTERACTION_CALLBACK = {
   pong: 1,
   channelMessage: 4,
   deferredChannelMessage: 5,
+  updateMessage: 7,
   autocompleteResult: 8,
 } as const;
 

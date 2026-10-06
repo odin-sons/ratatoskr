@@ -30,7 +30,14 @@ export interface FinishContext {
   waitUntil(promise: Promise<unknown>): void;
   fetch: typeof fetch;
   messages: Messages;
+  /** Pause between follow-up attempts; defaults to `setTimeout`. */
+  delay?: (ms: number) => Promise<void>;
 }
+
+/** The follow-up can reach Discord before the deferral is registered (404); only the PATCH is retried, never the work. */
+const FOLLOW_UP_RETRIES = 2;
+const FOLLOW_UP_RETRY_BASE_MS = 300;
+const defaultDelay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 const NO_MENTIONS = { parse: [] } as const;
 
@@ -44,6 +51,12 @@ export const pong = (): InteractionResponse => ({ type: INTERACTION_CALLBACK.pon
 export const reply = (message: InteractionMessage, options: ReplyOptions = {}): InteractionResponse => ({
   type: INTERACTION_CALLBACK.channelMessage,
   data: messageData(message, options),
+});
+
+/** Edits the message a component sits on. */
+export const updateMessage = (message: InteractionMessage): InteractionResponse => ({
+  type: INTERACTION_CALLBACK.updateMessage,
+  data: messageData(message, {}),
 });
 
 export const defer = (options: ReplyOptions = {}): InteractionResponse => ({
@@ -77,16 +90,30 @@ async function patchOriginal(ctx: FinishContext, url: string, pending: Interacti
     console.error(`deferred interaction work failed: ${err instanceof Error ? err.name : 'error'}`);
     message = { content: ctx.messages.somethingWrong };
   }
-  try {
-    const res = await ctx.fetch(url, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ...message, allowed_mentions: NO_MENTIONS }),
-      redirect: 'manual',
-      signal: AbortSignal.timeout(DISCORD_SEND_TIMEOUT_MS),
-    });
-    if (!res.ok) console.error(`finishing a deferred interaction failed: HTTP ${res.status}`);
-  } catch (err) {
-    console.error(`finishing a deferred interaction failed: ${err instanceof Error ? err.name : 'error'}`);
+  const body = JSON.stringify({ ...message, allowed_mentions: NO_MENTIONS });
+  const wait = ctx.delay ?? defaultDelay;
+  for (let attempt = 0; ; attempt++) {
+    let failure: string;
+    let retryable: boolean;
+    try {
+      const res = await ctx.fetch(url, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body,
+        redirect: 'manual',
+        signal: AbortSignal.timeout(DISCORD_SEND_TIMEOUT_MS),
+      });
+      if (res.ok) return;
+      failure = `HTTP ${res.status}`;
+      retryable = res.status === 404;
+    } catch (err) {
+      failure = err instanceof Error ? err.name : 'error';
+      retryable = true;
+    }
+    if (!retryable || attempt >= FOLLOW_UP_RETRIES) {
+      console.error(`finishing a deferred interaction failed: ${failure}`);
+      return;
+    }
+    await wait(FOLLOW_UP_RETRY_BASE_MS * 2 ** attempt);
   }
 }

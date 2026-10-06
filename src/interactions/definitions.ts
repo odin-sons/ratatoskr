@@ -1,0 +1,89 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import { DISCORD_INTERACTION, SUBSCRIBE_TEXT_OPTION_MAX, SUBSCRIPTION_LABEL_MAX } from '../core/constants.ts';
+import { DIGEST_INTERVAL_MAX_BOUND, DIGEST_INTERVAL_MIN_BOUND } from '../core/validation.ts';
+
+/** Source: Discord developer docs, "Application Commands" (Application Command Option Type, Application Command Type). */
+export const OPTION_TYPE = { string: 3, integer: 4, boolean: 5 } as const;
+const CHAT_INPUT = 1;
+
+export interface CommandChoice {
+  name: string;
+  value: string;
+}
+
+export interface CommandOptionDefinition {
+  type: (typeof OPTION_TYPE)[keyof typeof OPTION_TYPE];
+  name: string;
+  description: string;
+  required?: boolean;
+  autocomplete?: boolean;
+  choices?: CommandChoice[];
+  min_value?: number;
+  max_value?: number;
+  max_length?: number;
+}
+
+export interface CommandDefinition {
+  name: string;
+  description: string;
+  type: typeof CHAT_INPUT;
+  default_member_permissions: string;
+  dm_permission: false;
+  options?: CommandOptionDefinition[];
+}
+
+const command = (name: string, description: string, options?: CommandOptionDefinition[]): CommandDefinition => ({
+  name,
+  description,
+  type: CHAT_INPUT,
+  default_member_permissions: DISCORD_INTERACTION.manageChannelPermissions,
+  dm_permission: false,
+  ...(options ? { options } : {}),
+});
+
+export const SUBSCRIBE_SOURCE_CHOICES: readonly CommandChoice[] = [
+  { name: 'Thunderstore', value: 'thunderstore' },
+  { name: 'Hexium', value: 'hexium' },
+  { name: 'Nexus Mods', value: 'nexus' },
+];
+
+export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
+  command('subscribe', 'Get mod updates in this channel, thread or forum post', [
+    { type: OPTION_TYPE.string, name: 'owner', description: 'Every mod of this author', autocomplete: true, max_length: SUBSCRIBE_TEXT_OPTION_MAX },
+    { type: OPTION_TYPE.string, name: 'mod', description: 'One mod', autocomplete: true, max_length: SUBSCRIBE_TEXT_OPTION_MAX },
+    { type: OPTION_TYPE.string, name: 'category', description: 'Only mods in this category', max_length: SUBSCRIBE_TEXT_OPTION_MAX },
+    { type: OPTION_TYPE.string, name: 'source', description: 'Only this store', choices: [...SUBSCRIBE_SOURCE_CHOICES] },
+    {
+      type: OPTION_TYPE.string,
+      name: 'kind',
+      description: 'New mods, updates or both (default: both)',
+      choices: [
+        { name: 'New mods', value: 'new' },
+        { name: 'Updates', value: 'update' },
+        { name: 'Both', value: 'both' },
+      ],
+    },
+    {
+      type: OPTION_TYPE.string,
+      name: 'mode',
+      description: 'One message per update, or a periodic digest (default: digest)',
+      choices: [
+        { name: 'Immediate', value: 'immediate' },
+        { name: 'Digest', value: 'digest' },
+      ],
+    },
+    {
+      type: OPTION_TYPE.integer,
+      name: 'interval',
+      description: 'Minutes between digests (digest mode only)',
+      min_value: DIGEST_INTERVAL_MIN_BOUND,
+      max_value: DIGEST_INTERVAL_MAX_BOUND,
+    },
+    { type: OPTION_TYPE.string, name: 'label', description: 'Name for this subscription', max_length: SUBSCRIPTION_LABEL_MAX },
+    { type: OPTION_TYPE.boolean, name: 'thread_per_mod', description: 'Write each mod into its own thread (immediate mode only)' },
+  ]),
+  command('unsubscribe', 'Remove a subscription', [
+    { type: OPTION_TYPE.string, name: 'subscription', description: 'The subscription to remove', required: true, autocomplete: true },
+  ]),
+  command('list', 'List the subscriptions here', [{ type: OPTION_TYPE.boolean, name: 'all', description: 'The whole server instead of this channel' }]),
+];

@@ -305,7 +305,8 @@ describe('interaction tokens, the public key and the bot token never reach a log
       await Promise.all(pending);
       pending = [];
       expectNoSecret(name, consoleOutput(), await res.text());
-      expect(fake.callsTo('/webhooks/'), `${name}: the webhook was reached`).toHaveLength(1);
+      const reached = fake.callsTo('/webhooks/').length;
+      expect(reached >= 1 && reached <= 3, `${name}: the webhook was reached ${reached} times`).toBe(true);
       expect(fake.calls.every((call) => call.headers.authorization === undefined)).toBe(true);
     }
   });

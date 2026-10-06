@@ -1,7 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { createListCommand, createListPager, LIST_COMPONENT_PREFIX } from './commands/list.ts';
+import { createSubscribeAutocomplete, createSubscribeCommand } from './commands/subscribe.ts';
+import { createUnsubscribeAutocomplete, createUnsubscribeCommand } from './commands/unsubscribe.ts';
+import type { CommandDeps } from './commands/deps.ts';
 import { createRegistry, type HandlerRegistry } from './router.ts';
 
+export { randomSubscriptionId, type CommandDeps } from './commands/deps.ts';
+
 /** The handlers the Worker serves; commands are registered here as they are added. */
-export function createCommandRegistry(): HandlerRegistry {
-  return createRegistry();
+export function createCommandRegistry(deps: CommandDeps): HandlerRegistry {
+  const registry = createRegistry();
+  registry.commands.set('subscribe', createSubscribeCommand(deps));
+  registry.autocompletes.set('subscribe', createSubscribeAutocomplete(deps));
+  registry.commands.set('unsubscribe', createUnsubscribeCommand(deps));
+  registry.autocompletes.set('unsubscribe', createUnsubscribeAutocomplete(deps));
+  registry.commands.set('list', createListCommand(deps));
+  registry.components.set(LIST_COMPONENT_PREFIX, createListPager(deps));
+  return registry;
 }
