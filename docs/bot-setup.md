@@ -93,7 +93,7 @@ names the missing ones.
 
 | Where you run it | What it does |
 |---|---|
-| A text channel | Subscribes the channel. With `thread_per_mod`, each mod's updates go into a thread on its first message. |
+| A text channel | Subscribes the channel. With `thread_per_mod`, the bot posts a message about each mod and opens a thread on it; later updates of that mod go into the thread. |
 | A forum post or a thread | Subscribes that one post, in `immediate` or `digest` mode. With `thread_per_mod`, it subscribes the whole forum, with one post per mod. |
 
 Commands cannot run in a forum's own view, only inside one of its posts.

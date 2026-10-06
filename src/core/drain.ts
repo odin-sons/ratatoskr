@@ -631,6 +631,14 @@ async function deliverRouted(drain: Drain, sub: Subscription, target: BotTarget,
   }
 }
 
+/** Opens the mod's thread on the message just sent; '' when it fails, leaving the anchor for the next delivery. */
+async function openThreadOn(drain: Drain, target: BotTarget, event: ModEvent, messageId: string): Promise<string> {
+  const { sender } = drain.deps;
+  const opened = await request<OpenThreadResult>(drain, targetKey(target), () => sender.openThreadOnMessage?.(target.channelId, messageId, threadName(event)) ?? Promise.resolve(UNSUPPORTED));
+  if (opened.result.ok) return opened.result.threadId;
+  return !opened.result.retryable && opened.result.threadExists === true ? messageId : '';
+}
+
 async function runRoute(
   drain: Drain,
   target: BotTarget,
@@ -667,7 +675,8 @@ async function runRoute(
     const landed = res.result;
     const messageId = landed.messageId;
     if (messageId !== undefined) {
-      await writeMapping(() => store.putModThread({ channelId, source, packageId, threadId: '', anchorMessageId: messageId, createdAt: nowIso }));
+      const threadId = allowance(drain, key) >= 1 ? await openThreadOn(drain, target, event, messageId) : '';
+      await writeMapping(() => store.putModThread({ channelId, source, packageId, threadId, anchorMessageId: messageId, createdAt: nowIso }));
       await writeMapping(() => store.putMessage(messageRecord(drain, event, messageId, landed.channelId ?? channelId)));
     }
     return { ok: true };

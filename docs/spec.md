@@ -461,7 +461,7 @@ Two tables hold what the bot learns when it sends:
 - `mod_threads (channel_id, source, package_id, thread_id, anchor_message_id,
   created_at)`, primary key `(channel_id, source, package_id)`: one thread per
   mod and channel, shared by every subscription of that channel. `thread_id` is
-  empty while a text channel's anchor message has no thread yet. Migration
+  empty only while the thread of a text channel's anchor message could not be opened; the next delivery opens it. Migration
   `0007` adds `idx_mod_threads_thread (channel_id, thread_id)`, which `/info`
   uses to find the mod of the thread it runs in.
 - `messages (message_id, channel_id, source, package_id, event_id, created_at)`,
@@ -528,7 +528,7 @@ with the rest of the batch.
 | Channel | Mode | Behavior |
 |---|---|---|
 | Forum, `thread_per_mod` | `immediate` | A `new` event creates a post for the mod, titled with the mod name (at most 100 characters). An `update` goes into that post; without one, it creates the post. |
-| Text channel, `thread_per_mod` | `immediate` | The first message about a mod is its anchor. The first `update` opens a thread on the anchor and posts there. Without an anchor, the update is a plain message and becomes the anchor. |
+| Text channel, `thread_per_mod` | `immediate` | Without a mapping, the event is a plain message about the mod and a thread is opened on that very message at once; the thread starts empty and every later update goes into it. A thread that is gone is replaced the same way, with a new message and a new thread. |
 | Forum post or thread, no `thread_per_mod` | `immediate` or `digest` | Everything the subscription matches goes into that one post or thread. This is how one mod, one author or one category is followed in a forum, and how categories are excluded from a feed. |
 | Text channel, no `thread_per_mod` | `immediate` or `digest` | As before: plain messages in the channel. |
 
@@ -543,8 +543,8 @@ delivery like any bad destination, unless the post is that young. Only
 `thread_per_mod` subscriptions write `mod_threads`; two of them in one channel that match the same mod share its thread and each posts its own copy there. `messages` rows are written
 for single-mod immediate messages and mod posts, never for a digest.
 
-A forum post costs one request, a thread opened on an anchor plus the post into
-it two; the per-tick send cap and the per-channel cap count requests. `/subscribe`
+A forum post costs one request; a message plus the thread opened on it, or a
+thread opened on an anchor plus the post into it, cost two; the per-tick send cap and the per-channel cap count requests. `/subscribe`
 reads `channel_kind` by asking Discord for the parent channel (`GET
 /channels/{id}`) when it ran inside a thread, because the payload does not carry
 the parent's type; it refuses `thread_per_mod` when that fails. Without

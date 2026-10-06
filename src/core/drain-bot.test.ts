@@ -198,14 +198,31 @@ describe('drainOutbox: forum with thread_per_mod', () => {
 });
 
 describe('drainOutbox: text channel with thread_per_mod', () => {
-  it('a new event is a plain message that becomes the anchor, with no thread yet', async () => {
+  it('a new event is a plain message with a thread opened on it at once', async () => {
+    const h = makeHarness();
+    await queue(h, textPerMod(), [mod('Alpha')]);
+    const report = await drain(h);
+    expect(h.sender.ops).toEqual(['send', 'open']);
+    const messageId = (h.sender.results[0] as { messageId: string }).messageId;
+    expect(h.sender.threadOpens).toEqual([{ channelId: CHANNEL, messageId, name: 'Alpha' }]);
+    const mapped = (await h.store.getModThread(CHANNEL, SOURCE, 'Owner-Alpha'))!;
+    expect(mapped).toMatchObject({ anchorMessageId: messageId, createdAt: FIXED_NOW_ISO });
+    expect(mapped.threadId).not.toBe('');
+    expect(await h.store.getMessage(messageId)).toMatchObject({ channelId: CHANNEL });
+    expect(report).toMatchObject({ sent: 1, failed: 0 });
+    expect(h.store.pendingRows()).toEqual([]);
+  });
+
+  it('the next update of that mod goes into the thread without opening another', async () => {
     const h = makeHarness();
     await queue(h, textPerMod(), [mod('Alpha')]);
     await drain(h);
+    const { threadId } = (await h.store.getModThread(CHANNEL, SOURCE, 'Owner-Alpha'))!;
+    h.sender.ops.length = 0;
+    await queue(h, textPerMod(), [mod('Alpha', 'update')]);
+    await drain(h);
     expect(h.sender.ops).toEqual(['send']);
-    const messageId = (h.sender.results[0] as { messageId: string }).messageId;
-    expect(await h.store.getModThread(CHANNEL, SOURCE, 'Owner-Alpha')).toEqual(thread('Owner-Alpha', { threadId: '', anchorMessageId: messageId, createdAt: FIXED_NOW_ISO }));
-    expect(await h.store.getMessage(messageId)).toMatchObject({ channelId: CHANNEL });
+    expect(h.sender.calls.at(-1)!.target).toEqual({ kind: 'bot', channelId: CHANNEL, threadId });
   });
 
   it('the first update opens a thread on the anchor, posts there and keeps the anchor', async () => {
@@ -231,12 +248,48 @@ describe('drainOutbox: text channel with thread_per_mod', () => {
     expect(h.sender.calls[0]!.target).toEqual({ kind: 'bot', channelId: CHANNEL, threadId: OLD_THREAD });
   });
 
-  it('an update without an anchor is a plain message and becomes the anchor', async () => {
+  it('an update without a mapping is a plain message with a thread opened on it', async () => {
     const h = makeHarness();
     await queue(h, textPerMod(), [mod('Alpha', 'update')]);
     await drain(h);
+    expect(h.sender.ops).toEqual(['send', 'open']);
+    expect((await h.store.getModThread(CHANNEL, SOURCE, 'Owner-Alpha'))!.threadId).not.toBe('');
+  });
+
+  it('keeps only the anchor and still delivers when there is no room to open the thread', async () => {
+    const h = makeHarness();
+    await queue(h, textPerMod(), [mod('Alpha')]);
+    const report = await drain(h, new SubrequestBudget(1));
     expect(h.sender.ops).toEqual(['send']);
-    expect((await h.store.getModThread(CHANNEL, SOURCE, 'Owner-Alpha'))!.threadId).toBe('');
+    const mapped = (await h.store.getModThread(CHANNEL, SOURCE, 'Owner-Alpha'))!;
+    expect(mapped.threadId).toBe('');
+    expect(mapped.anchorMessageId).not.toBeNull();
+    expect(report).toMatchObject({ sent: 1, failed: 0 });
+    expect(h.store.pendingRows()).toEqual([]);
+  });
+
+  it('keeps only the anchor and delivers when opening the thread fails, and opens it with the next update', async () => {
+    const h = makeHarness();
+    await queue(h, textPerMod(), [mod('Alpha')]);
+    h.sender.enqueueOpen({ ok: false, retryable: true, retryAfterSeconds: null, status: 500 });
+    const report = await drain(h);
+    expect(report).toMatchObject({ sent: 1, failed: 0, parked: 0 });
+    expect(h.store.pendingRows()).toEqual([]);
+    const mapped = (await h.store.getModThread(CHANNEL, SOURCE, 'Owner-Alpha'))!;
+    expect(mapped.threadId).toBe('');
+    h.sender.ops.length = 0;
+    await queue(h, textPerMod(), [mod('Alpha', 'update')]);
+    await drain(h);
+    expect(h.sender.ops).toEqual(['open', 'send']);
+  });
+
+  it('adopts the message id as the thread id when Discord says the thread already exists', async () => {
+    const h = makeHarness();
+    await queue(h, textPerMod(), [mod('Alpha')]);
+    h.sender.enqueueOpen({ ok: false, retryable: false, status: 400, threadExists: true });
+    await drain(h);
+    const messageId = (h.sender.results[0] as { messageId: string }).messageId;
+    expect(await h.store.getModThread(CHANNEL, SOURCE, 'Owner-Alpha')).toMatchObject({ threadId: messageId, anchorMessageId: messageId });
   });
 
   it('a thread opened but not posted into is remembered, so the retry spends one request', async () => {
@@ -275,9 +328,10 @@ describe('drainOutbox: a thread that is gone', () => {
     await queue(h, textPerMod(), [mod('Alpha', 'update')]);
     h.sender.enqueue(GONE);
     await drain(h);
-    expect(h.sender.ops).toEqual(['send', 'send']);
+    expect(h.sender.ops).toEqual(['send', 'send', 'open']);
     const replaced = (await h.store.getModThread(CHANNEL, SOURCE, 'Owner-Alpha'))!;
-    expect(replaced.threadId).toBe('');
+    expect(replaced.threadId).not.toBe('');
+    expect(replaced.threadId).not.toBe(OLD_THREAD);
     expect(replaced.anchorMessageId).not.toBe(ANCHOR);
     expect(h.store.pendingRows()).toEqual([]);
   });
@@ -288,8 +342,10 @@ describe('drainOutbox: a thread that is gone', () => {
     await queue(h, textPerMod(), [mod('Alpha', 'update')]);
     h.sender.enqueueOpen(GONE);
     await drain(h);
-    expect(h.sender.ops).toEqual(['open', 'send']);
-    expect((await h.store.getModThread(CHANNEL, SOURCE, 'Owner-Alpha'))!.anchorMessageId).not.toBe(ANCHOR);
+    expect(h.sender.ops).toEqual(['open', 'send', 'open']);
+    const replaced = (await h.store.getModThread(CHANNEL, SOURCE, 'Owner-Alpha'))!;
+    expect(replaced.anchorMessageId).not.toBe(ANCHOR);
+    expect(replaced.threadId).not.toBe('');
     expect(h.store.pendingRows()).toEqual([]);
   });
 
