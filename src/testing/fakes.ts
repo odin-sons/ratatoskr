@@ -2,7 +2,7 @@
 import { eventId } from '../core/ids.ts';
 import type { Renderer, RenderContext } from '../core/drain.ts';
 import type { Language } from '../i18n/index.ts';
-import type { Clock, PollContext, PollResult, SendResult, Sender, SourceAdapter } from '../core/ports.ts';
+import type { Clock, PollContext, PollResult, SendResult, SendTarget, Sender, SourceAdapter } from '../core/ports.ts';
 import type {
   AppConfig,
   CapUsage,
@@ -50,6 +50,8 @@ export function fixedClock(iso: string = FIXED_NOW_ISO): Clock {
 // ---------------------------------------------------------------------------
 
 export interface SentCall {
+  target: SendTarget;
+  /** The webhook URL of a webhook target, empty for a bot target. */
   webhookUrl: string;
   payload: DiscordMessage;
   threadId?: string | null;
@@ -78,8 +80,8 @@ export class FakeSender implements Sender {
     return this;
   }
 
-  async send(webhookUrl: string, payload: DiscordMessage, threadId?: string | null): Promise<SendResult> {
-    const call = { webhookUrl, payload, threadId };
+  async send(target: SendTarget, payload: DiscordMessage): Promise<SendResult> {
+    const call: SentCall = { target, webhookUrl: target.kind === 'webhook' ? target.url : '', payload, threadId: target.threadId };
     const index = this.calls.length;
     this.calls.push(call);
     const result = this.queue.shift() ?? this.fallback(call, index);

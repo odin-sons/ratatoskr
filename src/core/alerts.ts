@@ -97,7 +97,7 @@ export async function raiseCapAlerts(input: RaiseAlertsInput): Promise<AlertsRes
       continue;
     }
     if (!budget.tryConsume()) continue;
-    const sent = await sender.send(webhookUrl, formatCapAlert(entry));
+    const sent = await sender.send({ kind: 'webhook', url: webhookUrl }, formatCapAlert(entry));
     if (!sent.ok) {
       result.failed += 1;
       continue;

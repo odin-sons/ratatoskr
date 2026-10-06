@@ -34,7 +34,7 @@ export async function maybeSendWeeklyReport(input: WeeklyInput): Promise<boolean
   if (!budget.tryConsume(2)) return false;
 
   const days = await reader.daily(now, WEEKLY_REPORT_DAYS);
-  const sent = await sender.send(webhookUrl, buildWeeklyReport(days, degradation));
+  const sent = await sender.send({ kind: 'webhook', url: webhookUrl }, buildWeeklyReport(days, degradation));
   if (!sent.ok) return false;
   await store.setAlertState(WEEKLY_REPORT_KEY, { level: 0, notifiedAt: now.toISOString() });
   return true;

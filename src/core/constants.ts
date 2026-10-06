@@ -127,6 +127,18 @@ export const MAX_DETAIL_REQUESTS_PER_EVENT = 2;
 /** Timeout for one Discord webhook request. */
 export const DISCORD_SEND_TIMEOUT_MS = 10_000;
 
+/** Source: Discord developer docs, "Reference" (API base URL and version). */
+export const DISCORD_API_BASE = 'https://discord.com/api/v10';
+
+/** Source: Discord developer docs, "Start Thread in Forum or Media Channel" (`name`: 1-100 characters). */
+export const DISCORD_THREAD_NAME_MAX = 100;
+
+/** Source: Discord developer docs, "Response Codes" (JSON error codes). */
+export const DISCORD_ERROR_CODE = {
+  unknownChannel: 10003,
+  threadArchived: 50083,
+} as const;
+
 export const MS_PER_DAY = 86_400_000;
 
 /** Delivered outbox rows are kept this long as the idempotency guard, then purged by reconciliation. */
