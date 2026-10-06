@@ -238,6 +238,25 @@ describe('validateSubscription', () => {
   });
 });
 
+describe('validateSubscriptionFilter: alsoMatch', () => {
+  it('accepts rules and keeps them', () => {
+    const r = validateSubscriptionFilter({ packages: ['KG'], alsoMatch: [{ packages: ['A-B'] }, { includeCategories: ['Tools'], sources: ['hexium:valheim'] }] });
+    expect(r).toEqual({ ok: true, filter: { packages: ['KG'], alsoMatch: [{ packages: ['A-B'] }, { includeCategories: ['Tools'], sources: ['hexium:valheim'] }] } });
+  });
+
+  it.each([
+    ['a non-array', { alsoMatch: {} }],
+    ['a rule that is not an object', { alsoMatch: ['A'] }],
+    ['an unknown rule key', { alsoMatch: [{ packages: ['A'], kinds: ['new'] }] }],
+    ['an empty rule', { alsoMatch: [{}] }],
+    ['a bad source id', { alsoMatch: [{ sources: ['Nope'] }] }],
+    ['a bad package entry', { alsoMatch: [{ packages: [''] }] }],
+    ['too many rules', { alsoMatch: Array.from({ length: 21 }, (_, i) => ({ packages: [`A${i}`] })) }],
+  ])('rejects %s', (_label, raw) => {
+    expect(validateSubscriptionFilter(raw).ok).toBe(false);
+  });
+});
+
 describe('validateSubscriptionFilter', () => {
   it('returns the narrowed filter', () => {
     const r = validateSubscriptionFilter({ packages: ['A-B'], kinds: ['update'] });

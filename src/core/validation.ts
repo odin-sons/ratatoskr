@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import type { DeliveryMode, EventKind, SubscriptionFilter } from './types.ts';
+import { ALSO_MATCH_MAX_RULES } from './constants.ts';
+import type { DeliveryMode, EventKind, FilterRule, SubscriptionFilter } from './types.ts';
 
 export const EVENT_KINDS: readonly EventKind[] = ['new', 'update'];
 export const DELIVERY_MODES: readonly DeliveryMode[] = ['immediate', 'digest'];
@@ -24,7 +25,11 @@ const FILTER_KEYS = [
   'excludeCategories',
   'dedupAcrossStores',
   'includeChangelog',
+  'alsoMatch',
 ];
+
+const RULE_KEYS = ['sources', 'packages', 'includeCategories'];
+const SOURCE_ID_RE = /^[a-z]+:[a-z0-9][a-z0-9_-]*$/;
 
 export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -56,6 +61,29 @@ function stringArray(v: unknown, path: string, errors: string[], pattern?: RegEx
     }
   });
   return out;
+}
+
+function validateRule(raw: unknown, path: string, errors: string[]): FilterRule | undefined {
+  if (!isRecord(raw)) {
+    errors.push(`${path}: must be an object`);
+    return undefined;
+  }
+  errors.push(...unknownKeys(raw, RULE_KEYS, path));
+  const rule: FilterRule = {};
+  if (raw.sources !== undefined) {
+    const list = stringArray(raw.sources, `${path}.sources`, errors, SOURCE_ID_RE);
+    if (list) rule.sources = list;
+  }
+  if (raw.packages !== undefined) {
+    const list = stringArray(raw.packages, `${path}.packages`, errors, PACKAGE_ENTRY_RE);
+    if (list) rule.packages = list;
+  }
+  if (raw.includeCategories !== undefined) {
+    const list = stringArray(raw.includeCategories, `${path}.includeCategories`, errors);
+    if (list) rule.includeCategories = list;
+  }
+  if (!rule.sources?.length && !rule.packages?.length && !rule.includeCategories?.length) errors.push(`${path}: must restrict sources, packages or includeCategories`);
+  return rule;
 }
 
 export function validateFilter(raw: unknown, errors: string[]): SubscriptionFilter | undefined {
@@ -102,6 +130,20 @@ export function validateFilter(raw: unknown, errors: string[]): SubscriptionFilt
     if (v === undefined) continue;
     const list = stringArray(v, `filter.${key}`, errors);
     if (list) filter[key] = list;
+  }
+  if (raw.alsoMatch !== undefined) {
+    if (!Array.isArray(raw.alsoMatch)) {
+      errors.push('filter.alsoMatch: must be an array');
+    } else if (raw.alsoMatch.length > ALSO_MATCH_MAX_RULES) {
+      errors.push(`filter.alsoMatch: at most ${ALSO_MATCH_MAX_RULES} rules`);
+    } else {
+      const rules: FilterRule[] = [];
+      raw.alsoMatch.forEach((item: unknown, i: number) => {
+        const rule = validateRule(item, `filter.alsoMatch[${i}]`, errors);
+        if (rule) rules.push(rule);
+      });
+      filter.alsoMatch = rules;
+    }
   }
   return filter;
 }

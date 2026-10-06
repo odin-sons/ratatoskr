@@ -83,6 +83,13 @@ export interface SourceState {
   lastOkAt: string | null;
 }
 
+/** One alternative way into a subscription; its fields combine with AND, like the same fields of the base filter. */
+export interface FilterRule {
+  sources?: SourceId[];
+  packages?: string[];
+  includeCategories?: string[];
+}
+
 export interface SubscriptionFilter {
   /** Restrict to these sources. Absent or empty = all. */
   sources?: SourceId[];
@@ -98,6 +105,8 @@ export interface SubscriptionFilter {
   excludePackages?: string[];
   includeCategories?: string[];
   excludeCategories?: string[];
+  /** Extra rules: an event passes when the base fields or any of these rules accept it. The other keys apply to every rule. */
+  alsoMatch?: FilterRule[];
   /** Collapse the same release seen on several stores into one item. Default true. */
   dedupAcrossStores?: boolean;
   /** `false` never shows the Changelog block for this subscription, however long or short the excerpt. Default true. */

@@ -29,6 +29,14 @@ describe('nextDigestBoundary', () => {
 describe('fanOut', () => {
   const now = new Date('2026-09-19T12:07:00.000Z');
 
+  it('queues an event for a subscription whose alsoMatch rule accepts it, and only for that one', async () => {
+    const wide = compiled(makeSubscription({ id: 'wide', filter: { packages: ['KG'], alsoMatch: [{ packages: ['Other'] }] } }));
+    const narrow = compiled(makeSubscription({ id: 'narrow', filter: { packages: ['KG'] } }));
+    const ev = makeEvent({ pkg: { owner: 'Other', name: 'Mod', packageId: 'Other-Mod' } });
+    const { rows } = await fanOut([ev], [wide, narrow], new MemoryStore(), now);
+    expect(rows.map((r) => r.subscriptionId)).toEqual(['wide']);
+  });
+
   it('creates immediate rows due now and digest rows due at the boundary', async () => {
     const imm = compiled(makeSubscription({ id: 'imm', mode: 'immediate' }));
     const dig = compiled(makeSubscription({ id: 'dig', mode: 'digest', digestIntervalMin: 30 }));

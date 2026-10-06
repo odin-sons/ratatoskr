@@ -192,6 +192,9 @@ export const MAX_SUBSCRIPTIONS_PER_CHANNEL = 10;
 export const MAX_SUBSCRIPTIONS_PER_GUILD = 50;
 export const MAX_SUBSCRIPTIONS_TOTAL = 200;
 
+/** Most `alsoMatch` rules one subscription filter may hold. Source: product limit, docs/spec.md "Filter rules". */
+export const ALSO_MATCH_MAX_RULES = 20;
+
 /** Longest `label` of a bot subscription. */
 export const SUBSCRIPTION_LABEL_MAX = 100;
 

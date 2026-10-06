@@ -294,6 +294,7 @@ an event is delivered only if it passes every one that is set.
 | `watchlist` | Highlight only: a hit is shown in detail in a digest. Never restricts delivery. |
 | `dedupAcrossStores` | Collapse the same release seen on several stores (default `true`). Evaluated per subscription against the events that subscription's own filter accepts. |
 | `includeChangelog` | `false` never renders the Changelog block for this subscription's messages, regardless of excerpt length (default `true`). A rendering setting, not a matching rule: the changelog is still fetched (subject to the usual caps) for any other subscription that wants it. |
+| `alsoMatch` | Extra rules (`sources`, `packages`, `includeCategories`) that widen the base fields; see "Bot" > "Filter rules". |
 
 Deprecated packages are never reported as `update` events.
 
@@ -510,12 +511,13 @@ current filter at delivery, so a change also applies to them.
 base filter. The filter described under "Subscription filter" is the base rule.
 An event passes when the base rule or any `alsoMatch` rule accepts it. `allowNsfw`, `kinds`, `excludePackages`, `excludeCategories`,
 `dedupAcrossStores` and `includeChangelog` are not part of a rule: they apply
-to every rule, and an exclusion always wins.
+to every rule, and an exclusion always wins. At most 20 rules; an empty rule is
+invalid, since it would accept everything. `parseFilter` and
+`validateSubscriptionFilter` apply the same limits.
 
 `/include mod:X` adds `{packages: [X]}`, and `/include category:Tools` adds
 `{includeCategories: [Tools]}`. When the base rule already accepts everything,
-`/include` says there is nothing to widen. `parseFilter` and `FILTER_KEYS` in
-`scripts/validate-config.ts` accept `alsoMatch` and cap the number of rules. A
+`/include` says there is nothing to widen. A
 category rule matches only what a source reports as a category or tag; a source
 that reports none never satisfies it, and the command warns about that.
 

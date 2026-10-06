@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import type { EventKind, ModEvent, PackageSnapshot, SubscriptionFilter } from './types.ts';
+import { ALSO_MATCH_MAX_RULES } from './constants.ts';
+import type { EventKind, FilterRule, ModEvent, PackageSnapshot, SubscriptionFilter } from './types.ts';
 
 export interface CompiledFilter {
   matches(event: ModEvent): boolean;
@@ -48,36 +49,44 @@ function packageMatcher(values: string[] | undefined): ((pkg: PackageSnapshot) =
   };
 }
 
-/** Precomputes lookup sets once so per-event checks stay O(categories). */
+function compileRule(rule: FilterRule): (pkg: PackageSnapshot) => boolean {
+  const sources = rule.sources !== undefined && rule.sources.length > 0 ? new Set(rule.sources) : null;
+  const include = lowerSet(rule.includeCategories);
+  const allowed = packageMatcher(rule.packages);
+  return (pkg) => {
+    if (sources !== null && !sources.has(pkg.source)) return false;
+    if (allowed !== null && !allowed(pkg)) return false;
+    if (include !== null) {
+      for (const category of pkg.categories) if (include.has(category.toLowerCase())) return true;
+      return false;
+    }
+    return true;
+  };
+}
+
+/** Precomputes lookup sets once so per-event checks stay O(categories x rules). */
 export function compileFilter(filter: SubscriptionFilter): CompiledFilter {
-  const sources = filter.sources !== undefined && filter.sources.length > 0 ? new Set(filter.sources) : null;
   const kinds = filter.kinds !== undefined && filter.kinds.length > 0 ? new Set(filter.kinds) : null;
-  const include = lowerSet(filter.includeCategories);
   const exclude = lowerSet(filter.excludeCategories);
   const watchlist = packageMatcher(filter.watchlist);
-  const allowed = packageMatcher(filter.packages);
   const excluded = packageMatcher(filter.excludePackages);
   const allowNsfw = filter.allowNsfw === true;
+  const base = compileRule(filter);
+  const rules = (filter.alsoMatch ?? []).map(compileRule);
 
   return {
     matches(event) {
       const pkg = event.pkg;
       if (pkg.isNsfw && !allowNsfw) return false;
-      if (sources !== null && !sources.has(pkg.source)) return false;
       if (kinds !== null && !kinds.has(event.kind)) return false;
       if (event.kind === 'update' && pkg.isDeprecated) return false;
       if (excluded !== null && excluded(pkg)) return false;
-      if (allowed !== null && !allowed(pkg)) return false;
-      if (include !== null || exclude !== null) {
-        let included = include === null;
-        for (const category of pkg.categories) {
-          const c = category.toLowerCase();
-          if (exclude !== null && exclude.has(c)) return false;
-          if (include !== null && include.has(c)) included = true;
-        }
-        if (!included) return false;
+      if (exclude !== null) {
+        for (const category of pkg.categories) if (exclude.has(category.toLowerCase())) return false;
       }
-      return true;
+      if (base(pkg)) return true;
+      for (const rule of rules) if (rule(pkg)) return true;
+      return false;
     },
     isWatchlistHit(event) {
       return watchlist !== null && watchlist(event.pkg);
@@ -99,8 +108,58 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((v) => typeof v === 'string');
 }
 
+/** True when the base rule restricts nothing, so a rule added to it would widen nothing. */
+export function describeBaseAcceptsEverything(filter: SubscriptionFilter): boolean {
+  return !(filter.sources?.length || filter.packages?.length || filter.includeCategories?.length);
+}
+
+const RULE_KEYS = ['sources', 'packages', 'includeCategories'] as const;
+
+function isEmptyRule(rule: FilterRule): boolean {
+  return RULE_KEYS.every((key) => !rule[key]?.length);
+}
+
+function sameRule(a: FilterRule, b: FilterRule): boolean {
+  return RULE_KEYS.every((key) => {
+    const left = (a[key] ?? []).map((v) => v.toLowerCase()).sort();
+    const right = (b[key] ?? []).map((v) => v.toLowerCase()).sort();
+    return left.length === right.length && left.every((v, i) => v === right[i]);
+  });
+}
+
+/** A copy of `filter` with `rule` added; `null` when the rule is empty or the cap is reached. A rule already present is not added twice. */
+export function addRule(filter: SubscriptionFilter, rule: FilterRule): SubscriptionFilter | null {
+  if (isEmptyRule(rule)) return null;
+  const rules = filter.alsoMatch ?? [];
+  if (rules.some((existing) => sameRule(existing, rule))) return { ...filter, alsoMatch: [...rules] };
+  if (rules.length >= ALSO_MATCH_MAX_RULES) return null;
+  return { ...filter, alsoMatch: [...rules, rule] };
+}
+
+/** A copy of `filter` without the rule at `index`; `null` when there is none. The key goes with the last rule. */
+export function removeRule(filter: SubscriptionFilter, index: number): SubscriptionFilter | null {
+  const rules = filter.alsoMatch ?? [];
+  if (!Number.isInteger(index) || index < 0 || index >= rules.length) return null;
+  const { alsoMatch: _removed, ...rest } = filter;
+  const kept = rules.filter((_, i) => i !== index);
+  return kept.length === 0 ? rest : { ...rest, alsoMatch: kept };
+}
+
 const STRING_LIST_KEYS = ['sources', 'watchlist', 'packages', 'excludePackages', 'includeCategories', 'excludeCategories'] as const;
 const BOOLEAN_KEYS = ['allowNsfw', 'dedupAcrossStores', 'includeChangelog'] as const;
+
+function parseRule(value: unknown): FilterRule | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const input = value as Record<string, unknown>;
+  const rule: FilterRule = {};
+  for (const key of RULE_KEYS) {
+    const v = input[key];
+    if (v === undefined) continue;
+    if (!isStringArray(v)) return null;
+    rule[key] = v;
+  }
+  return isEmptyRule(rule) ? null : rule;
+}
 
 /** Narrows untrusted (stored) JSON to a filter; `null` when any known key has the wrong type. Unknown keys are dropped. */
 export function parseFilter(value: unknown): SubscriptionFilter | null {
@@ -118,6 +177,17 @@ export function parseFilter(value: unknown): SubscriptionFilter | null {
     if (v === undefined) continue;
     if (typeof v !== 'boolean') return null;
     filter[key] = v;
+  }
+  const alsoMatch = input.alsoMatch;
+  if (alsoMatch !== undefined) {
+    if (!Array.isArray(alsoMatch) || alsoMatch.length > ALSO_MATCH_MAX_RULES) return null;
+    const rules: FilterRule[] = [];
+    for (const raw of alsoMatch) {
+      const rule = parseRule(raw);
+      if (rule === null) return null;
+      rules.push(rule);
+    }
+    filter.alsoMatch = rules;
   }
   const kinds = input.kinds;
   if (kinds !== undefined) {
