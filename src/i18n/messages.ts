@@ -55,6 +55,13 @@ export interface Messages {
   /** `/unsubscribe`. */
   unsubscribed(label: string): string;
   subscriptionNotFound: string;
+  /** `/pause` and `/continue`; `names` is the joined list of subscription names, `when` a Discord timestamp. */
+  pauseInvalidDuration: string;
+  pausedFor(names: string, when: string): string;
+  pausedOpen(names: string): string;
+  alreadyPaused(names: string): string;
+  resumed(names: string): string;
+  notPaused(names: string): string;
   /** `/list`. */
   listEmpty: string;
   listChannelTitle: string;
@@ -66,6 +73,8 @@ export interface Messages {
   modeImmediate: string;
   modeDigest(minutes: number): string;
   threadPerMod: string;
+  listPausedUntil(when: string): string;
+  listPausedOpen: string;
   filterEverything: string;
   filterPackages(list: string): string;
   filterCategories(list: string): string;

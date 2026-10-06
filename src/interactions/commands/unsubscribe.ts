@@ -10,7 +10,7 @@ import { deferWork } from './defer-work.ts';
 import { display, subscriptionName, subscriptionsHere } from './view.ts';
 
 /** The chosen id, or a typed label that names exactly one subscription of the place. */
-function pickSubscription(here: readonly Subscription[], chosen: string): Subscription | undefined {
+export function pickSubscription(here: readonly Subscription[], chosen: string): Subscription | undefined {
   const byId = here.find((sub) => sub.id === chosen);
   if (byId) return byId;
   const wanted = chosen.trim().toLowerCase();

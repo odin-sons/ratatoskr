@@ -805,6 +805,53 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
         expect((await store.takeDue(NOW, 10)).map((d) => d.row.subscriptionId)).toEqual(['other', 'other']);
       });
 
+      it('clears the undelivered rows of the given subscriptions only, keeping the subscriptions, delivered rows and the others', async () => {
+        const { store } = await setup([makeSubscription({ id: 'other' })]);
+        await store.createSubscription(botSub());
+        const [e1, e2, e3] = [event(1), event(2), event(3)];
+        await store.commit(batch([e1, e2, e3], [row('bot-1', e1), row('bot-1', e2), row('other', e1), row('other', e3)]));
+        await store.markDelivered([row('bot-1', e2).id], NOW);
+
+        await store.clearUndelivered(['bot-1', 'missing']);
+
+        expect((await store.listSubscriptionsByChannel('chan-1')).map((s) => s.id)).toEqual(['bot-1']);
+        expect((await store.takeDue(NOW, 10)).map((d) => d.row.subscriptionId)).toEqual(['other', 'other']);
+        await store.commit(batch([e1, e2], [row('bot-1', e1), row('bot-1', e2)]));
+        expect((await store.takeDue(NOW, 10)).map((d) => `${d.row.subscriptionId}:${d.row.eventId}`).sort()).toEqual(
+          [`other:${e1.id}`, `other:${e3.id}`].sort(),
+        );
+      });
+
+      it('sets pausedUntil of the given subscriptions only, ignoring unknown ids', async () => {
+        const { store } = await setup([]);
+        await store.createSubscription(botSub({ id: 'a' }));
+        await store.createSubscription(botSub({ id: 'b' }));
+        await store.setPausedUntil(['a', 'missing'], 1_800_000_000);
+        await store.setPausedUntil([], 5);
+        const until = async (): Promise<number[]> => (await store.listSubscriptionsByChannel('chan-1')).sort((x, y) => x.id.localeCompare(y.id)).map((s) => s.pausedUntil ?? 0);
+        expect(await until()).toEqual([1_800_000_000, 0]);
+        await store.setPausedUntil(['a'], 0);
+        expect(await until()).toEqual([0, 0]);
+      });
+
+      it('holds the rows of a paused subscription back from takeDue and returns them once the pause has expired', async () => {
+        const nowSeconds = Date.parse(NOW) / 1000;
+        const { store } = await setup([makeSubscription({ id: 'p', pausedUntil: nowSeconds + 60 }), makeSubscription({ id: 'q', webhookUrl: 'https://discord.invalid/api/webhooks/2/token' })]);
+        const e = event(1);
+        await store.commit(batch([e], [row('p', e), row('q', e)]));
+        expect((await store.takeDue(NOW, 10)).map((d) => d.row.subscriptionId)).toEqual(['q']);
+        expect((await store.takeDue(new Date((nowSeconds + 59) * 1000).toISOString(), 10)).map((d) => d.row.subscriptionId)).toEqual(['q']);
+        expect((await store.takeDue(new Date((nowSeconds + 60) * 1000).toISOString(), 10)).map((d) => d.row.subscriptionId).sort()).toEqual(['p', 'q']);
+      });
+
+      it('clears nothing for an empty list', async () => {
+        const { store } = await setup([makeSubscription({ id: 'other' })]);
+        const e = event(1);
+        await store.commit(batch([e], [row('other', e)]));
+        await store.clearUndelivered([]);
+        expect(await store.takeDue(NOW, 10)).toHaveLength(1);
+      });
+
       it('reports false and changes nothing when the subscription does not exist', async () => {
         const { store } = await setup([makeSubscription({ id: 'other' })]);
         const e = event(1);

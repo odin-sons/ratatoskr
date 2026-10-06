@@ -10,6 +10,7 @@ import type { InteractionHandler } from '../router.ts';
 import { resolveTarget } from '../target.ts';
 import type { Interaction } from '../types.ts';
 import type { CommandDeps } from './deps.ts';
+import { describePause } from './pause.ts';
 import { describeDestination, describeMode, display, subscriptionName, subscriptionsHere, summarizeFilter } from './view.ts';
 
 export const LIST_COMPONENT_PREFIX = 'list';
@@ -23,10 +24,12 @@ const ACTION_ROW = 1;
 /** Room kept in a page for the title and the page counter. */
 const PAGE_RESERVE = 120;
 
-function line(sub: Subscription, messages: Messages): string {
+function line(sub: Subscription, now: Date, messages: Messages): string {
   const parts = [`**${display(subscriptionName(sub))}** \`${sub.id}\``, describeMode(sub, messages)];
   if (sub.threadPerMod) parts.push(messages.threadPerMod);
   parts.push(describeDestination(sub, messages), summarizeFilter(sub.filter, messages));
+  const pause = describePause(sub, now, messages);
+  if (pause !== null) parts.push(pause);
   return parts.join(' · ');
 }
 
@@ -72,7 +75,7 @@ async function render(deps: CommandDeps, interaction: Interaction, scope: Scope,
     const [x, y] = [subscriptionName(a).toLowerCase(), subscriptionName(b).toLowerCase()];
     return x < y ? -1 : x > y ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
-  const pages = paginate(sorted.map((sub) => line(sub, messages)), DISCORD.contentMax - PAGE_RESERVE);
+  const pages = paginate(sorted.map((sub) => line(sub, deps.now(), messages)), DISCORD.contentMax - PAGE_RESERVE);
   const page = Math.min(Math.max(requested, 0), pages.length - 1);
   const footer = pages.length > 1 ? `\n${messages.page(page + 1, pages.length)}` : '';
   return {

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createListCommand, createListPager, LIST_COMPONENT_PREFIX } from './commands/list.ts';
+import { createContinueCommand, createPauseCommand } from './commands/pause.ts';
 import { createSubscribeAutocomplete, createSubscribeCommand } from './commands/subscribe.ts';
 import { createUnsubscribeAutocomplete, createUnsubscribeCommand } from './commands/unsubscribe.ts';
 import type { CommandDeps } from './commands/deps.ts';
@@ -14,6 +15,10 @@ export function createCommandRegistry(deps: CommandDeps): HandlerRegistry {
   registry.autocompletes.set('subscribe', createSubscribeAutocomplete(deps));
   registry.commands.set('unsubscribe', createUnsubscribeCommand(deps));
   registry.autocompletes.set('unsubscribe', createUnsubscribeAutocomplete(deps));
+  registry.commands.set('pause', createPauseCommand(deps));
+  registry.autocompletes.set('pause', createUnsubscribeAutocomplete(deps));
+  registry.commands.set('continue', createContinueCommand(deps));
+  registry.autocompletes.set('continue', createUnsubscribeAutocomplete(deps));
   registry.commands.set('list', createListCommand(deps));
   registry.components.set(LIST_COMPONENT_PREFIX, createListPager(deps));
   return registry;

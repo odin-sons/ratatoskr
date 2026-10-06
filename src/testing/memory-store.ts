@@ -136,12 +136,24 @@ export class MemoryStore implements Store {
   }
 
   async deleteSubscription(id: string): Promise<boolean> {
+    await this.clearUndelivered([id]);
+    return this.subscriptions.delete(id);
+  }
+
+  async setPausedUntil(subscriptionIds: string[], until: number): Promise<void> {
+    for (const id of subscriptionIds) {
+      const current = this.subscriptions.get(id);
+      if (current) this.subscriptions.set(id, { ...current, pausedUntil: until });
+    }
+  }
+
+  async clearUndelivered(subscriptionIds: string[]): Promise<void> {
+    const ids = new Set(subscriptionIds);
     for (const row of this.outboxRows()) {
-      if (row.subscriptionId !== id || row.delivered) continue;
+      if (!ids.has(row.subscriptionId) || row.delivered) continue;
       this.outbox.delete(row.id);
       this.pairs.delete(pairKey(row.subscriptionId, row.eventId));
     }
-    return this.subscriptions.delete(id);
   }
 
   async listSubscriptionsByChannel(channelId: string): Promise<Subscription[]> {
@@ -244,7 +256,7 @@ export class MemoryStore implements Store {
     for (const stored of due) {
       const subscription = this.subscriptions.get(stored.subscriptionId);
       const event = this.events.get(stored.eventId);
-      if (!subscription || !subscription.enabled || (subscription.transport ?? 'webhook') !== 'webhook' || !event) continue;
+      if (!subscription || !subscription.enabled || (subscription.pausedUntil ?? 0) * 1000 > Date.parse(nowIso) || (subscription.transport ?? 'webhook') !== 'webhook' || !event) continue;
       const { delivered: _d, deliveredAt: _da, parked: _p, seq: _s, ...row } = stored;
       out.push({ row, subscription: { ...subscription }, event: this.joined(event) });
       if (out.length >= limit) break;
