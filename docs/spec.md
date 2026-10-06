@@ -436,7 +436,7 @@ targets and per `webhook_url` for webhook targets.
 ### Bot data
 
 Migration `0005` rebuilds `subscriptions`, because `webhook_url` becomes
-nullable, and adds:
+nullable, and adds the columns below; migration `0006` adds `channel_kind`:
 
 | Column | Meaning |
 |---|---|
@@ -446,6 +446,7 @@ nullable, and adds:
 | `created_by` | Discord user id of the creator |
 | `thread_per_mod` | write the updates of each mod into that mod's own thread or forum post |
 | `paused_until` | epoch seconds; `0` is not paused, the maximum safe integer is an open-ended pause |
+| `channel_kind` | `text` (default) or `forum`: what `channel_id` is; only `thread_per_mod` routing reads it |
 
 `thread_id` (migration `0004`) now also serves bot subscriptions: a subscription
 made inside a forum post or a thread delivers into that one post or thread, in
@@ -459,7 +460,8 @@ Two tables hold what the bot learns when it sends:
 
 - `mod_threads (channel_id, source, package_id, thread_id, anchor_message_id,
   created_at)`, primary key `(channel_id, source, package_id)`: one thread per
-  mod and channel, shared by every subscription of that channel. Migration
+  mod and channel, shared by every subscription of that channel. `thread_id` is
+  empty while a text channel's anchor message has no thread yet. Migration
   `0007` adds `idx_mod_threads_thread (channel_id, thread_id)`, which `/info`
   uses to find the mod of the thread it runs in.
 - `messages (message_id, channel_id, source, package_id, event_id, created_at)`,
@@ -533,9 +535,20 @@ with the rest of the batch.
 `thread_per_mod` needs `immediate`: a digest message carries several mods and
 has no single thread. A mod that should have both a thread and a digest line
 needs two subscriptions. A thread that is gone resets its `mod_threads` row, and
-the message goes out as a new post or message; a subscription bound to one post
-whose post is gone fails delivery like any bad destination. Only
-`thread_per_mod` subscriptions write `mod_threads`.
+the message goes out as a new post or message, in the same tick when the request
+allowance covers it and otherwise on the next one without spending an attempt. A
+thread younger than a minute that Discord reports as gone is not reset: the row
+retries with backoff. A subscription bound to one post whose post is gone fails
+delivery like any bad destination, unless the post is that young. Only
+`thread_per_mod` subscriptions write `mod_threads`; two of them in one channel that match the same mod share its thread and each posts its own copy there. `messages` rows are written
+for single-mod immediate messages and mod posts, never for a digest.
+
+A forum post costs one request, a thread opened on an anchor plus the post into
+it two; the per-tick send cap and the per-channel cap count requests. `/subscribe`
+reads `channel_kind` by asking Discord for the parent channel (`GET
+/channels/{id}`) when it ran inside a thread, because the payload does not carry
+the parent's type; it refuses `thread_per_mod` when that fails. Without
+`DISCORD_BOT_TOKEN` bot rows stay queued and are retried every 5 minutes.
 
 ### Limits and budget
 
@@ -1118,5 +1131,7 @@ number here, and update its date when you do.
 3. **A parked outbox row is never retried.** A non-retryable Discord answer parks it
    for good. On 2026-10-01 the first send to a freshly created forum thread was parked
    this way (cause not established); the same message sent by hand minutes later was
-   accepted. After adding a subscription, check
+   accepted. Handled for bot targets: a `gone` answer for a thread younger than a
+   minute is retried with backoff and never resets a mapping (see "Threads and forum
+   posts"). Webhook targets still park on any 4xx. After adding a subscription, check
    `SELECT COUNT(*) FROM outbox WHERE parked = 1` and re-queue what was lost.

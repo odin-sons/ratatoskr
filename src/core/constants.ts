@@ -133,10 +133,21 @@ export const DISCORD_API_BASE = 'https://discord.com/api/v10';
 /** Source: Discord developer docs, "Start Thread in Forum or Media Channel" (`name`: 1-100 characters). */
 export const DISCORD_THREAD_NAME_MAX = 100;
 
+/** Source: Discord developer docs, "Snowflakes" (epoch of the timestamp in an id: 2015-01-01T00:00:00Z). */
+export const DISCORD_EPOCH_MS = 1_420_070_400_000;
+
+/** A thread this young that Discord reports as gone is retried with backoff, not reset: the report can lag the creation. */
+export const THREAD_FRESH_MS = 60_000;
+
+/** Seconds a row waits when a bot target is used while `DISCORD_BOT_TOKEN` is not set; its attempts are not spent. */
+export const BOT_UNCONFIGURED_RETRY_SECONDS = 300;
+
 /** Source: Discord developer docs, "Response Codes" (JSON error codes). */
 export const DISCORD_ERROR_CODE = {
   unknownChannel: 10003,
   threadArchived: 50083,
+  /** "A thread has already been created for this message". */
+  threadAlreadyCreated: 160004,
 } as const;
 
 export const MS_PER_DAY = 86_400_000;

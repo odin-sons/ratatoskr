@@ -108,6 +108,9 @@ export type DeliveryMode = 'immediate' | 'digest';
 
 export type SubscriptionTransport = 'webhook' | 'bot';
 
+/** What kind of channel a bot subscription's `channelId` is: a forum (or media channel) takes posts, a text channel takes messages. */
+export type ChannelKind = 'text' | 'forum';
+
 export interface Subscription {
   id: string;
   guildId: string;
@@ -121,6 +124,8 @@ export interface Subscription {
   label?: string | null;
   /** Discord user id of the creator. */
   createdBy?: string | null;
+  /** Kind of `channelId`; default `text`. Only `threadPerMod` routing reads it. */
+  channelKind?: ChannelKind;
   /** Write the updates of each mod into that mod's own thread or forum post. */
   threadPerMod?: boolean;
   /** Epoch seconds; 0 or absent is not paused, `Number.MAX_SAFE_INTEGER` is an open-ended pause. */
@@ -155,6 +160,7 @@ export interface ModThread {
   channelId: string;
   source: SourceId;
   packageId: string;
+  /** Empty until a thread is opened on `anchorMessageId` (text channels). */
   threadId: string;
   anchorMessageId: string | null;
   /** ISO-8601, UTC. */

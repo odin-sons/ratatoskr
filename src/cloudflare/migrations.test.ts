@@ -13,6 +13,7 @@ const MIGRATION_DOWNLOAD_URL = readFileSync(join(ROOT, 'migrations/0002_package_
 const MIGRATION_LIKES_WEBSITE = readFileSync(join(ROOT, 'migrations/0003_package_likes_and_website.sql'), 'utf8');
 const MIGRATION_THREAD_ID = readFileSync(join(ROOT, 'migrations/0004_subscription_thread_id.sql'), 'utf8');
 const MIGRATION_BOT = readFileSync(join(ROOT, 'migrations/0005_bot_subscriptions.sql'), 'utf8');
+const MIGRATION_CHANNEL_KIND = readFileSync(join(ROOT, 'migrations/0006_subscription_channel_kind.sql'), 'utf8');
 
 const SOURCE = 'thunderstore:valheim';
 const NOW = '2026-09-19T12:00:00.000Z';
@@ -73,7 +74,7 @@ describe('schema upgrade from a database without outbox.delivered_at', () => {
 
   it('the migration adds the column and both partial indexes, then schema.sql applies cleanly, twice', () => {
     const shim = legacyDatabase();
-    for (const migration of [MIGRATION, MIGRATION_THREAD_ID, MIGRATION_BOT]) shim.db.exec(migration);
+    for (const migration of [MIGRATION, MIGRATION_THREAD_ID, MIGRATION_BOT, MIGRATION_CHANNEL_KIND]) shim.db.exec(migration);
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
     const names = indexNames(shim);
@@ -89,6 +90,7 @@ describe('schema upgrade from a database without outbox.delivered_at', () => {
     shim.db.exec(MIGRATION_LIKES_WEBSITE);
     shim.db.exec(MIGRATION_THREAD_ID);
     shim.db.exec(MIGRATION_BOT);
+    shim.db.exec(MIGRATION_CHANNEL_KIND);
     shim.db.exec(SCHEMA);
     const store = new D1Store(shim.asD1());
 
@@ -227,7 +229,7 @@ describe('schema upgrade from a database without packages.likes and packages.web
 
   it('applies to a database whose columns arrived through every earlier migration, in order', async () => {
     const shim = legacyDatabase();
-    for (const migration of [MIGRATION, MIGRATION_DOWNLOAD_URL, MIGRATION_LIKES_WEBSITE, MIGRATION_THREAD_ID, MIGRATION_BOT]) shim.db.exec(migration);
+    for (const migration of [MIGRATION, MIGRATION_DOWNLOAD_URL, MIGRATION_LIKES_WEBSITE, MIGRATION_THREAD_ID, MIGRATION_BOT, MIGRATION_CHANNEL_KIND]) shim.db.exec(migration);
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
     const columns = (shim.db.prepare("SELECT name FROM pragma_table_info('packages')").all() as { name: string }[]).map((r) => r.name);
     expect(columns).toEqual(expect.arrayContaining(['download_url', 'downloads', 'likes', 'website_url']));
@@ -339,6 +341,7 @@ describe('schema upgrade from a database without the bot columns of subscription
     expect(info('thread_per_mod')).toEqual({ required: 1, dflt: '0' });
     expect(info('paused_until')).toEqual({ required: 1, dflt: '0' });
     for (const column of ['channel_id', 'label', 'created_by']) expect(info(column)).toEqual({ required: 0, dflt: null });
+    shim.db.exec(MIGRATION_CHANNEL_KIND);
 
     const store = new D1Store(shim.asD1());
     const [due] = await store.takeDue(NOW, 10);
@@ -354,6 +357,7 @@ describe('schema upgrade from a database without the bot columns of subscription
       createdBy: null,
       threadPerMod: false,
       pausedUntil: 0,
+      channelKind: 'text',
       filter: { kinds: ['new'] },
       mode: 'immediate',
       digestIntervalMin: 30,
@@ -366,6 +370,7 @@ describe('schema upgrade from a database without the bot columns of subscription
   it('accepts a bot subscription without a webhook afterwards and rejects a row with neither destination', async () => {
     const shim = databaseBeforeBot();
     shim.db.exec(MIGRATION_BOT);
+    shim.db.exec(MIGRATION_CHANNEL_KIND);
     const store = new D1Store(shim.asD1());
     await store.createSubscription({ id: 'bot1', guildId: 'g', transport: 'bot', channelId: 'c1', filter: {}, mode: 'digest', digestIntervalMin: 30, enabled: true });
     expect((await store.listSubscriptionsByChannel('c1')).map((s) => s.id)).toEqual(['bot1']);
@@ -388,9 +393,45 @@ describe('schema upgrade from a database without the bot columns of subscription
 
   it('applies to a database upgraded through every earlier migration, in order', async () => {
     const shim = legacyDatabase();
-    for (const migration of [MIGRATION, MIGRATION_DOWNLOAD_URL, MIGRATION_LIKES_WEBSITE, MIGRATION_THREAD_ID, MIGRATION_BOT]) shim.db.exec(migration);
+    for (const migration of [MIGRATION, MIGRATION_DOWNLOAD_URL, MIGRATION_LIKES_WEBSITE, MIGRATION_THREAD_ID, MIGRATION_BOT, MIGRATION_CHANNEL_KIND]) shim.db.exec(migration);
     shim.db.exec(SCHEMA);
     const [due] = await new D1Store(shim.asD1()).takeDue(NOW, 10);
     expect(due!.subscription).toMatchObject({ id: 'sub1', transport: 'webhook', pausedUntil: 0, threadPerMod: false });
+  });
+});
+
+describe('schema upgrade from a database without subscriptions.channel_kind', () => {
+  const SCHEMA_BEFORE_CHANNEL_KIND = SCHEMA.replace(/ {2}channel_kind TEXT[^\n]*\n/, '');
+
+  function databaseBeforeChannelKind(): D1Shim {
+    const shim = new D1Shim();
+    shim.db.exec(SCHEMA_BEFORE_CHANNEL_KIND);
+    shim.db
+      .prepare("INSERT INTO subscriptions (id, guild_id, transport, channel_id, mode) VALUES ('bot1', 'g', 'bot', 'c1', 'immediate')")
+      .run();
+    return shim;
+  }
+
+  it('the fixture really lacks the column and the current queries fail on it', async () => {
+    expect(SCHEMA_BEFORE_CHANNEL_KIND).not.toMatch(/^ +channel_kind TEXT/m);
+    await expect(new D1Store(databaseBeforeChannelKind().asD1()).listSubscriptions()).rejects.toThrow(/channel_kind/);
+  });
+
+  it('adds the column as text for every existing row, accepts forum and rejects other values', async () => {
+    const shim = databaseBeforeChannelKind();
+    shim.db.exec(MIGRATION_CHANNEL_KIND);
+    const store = new D1Store(shim.asD1());
+    expect((await store.listSubscriptions()).map((s) => s.channelKind)).toEqual(['text']);
+    await store.createSubscription({ id: 'bot2', guildId: 'g', transport: 'bot', channelId: 'c2', channelKind: 'forum', filter: {}, mode: 'immediate', digestIntervalMin: 30, enabled: true });
+    expect((await store.listSubscriptionsByChannel('c2'))[0]!.channelKind).toBe('forum');
+    expect(() => shim.db.prepare("UPDATE subscriptions SET channel_kind = 'voice' WHERE id = 'bot1'").run()).toThrow(/CHECK/);
+  });
+
+  it('is not repeatable, and schema.sql applies cleanly afterwards, twice', () => {
+    const shim = databaseBeforeChannelKind();
+    shim.db.exec(MIGRATION_CHANNEL_KIND);
+    expect(() => shim.db.exec(MIGRATION_CHANNEL_KIND)).toThrow(/duplicate column/);
+    expect(() => shim.db.exec(SCHEMA)).not.toThrow();
+    expect(() => shim.db.exec(SCHEMA)).not.toThrow();
   });
 });

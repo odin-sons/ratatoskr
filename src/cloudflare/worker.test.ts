@@ -107,6 +107,17 @@ describe('worker', () => {
     expect(runTick.mock.calls[2]![0]).not.toHaveProperty('alertWebhookUrl');
   });
 
+  it('serves bot targets with the bot token when it is set, and defers them with a delay when it is not', async () => {
+    const target = { kind: 'bot', channelId: '123456789012345678' } as const;
+    const message = { content: 'hi', allowed_mentions: { parse: [] } } as const;
+    await run(TICK_CRON);
+    expect(await runTick.mock.calls[0]![0].sender.send(target, message)).toMatchObject({ ok: false, retryable: true, retryAfterSeconds: 300 });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ id: '323456789012345678' }), { status: 200 }));
+    await run(TICK_CRON, { ...env, DISCORD_BOT_TOKEN: 'bot-token-secret' });
+    expect(await runTick.mock.calls[1]![0].sender.send(target, message)).toMatchObject({ ok: true, messageId: '323456789012345678' });
+    expect((fetchSpy.mock.calls[0]![1]!.headers as Record<string, string>)['authorization']).toBe('Bot bot-token-secret');
+  });
+
   it('builds the D1 usage reader only when both the account id and the analytics token are set', async () => {
     await run(TICK_CRON, { ...env, CLOUDFLARE_ACCOUNT_ID: 'a'.repeat(32), CLOUDFLARE_ANALYTICS_TOKEN: 'analytics-token' });
     expect(typeof runTick.mock.calls[0]![0].usage.daily).toBe('function');

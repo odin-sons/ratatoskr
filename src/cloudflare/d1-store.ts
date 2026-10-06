@@ -89,6 +89,7 @@ interface SubscriptionCols {
   enabled: number;
   thread_per_mod: number;
   paused_until: number;
+  channel_kind: string;
 }
 
 interface ModThreadCols {
@@ -192,6 +193,7 @@ const SUBSCRIPTION_READ_COLUMNS: readonly (keyof SubscriptionCols)[] = [
   'enabled',
   'thread_per_mod',
   'paused_until',
+  'channel_kind',
 ];
 const MOD_THREAD_COLUMNS = ['channel_id', 'source', 'package_id', 'thread_id', 'anchor_message_id', 'created_at'] as const satisfies readonly (keyof ModThreadCols)[];
 const MESSAGE_COLUMNS = ['message_id', 'channel_id', 'source', 'package_id', 'event_id', 'created_at'] as const satisfies readonly (keyof MessageCols)[];
@@ -234,7 +236,7 @@ const SQL_SEARCH_OWNERS = 'SELECT owner FROM packages WHERE owner COLLATE NOCASE
 const PREFIX_UPPER_BOUND = '\u{10FFFF}';
 const SUBSCRIPTION_FILTER_IS_OBJECT = "CASE WHEN json_valid(s.filter) THEN json_type(s.filter) = 'object' ELSE 0 END";
 // Unary plus keeps the planner driving from idx_outbox_pending instead of subscriptions.
-const SQL_TAKE_DUE = `SELECT ${selectColumns('o', 'o', OUTBOX_READ_COLUMNS)}, ${selectColumns('s', 's', SUBSCRIPTION_READ_COLUMNS)}, ${EVENT_JOIN_SELECT} FROM outbox o JOIN events e ON e.id = o.event_id ${EVENT_JOIN_PACKAGES} JOIN subscriptions s ON s.id = o.subscription_id WHERE o.parked = 0 AND o.delivered_at IS NULL AND o.next_attempt_at <= ? AND o.attempts < ? AND +s.enabled = 1 AND s.paused_until <= CAST(strftime('%s', ?) AS INTEGER) AND s.transport = 'webhook' AND ${SUBSCRIPTION_FILTER_IS_OBJECT} ORDER BY o.next_attempt_at, o.rowid LIMIT ?`;
+const SQL_TAKE_DUE = `SELECT ${selectColumns('o', 'o', OUTBOX_READ_COLUMNS)}, ${selectColumns('s', 's', SUBSCRIPTION_READ_COLUMNS)}, ${EVENT_JOIN_SELECT} FROM outbox o JOIN events e ON e.id = o.event_id ${EVENT_JOIN_PACKAGES} JOIN subscriptions s ON s.id = o.subscription_id WHERE o.parked = 0 AND o.delivered_at IS NULL AND o.next_attempt_at <= ? AND o.attempts < ? AND +s.enabled = 1 AND s.paused_until <= CAST(strftime('%s', ?) AS INTEGER) AND ${SUBSCRIPTION_FILTER_IS_OBJECT} ORDER BY o.next_attempt_at, o.rowid LIMIT ?`;
 const SQL_MARK_DELIVERED_PREFIX = 'UPDATE outbox SET delivered_at = ? WHERE delivered_at IS NULL AND id IN';
 const SQL_PURGE_DELIVERED = 'DELETE FROM outbox WHERE id IN (SELECT id FROM outbox WHERE delivered_at < ? LIMIT ?)';
 const SQL_MARK_FAILED_PREFIX = 'UPDATE outbox SET attempts = attempts + 1, next_attempt_at = ?, parked = MAX(parked, ?) WHERE delivered_at IS NULL AND id IN';
@@ -728,6 +730,7 @@ function subscriptionValues(s: Subscription): (string | number | null)[] {
     s.enabled ? 1 : 0,
     s.threadPerMod ? 1 : 0,
     s.pausedUntil ?? 0,
+    s.channelKind ?? 'text',
   ];
 }
 
@@ -763,6 +766,7 @@ function mapSubscription(row: SubscriptionCols): Subscription | null {
     threadId: row.thread_id,
     label: row.label,
     createdBy: row.created_by,
+    channelKind: row.channel_kind === 'forum' ? 'forum' : 'text',
     threadPerMod: row.thread_per_mod === 1,
     pausedUntil: row.paused_until,
     filter,

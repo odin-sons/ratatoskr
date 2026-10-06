@@ -39,6 +39,7 @@ export interface Messages {
   /** `/subscribe` refusals. */
   subscribeNeedsFilter: string;
   subscribeThreadPerModDigest: string;
+  subscribeChannelKindUnknown: string;
   subscribeIntervalImmediate: string;
   sourceNotConfigured(source: string): string;
   /** `details` is the joined list of validation problems. */

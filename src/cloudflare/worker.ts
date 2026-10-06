@@ -12,7 +12,10 @@ import { createAdapters } from '../sources/index.ts';
 import { CloudflareUsageReader } from './analytics.ts';
 import { RECONCILE_CRON, RECONCILE_HOURS_UTC, TICK_CRON, reconcileIndexAt } from './crons.ts';
 import { D1Store } from './d1-store.ts';
+import { BotSender } from './bot-sender.ts';
+import { createChannelKindResolver } from './channel-kind.ts';
 import { DiscordSender } from './discord-sender.ts';
+import { RoutingSender } from './routing-sender.ts';
 
 export interface Env {
   DB: D1Database;
@@ -39,7 +42,7 @@ function buildDeps(env: Env): TickDeps {
   const store = new D1Store(env.DB);
   return {
     store,
-    sender: new DiscordSender(),
+    sender: new RoutingSender(new DiscordSender(), env.DISCORD_BOT_TOKEN ? new BotSender(env.DISCORD_BOT_TOKEN) : null),
     adapters: createAdapters(appConfig, store),
     config: appConfig,
     secrets: { NEXUS_API_KEY: env.NEXUS_API_KEY },
@@ -92,6 +95,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         now: () => new Date(),
         storeEmojis: parseStoreEmojis(env.STORE_EMOJIS),
         ...(ratatoskrEmoji === undefined ? {} : { ratatoskrEmoji }),
+        ...(env.DISCORD_BOT_TOKEN ? { channelKind: createChannelKindResolver(env.DISCORD_BOT_TOKEN) } : {}),
       }),
       messages: getMessages(parseLanguage(env.LANGUAGE)),
       fetch: globalThis.fetch.bind(globalThis),

@@ -1,15 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { SubrequestBudget } from './budget.ts';
-import { DISCORD, MAX_DETAILED_PER_DIGEST, OUTBOX_BACKOFF, OUTBOX_MAX_ATTEMPTS, POISON_ISOLATION_MAX_ITEMS, TICK_BUDGET } from './constants.ts';
+import {
+  BOT_UNCONFIGURED_RETRY_SECONDS,
+  DISCORD,
+  DISCORD_EPOCH_MS,
+  DISCORD_THREAD_NAME_MAX,
+  MAX_DETAILED_PER_DIGEST,
+  OUTBOX_BACKOFF,
+  OUTBOX_MAX_ATTEMPTS,
+  POISON_ISOLATION_MAX_ITEMS,
+  THREAD_FRESH_MS,
+  TICK_BUDGET,
+} from './constants.ts';
 import { fitDigestPrefix, type DigestFit } from './digest-fit.ts';
 import { compileFilter, type CompiledFilter } from './filter.ts';
 import { releaseKey } from './ids.ts';
-import type { SendResult, SendTarget, Sender, Store } from './ports.ts';
+import type { ForumPostResult, OpenThreadResult, SendResult, SendTarget, Sender, Store } from './ports.ts';
 import { targetKey } from './send-target.ts';
 import { sanitizeLogText } from './report.ts';
 import type { Language } from '../i18n/index.ts';
 import { hasWebhook } from './types.ts';
-import type { DiscordMessage, DueDelivery, ModEvent, OutboxRow, StoreEmojis, WebhookSubscription } from './types.ts';
+import type { DiscordMessage, DueDelivery, MessageRecord, ModEvent, ModThread, OutboxRow, StoreEmojis, Subscription } from './types.ts';
 
 /** Presentation settings handed to every render call. */
 export interface RenderContext {
@@ -133,6 +144,7 @@ interface Drain {
   settled: Set<string>;
   /** Webhooks that failed retryably in this drain, with the time their remaining rows become due again. */
   retryAt: Map<string, string>;
+  unavailableLogged: boolean;
 }
 
 /**
@@ -161,6 +173,7 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainReport> {
     blocked: new Set(),
     settled: new Set(),
     retryAt: new Map(),
+    unavailableLogged: false,
   };
 
   let due: DueDelivery[];
@@ -171,24 +184,25 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainReport> {
     return drain.report;
   }
 
-  const groups = new Map<string, { sub: WebhookSubscription; items: DueDelivery[] }>();
+  const groups = new Map<string, { sub: Subscription; target: SendTarget; items: DueDelivery[] }>();
   const rowsByWebhook = new Map<string, string[]>();
   for (const item of due) {
     const sub = item.subscription;
-    if (!hasWebhook(sub)) continue;
+    const target = subscriptionTarget(sub);
+    if (target === null) continue;
     let group = groups.get(sub.id);
-    if (group === undefined) groups.set(sub.id, (group = { sub, items: [] }));
+    if (group === undefined) groups.set(sub.id, (group = { sub, target, items: [] }));
     group.items.push(item);
-    const key = subscriptionKey(sub);
+    const key = targetKey(target);
     const webhookRows = rowsByWebhook.get(key);
     if (webhookRows === undefined) rowsByWebhook.set(key, [item.row.id]);
     else webhookRows.push(item.row.id);
   }
 
-  for (const { sub, items } of groups.values()) {
+  for (const { sub, target, items } of groups.values()) {
     if (!sub.enabled) continue;
     try {
-      await deliverGroup(drain, sub, items);
+      await deliverGroup(drain, sub, target, items);
     } catch (err) {
       drain.report.error ??= errorMessage(err);
     }
@@ -205,7 +219,17 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainReport> {
   return drain.report;
 }
 
-async function deliverGroup(drain: Drain, sub: WebhookSubscription, items: DueDelivery[]): Promise<void> {
+async function deliverGroup(drain: Drain, sub: Subscription, target: SendTarget, items: DueDelivery[]): Promise<void> {
+  if (drain.deps.sender.canSend?.(target) === false) {
+    const ids = items.map((item) => item.row.id);
+    await drain.deps.store.rescheduleRows(ids, new Date(drain.deps.now.getTime() + BOT_UNCONFIGURED_RETRY_SECONDS * 1000).toISOString());
+    for (const id of ids) drain.settled.add(id);
+    if (!drain.unavailableLogged) {
+      drain.unavailableLogged = true;
+      console.warn('outbox rows are waiting: the sender cannot deliver to their target');
+    }
+    return;
+  }
   const filter = compileFilter(sub.filter);
   const current: DueDelivery[] = [];
   const stale: string[] = [];
@@ -221,18 +245,18 @@ async function deliverGroup(drain: Drain, sub: WebhookSubscription, items: DueDe
 
   const kept = sub.filter.dedupAcrossStores === false ? current.map((d) => ({ delivery: d, rows: [d.row] })) : collapseEquivalent(current);
   if (sub.mode === 'immediate') {
-    for (const entry of kept) await deliverImmediate(drain, sub, entry);
+    for (const entry of kept) await deliverImmediate(drain, sub, target, entry);
   } else {
-    await deliverDigest(drain, sub, kept, filter);
+    await deliverDigest(drain, sub, target, kept, filter);
   }
 }
 
-function subscriptionTarget(sub: WebhookSubscription): SendTarget {
-  return { kind: 'webhook', url: sub.webhookUrl, threadId: sub.threadId };
-}
-
-function subscriptionKey(sub: WebhookSubscription): string {
-  return targetKey(subscriptionTarget(sub));
+/** Null when the subscription lacks the destination its transport needs; its rows stay queued. */
+export function subscriptionTarget(sub: Subscription): SendTarget | null {
+  if (sub.transport === 'bot') {
+    return typeof sub.channelId === 'string' && sub.channelId !== '' ? { kind: 'bot', channelId: sub.channelId, threadId: sub.threadId ?? null } : null;
+  }
+  return hasWebhook(sub) ? { kind: 'webhook', url: sub.webhookUrl, threadId: sub.threadId } : null;
 }
 
 /** Messages still allowed for `webhook` in this tick: per-tick cap, per-webhook cap and the shared budget. */
@@ -246,7 +270,7 @@ function allowance(drain: Drain, webhook: string): number {
   return Math.max(0, room);
 }
 
-function renderContext(deps: DrainDeps, sub: WebhookSubscription): RenderContext {
+function renderContext(deps: DrainDeps, sub: Subscription): RenderContext {
   const context: RenderContext = {};
   if (deps.storeEmojis !== undefined) context.storeEmojis = deps.storeEmojis;
   if (deps.ratatoskrEmoji !== undefined) context.ratatoskrEmoji = deps.ratatoskrEmoji;
@@ -255,9 +279,10 @@ function renderContext(deps: DrainDeps, sub: WebhookSubscription): RenderContext
   return context;
 }
 
-async function deliverImmediate(drain: Drain, sub: WebhookSubscription, entry: CollapsedDelivery): Promise<void> {
+async function deliverImmediate(drain: Drain, sub: Subscription, target: SendTarget, entry: CollapsedDelivery): Promise<void> {
   const { renderer, now } = drain.deps;
-  if (allowance(drain, subscriptionKey(sub)) < 1) {
+  const key = targetKey(target);
+  if (allowance(drain, key) < 1) {
     drain.report.deferred += entry.rows.length;
     return;
   }
@@ -268,20 +293,34 @@ async function deliverImmediate(drain: Drain, sub: WebhookSubscription, entry: C
     await parkUnrenderable(drain, [entry]);
     return;
   }
-  let failure = await sendAll(drain, subscriptionTarget(sub), [message]);
+  if (target.kind === 'bot' && sub.threadPerMod === true) {
+    await deliverRouted(drain, sub, target, entry, message);
+    return;
+  }
+  let sent: SendResult[] = [];
+  let failure = await sendAll(drain, target, [message], sent);
   if (failure !== null) {
-    const reduced = reducedMessage(drain, sub, entry.delivery.event, message, failure);
+    const reduced = reducedMessage(drain, sub, entry.delivery.event, message, failure, key);
     if (reduced !== null) {
       drain.report.failed -= 1;
-      failure = await sendAll(drain, subscriptionTarget(sub), [reduced]);
+      sent = [];
+      failure = await sendAll(drain, target, [reduced], sent);
       if (failure === null) {
         drain.report.degraded += 1;
         console.warn(`outbox degraded immediate message event=${sanitizeLogText(entry.delivery.event.id)}: sent without optional buttons`);
       }
     }
   }
-  if (failure === null) await markDelivered(drain, entry.rows.map((r) => r.id));
-  else await failRows(drain, entry.rows, failure, subscriptionKey(sub));
+  if (failure === null) {
+    const landed = sent[0];
+    if (landed?.ok === true && landed.messageId !== undefined) {
+      await writeMapping(() => drain.deps.store.putMessage(messageRecord(drain, entry.delivery.event, landed.messageId!, landed.channelId ?? threadOrChannel(target))));
+    }
+    await markDelivered(drain, entry.rows.map((r) => r.id));
+  } else {
+    const soft = softenFreshGone(drain, target, failure);
+    await failRows(drain, entry.rows, soft, soft === failure ? key : undefined);
+  }
 }
 
 /**
@@ -289,9 +328,9 @@ async function deliverImmediate(drain: Drain, sub: WebhookSubscription, entry: C
  * rendered with only the mod page button; null when the failure is another one, no send is left, or the
  * message has nothing more to drop.
  */
-function reducedMessage(drain: Drain, sub: WebhookSubscription, event: ModEvent, message: DiscordMessage, failure: SendFailure): DiscordMessage | null {
+function reducedMessage(drain: Drain, sub: Subscription, event: ModEvent, message: DiscordMessage, failure: SendFailure, key: string): DiscordMessage | null {
   const { result } = failure;
-  if (result.retryable || result.status !== 400 || message.components === undefined || allowance(drain, subscriptionKey(sub)) < 1) return null;
+  if (result.retryable || result.status !== 400 || message.components === undefined || allowance(drain, key) < 1) return null;
   try {
     const reduced = drain.deps.renderer.renderImmediate(event, { now: drain.deps.now, ...renderContext(drain.deps, sub), optionalButtons: false });
     return JSON.stringify(reduced) === JSON.stringify(message) ? null : reduced;
@@ -320,11 +359,12 @@ function cappedDetailed(entries: readonly CollapsedDelivery[], isWatchlistHit: (
   return (event: ModEvent): boolean => detailedIds.has(event.id);
 }
 
-async function deliverDigest(drain: Drain, sub: WebhookSubscription, kept: CollapsedDelivery[], filter: CompiledFilter): Promise<void> {
+async function deliverDigest(drain: Drain, sub: Subscription, target: SendTarget, kept: CollapsedDelivery[], filter: CompiledFilter): Promise<void> {
   const { renderer, now } = drain.deps;
   const context = renderContext(drain.deps, sub);
+  const key = targetKey(target);
   const rowCount = (entries: readonly CollapsedDelivery[]): number => entries.reduce((sum, k) => sum + k.rows.length, 0);
-  const room = allowance(drain, subscriptionKey(sub));
+  const room = allowance(drain, key);
   if (room < 1) {
     drain.report.deferred += rowCount(kept);
     return;
@@ -350,9 +390,13 @@ async function deliverDigest(drain: Drain, sub: WebhookSubscription, kept: Colla
 
   const sentRows = live.slice(0, found.fit.count).flatMap((k) => k.rows);
   drain.report.deferred += rowCount(live) - sentRows.length;
-  const failure = await sendAll(drain, subscriptionTarget(sub), found.fit.messages);
-  if (failure === null) await markDelivered(drain, sentRows.map((r) => r.id));
-  else await failRows(drain, sentRows, failure, subscriptionKey(sub));
+  const failure = await sendAll(drain, target, found.fit.messages);
+  if (failure === null) {
+    await markDelivered(drain, sentRows.map((r) => r.id));
+  } else {
+    const soft = softenFreshGone(drain, target, failure);
+    await failRows(drain, sentRows, soft, soft === failure ? key : undefined);
+  }
 }
 
 interface FitOutcome {
@@ -451,28 +495,15 @@ function isolatePoison(
 
 /**
  * Sends in order, stopping at the first failure; returns it, or `null` when every message was accepted.
- * `perWebhook`/`blocked` key on `targetKey` — never fold `threadId` into that key.
+ * `perWebhook`/`blocked` key on `targetKey` - never fold `threadId` into that key. Accepted results are appended to `accepted`.
  */
-async function sendAll(drain: Drain, target: SendTarget, messages: DiscordMessage[]): Promise<SendFailure | null> {
+async function sendAll(drain: Drain, target: SendTarget, messages: DiscordMessage[], accepted?: SendResult[]): Promise<SendFailure | null> {
   const webhook = targetKey(target);
-  const { sender, budget } = drain.deps;
   for (const message of messages) {
-    let result: SendResult;
-    let attempted = true;
-    if (budget !== undefined && !budget.tryConsume()) {
-      result = TRANSIENT_FAILURE;
-      attempted = false;
-    } else {
-      try {
-        result = await sender.send(target, message);
-      } catch {
-        result = TRANSIENT_FAILURE;
-      }
-      drain.sends += 1;
-      drain.perWebhook.set(webhook, (drain.perWebhook.get(webhook) ?? 0) + 1);
-    }
+    const { result, attempted } = await request(drain, webhook, () => drain.deps.sender.send(target, message));
     if (result.ok) {
       drain.report.sent += 1;
+      accepted?.push(result);
       continue;
     }
     drain.report.failed += 1;
@@ -480,6 +511,194 @@ async function sendAll(drain: Drain, target: SendTarget, messages: DiscordMessag
     return { result, attempted };
   }
   return null;
+}
+
+/** One Discord request against the shared budget and the per-key counters; a budget refusal or a throw is a transient failure. */
+async function request<T extends { ok: boolean }>(drain: Drain, key: string, run: () => Promise<T>): Promise<{ result: T | FailedResult; attempted: boolean }> {
+  const { budget } = drain.deps;
+  if (budget !== undefined && !budget.tryConsume()) return { result: TRANSIENT_FAILURE, attempted: false };
+  let result: T | FailedResult;
+  try {
+    result = await run();
+  } catch {
+    result = TRANSIENT_FAILURE;
+  }
+  drain.sends += 1;
+  drain.perWebhook.set(key, (drain.perWebhook.get(key) ?? 0) + 1);
+  return { result, attempted: true };
+}
+
+type BotTarget = Extract<SendTarget, { kind: 'bot' }>;
+
+const UNSUPPORTED: FailedResult = { ok: false, retryable: false, status: 0 };
+
+type Route =
+  | { op: 'post'; cost: 1 }
+  | { op: 'message'; cost: 1 }
+  | { op: 'thread'; cost: 1; threadId: string }
+  | { op: 'open'; cost: 2; anchorMessageId: string };
+
+type RouteOutcome = { ok: true } | { ok: false; failure: SendFailure; reset: boolean };
+
+function planRoute(kind: 'text' | 'forum', thread: ModThread | null): Route {
+  if (thread !== null && thread.threadId !== '') return { op: 'thread', cost: 1, threadId: thread.threadId };
+  if (kind === 'text' && thread?.anchorMessageId) return { op: 'open', cost: 2, anchorMessageId: thread.anchorMessageId };
+  return kind === 'forum' ? { op: 'post', cost: 1 } : { op: 'message', cost: 1 };
+}
+
+function threadName(event: ModEvent): string {
+  const name = event.pkg.name.trim() === '' ? event.pkg.packageId : event.pkg.name.trim();
+  return Array.from(name).slice(0, DISCORD_THREAD_NAME_MAX).join('');
+}
+
+function threadOrChannel(target: SendTarget): string {
+  if (target.kind === 'bot') return target.threadId ? target.threadId : target.channelId;
+  return '';
+}
+
+function messageRecord(drain: Drain, event: ModEvent, messageId: string, channelId: string): MessageRecord {
+  return {
+    messageId,
+    channelId,
+    source: event.pkg.source,
+    packageId: event.pkg.packageId,
+    eventId: event.id,
+    createdAt: drain.deps.now.toISOString(),
+  };
+}
+
+/** A failed map write only costs a later duplicate post; the message itself exists. */
+async function writeMapping(write: () => Promise<void>): Promise<void> {
+  try {
+    await write();
+  } catch {
+    console.warn('outbox mapping write failed');
+  }
+}
+
+function isFreshThread(threadId: string, createdAt: string | undefined, now: Date): boolean {
+  const fresh = (ageMs: number): boolean => ageMs >= 0 && ageMs < THREAD_FRESH_MS;
+  if (createdAt !== undefined && fresh(now.getTime() - Date.parse(createdAt))) return true;
+  return /^\d{17,20}$/.test(threadId) && fresh(now.getTime() - (Number(BigInt(threadId) >> 22n) + DISCORD_EPOCH_MS));
+}
+
+/** A `gone` answer for a thread created moments ago becomes a retryable failure with backoff. */
+function softenFreshGone(drain: Drain, target: SendTarget, failure: SendFailure, createdAt?: string): SendFailure {
+  const { result } = failure;
+  if (result.retryable || result.gone !== true || target.kind !== 'bot' || !target.threadId) return failure;
+  if (!isFreshThread(target.threadId, createdAt, drain.deps.now)) return failure;
+  return { result: { ok: false, retryable: true, retryAfterSeconds: null, status: result.status }, attempted: failure.attempted };
+}
+
+/**
+ * Immediate delivery of a `thread_per_mod` bot subscription: `mod_threads` decides between a forum post, a plain
+ * message that becomes the anchor, a thread opened on the anchor, or a message into the mod's thread. A thread that is
+ * gone resets its mapping and the row is sent again as a new post or message, in this tick when the allowance
+ * covers it, otherwise on the next one without spending an attempt.
+ */
+async function deliverRouted(drain: Drain, sub: Subscription, target: BotTarget, entry: CollapsedDelivery, message: DiscordMessage): Promise<void> {
+  const { store, now } = drain.deps;
+  const event = entry.delivery.event;
+  const key = targetKey(target);
+  const kind = sub.channelKind ?? 'text';
+  const ids = entry.rows.map((row) => row.id);
+  let thread = await store.getModThread(target.channelId, event.pkg.source, event.pkg.packageId);
+  for (let pass = 0; ; pass += 1) {
+    const route = planRoute(kind, thread);
+    if (allowance(drain, key) < route.cost) {
+      drain.report.deferred += ids.length;
+      if (pass > 0) {
+        await store.rescheduleRows(ids, now.toISOString());
+        for (const id of ids) drain.settled.add(id);
+      }
+      return;
+    }
+    const outcome = await runRoute(drain, target, event, message, route, thread);
+    if (outcome.ok) {
+      await markDelivered(drain, ids);
+      return;
+    }
+    if (outcome.reset && pass === 0) {
+      await writeMapping(() => store.deleteModThread(target.channelId, event.pkg.source, event.pkg.packageId));
+      console.warn('outbox thread gone: mapping reset');
+      drain.report.failed -= 1;
+      thread = null;
+      continue;
+    }
+    const { failure } = outcome;
+    await failRows(drain, entry.rows, failure, failure.result.retryable && failure.attempted ? key : undefined);
+    return;
+  }
+}
+
+async function runRoute(
+  drain: Drain,
+  target: BotTarget,
+  event: ModEvent,
+  message: DiscordMessage,
+  route: Route,
+  thread: ModThread | null,
+): Promise<RouteOutcome> {
+  const { sender, store, now } = drain.deps;
+  const key = targetKey(target);
+  const { channelId } = target;
+  const nowIso = now.toISOString();
+  const { source, packageId } = event.pkg;
+  const fail = (failure: SendFailure, reset = false): RouteOutcome => {
+    drain.report.failed += 1;
+    if (failure.result.retryable) drain.blocked.add(key);
+    return { ok: false, failure, reset };
+  };
+
+  if (route.op === 'post') {
+    const res = await request<ForumPostResult>(drain, key, () => sender.createForumPost?.(channelId, threadName(event), message) ?? Promise.resolve(UNSUPPORTED));
+    if (!res.result.ok) return fail({ result: res.result, attempted: res.attempted });
+    drain.report.sent += 1;
+    const { threadId, messageId } = res.result;
+    await writeMapping(() => store.putModThread({ channelId, source, packageId, threadId, anchorMessageId: null, createdAt: nowIso }));
+    await writeMapping(() => store.putMessage(messageRecord(drain, event, messageId, threadId)));
+    return { ok: true };
+  }
+
+  if (route.op === 'message') {
+    const res = await request<SendResult>(drain, key, () => sender.send({ kind: 'bot', channelId, threadId: null }, message));
+    if (!res.result.ok) return fail({ result: res.result, attempted: res.attempted });
+    drain.report.sent += 1;
+    const landed = res.result;
+    const messageId = landed.messageId;
+    if (messageId !== undefined) {
+      await writeMapping(() => store.putModThread({ channelId, source, packageId, threadId: '', anchorMessageId: messageId, createdAt: nowIso }));
+      await writeMapping(() => store.putMessage(messageRecord(drain, event, messageId, landed.channelId ?? channelId)));
+    }
+    return { ok: true };
+  }
+
+  let threadId: string;
+  let createdAt = thread?.createdAt;
+  if (route.op === 'open') {
+    const { anchorMessageId } = route;
+    const opened = await request<OpenThreadResult>(drain, key, () => sender.openThreadOnMessage?.(channelId, anchorMessageId, threadName(event)) ?? Promise.resolve(UNSUPPORTED));
+    if (opened.result.ok) threadId = opened.result.threadId;
+    else if (!opened.result.retryable && opened.result.threadExists === true) threadId = anchorMessageId;
+    else return fail({ result: opened.result, attempted: opened.attempted }, !opened.result.retryable && opened.result.gone === true);
+    createdAt = nowIso;
+    const openedId = threadId;
+    await writeMapping(() => store.putModThread({ channelId, source, packageId, threadId: openedId, anchorMessageId, createdAt: nowIso }));
+  } else {
+    threadId = route.threadId;
+  }
+
+  const into: BotTarget = { kind: 'bot', channelId, threadId };
+  const res = await request<SendResult>(drain, key, () => sender.send(into, message));
+  if (!res.result.ok) {
+    const failure = softenFreshGone(drain, into, { result: res.result, attempted: res.attempted }, createdAt);
+    return fail(failure, route.op === 'thread' && !failure.result.retryable && failure.result.gone === true);
+  }
+  drain.report.sent += 1;
+  const landed = res.result;
+  const messageId = landed.messageId;
+  if (messageId !== undefined) await writeMapping(() => store.putMessage(messageRecord(drain, event, messageId, landed.channelId ?? threadId)));
+  return { ok: true };
 }
 
 async function markDelivered(drain: Drain, ids: string[]): Promise<void> {

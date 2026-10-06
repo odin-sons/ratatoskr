@@ -273,7 +273,7 @@ export class MemoryStore implements Store {
     for (const stored of due) {
       const subscription = this.subscriptions.get(stored.subscriptionId);
       const event = this.events.get(stored.eventId);
-      if (!subscription || !subscription.enabled || (subscription.pausedUntil ?? 0) * 1000 > Date.parse(nowIso) || (subscription.transport ?? 'webhook') !== 'webhook' || !event) continue;
+      if (!subscription || !subscription.enabled || (subscription.pausedUntil ?? 0) * 1000 > Date.parse(nowIso) || !event) continue;
       const { delivered: _d, deliveredAt: _da, parked: _p, seq: _s, ...row } = stored;
       out.push({ row, subscription: { ...subscription }, event: this.joined(event) });
       if (out.length >= limit) break;
@@ -372,6 +372,7 @@ function withDefaults(sub: Subscription): Subscription {
     createdBy: sub.createdBy ?? null,
     threadPerMod: sub.threadPerMod ?? false,
     pausedUntil: sub.pausedUntil ?? 0,
+    channelKind: sub.channelKind ?? 'text',
   };
 }
 
