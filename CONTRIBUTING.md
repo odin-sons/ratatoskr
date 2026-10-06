@@ -17,7 +17,7 @@ Never paste a webhook URL, an API key or a token into an issue, a pull request o
 
 ## Setup
 
-You need Node.js 24 and pnpm (the exact pnpm version is pinned in `package.json`).
+You need Node.js 24 and pnpm (the exact pnpm version is pinned in `package.json`). To try the slash commands against a test server, follow [docs/bot-setup.md](docs/bot-setup.md).
 
 ```
 pnpm install
