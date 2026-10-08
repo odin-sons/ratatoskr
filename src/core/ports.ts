@@ -4,7 +4,6 @@ import type {
   CapUsage,
   DiscordMessage,
   DueDelivery,
-  MessageRecord,
   ModEvent,
   ModThread,
   SubscriptionTemplate,
@@ -93,14 +92,6 @@ export interface Store {
   setTemplate(template: SubscriptionTemplate): Promise<void>;
   /** Removes a template; false when there was none. */
   deleteTemplate(subscriptionId: string, kind: TemplateKind): Promise<boolean>;
-
-  /** Inserts or replaces the record of a bot message. */
-  putMessage(message: MessageRecord): Promise<void>;
-
-  getMessage(messageId: string): Promise<MessageRecord | null>;
-
-  /** Deletes at most `limit` message records created before `olderThanIso`; returns how many were deleted. */
-  purgeMessages(olderThanIso: string, limit: number): Promise<number>;
 
   /**
    * Packages whose name starts with `prefix`, ignoring ASCII case, ordered by name. A prefix shorter than

@@ -6,7 +6,6 @@ import { DIGEST_INTERVAL_MAX_BOUND, DIGEST_INTERVAL_MIN_BOUND } from '../core/va
 /** Source: Discord developer docs, "Application Commands" (Application Command Option Type, Application Command Type). */
 export const OPTION_TYPE = { string: 3, integer: 4, boolean: 5 } as const;
 const CHAT_INPUT = 1;
-const MESSAGE_COMMAND = 3;
 
 export interface CommandChoice {
   name: string;
@@ -35,20 +34,9 @@ export interface ChatCommandDefinition {
   options?: CommandOptionDefinition[];
 }
 
-/** A message context-menu command; Discord requires an empty description. */
-export interface MessageCommandDefinition {
-  name: string;
-  description: '';
-  type: typeof MESSAGE_COMMAND;
-  default_member_permissions?: string;
-  dm_permission: false;
-  options?: undefined;
-}
-
-export type CommandDefinition = ChatCommandDefinition | MessageCommandDefinition;
+export type CommandDefinition = ChatCommandDefinition;
 
 export const INFO_COMMAND_NAME = 'info';
-export const MOD_INFO_COMMAND_NAME = 'Mod info';
 
 const command = (name: string, description: string, options?: CommandOptionDefinition[]): ChatCommandDefinition => ({
   name,
@@ -153,5 +141,4 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
       { type: OPTION_TYPE.string, name: 'mod', description: 'The mod (optional inside a mod thread)', autocomplete: true, max_length: SUBSCRIBE_TEXT_OPTION_MAX },
     ]),
   ),
-  { name: MOD_INFO_COMMAND_NAME, description: '', type: MESSAGE_COMMAND, dm_permission: false },
 ];

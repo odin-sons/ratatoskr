@@ -60,7 +60,7 @@ Rules that keep a message tidy:
 | `info_line` | `size`, `downloads` and `likes`, joined with a dot, after an info emoji | |
 | `icon` | the thumbnail; prints nothing | |
 | `buttons` | the buttons Mod page, Download and Website | |
-| `page_button`, `download_button`, `website_button`, `info_button` | one button each | |
+| `page_button`, `download_button`, `website_button`, `info_button` | one button each; `info_button` shows details of the mod when pressed, and exists only in messages the bot sends itself | |
 
 The numbers in brackets are the most characters the form can show; a limit you
 write can only make a value shorter. Cutting happens on a line or word boundary,
@@ -89,10 +89,11 @@ The message of an event:
 **🗂️ Categories**
 {categories}
 ---
-{buttons}
+{buttons} {info_button}
 ```
 
-The labels follow the language of the deployment. The line of a mod in a digest:
+The labels follow the language of the deployment. `{info_button}` shows nothing in
+a message sent through a webhook. The line of a mod in a digest:
 
 ```
 **{name:link}** {versions}(? · {owner}?)(? · {size}?)

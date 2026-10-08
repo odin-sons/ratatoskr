@@ -23,6 +23,8 @@ export const DISCORD = {
   buttonsPerRow: 5,
   buttonLabelMax: 80,
   buttonUrlMax: 512,
+  /** Source: Discord developer docs, message components (custom_id up to 100 characters). */
+  customIdMax: 100,
   /** Components V2 messages (message flag 1 << 15): no `content` or `embeds`, everything is components. Source: Discord developer docs, components reference. */
   componentsV2Flag: 32768,
   /** Components in one V2 message, counting nested ones. */
@@ -157,12 +159,6 @@ export const DELIVERED_RETENTION_DAYS = 7;
 
 /** Most delivered outbox rows deleted per reconcile run. */
 export const OUTBOX_PURGE_BATCH = 1000;
-
-/** Bot message records are kept this long for the message command, then purged by reconciliation. Source: docs/spec.md "Bot data". */
-export const MESSAGE_RETENTION_DAYS = 7;
-
-/** Most message records deleted per reconcile run. */
-export const MESSAGE_PURGE_BATCH = 1000;
 
 /** Shortest prefix an autocomplete search runs for; a shorter one returns nothing. Source: docs/spec.md "Bot data". */
 export const AUTOCOMPLETE_MIN_PREFIX = 2;

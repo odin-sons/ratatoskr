@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { eventId } from '../../core/ids.ts';
+import { parseInfoButtonId } from '../../core/info-button.ts';
 import type { ModEvent, PackageSnapshot, SourceId } from '../../core/types.ts';
 import type { Messages } from '../../i18n/index.ts';
 import { buildImmediate } from '../../render/immediate.ts';
@@ -50,6 +51,7 @@ async function showMod(deps: CommandDeps, messages: Messages, packageId: string,
     messages,
     storeEmojis: resolveStoreEmojis(deps.storeEmojis),
     ratatoskrEmoji: resolveRatatoskrEmoji(deps.ratatoskrEmoji),
+    infoButton: false,
     immediateTemplate: null,
     digestLineTemplate: null,
     optionalButtons: true,
@@ -79,12 +81,12 @@ export function createInfoAutocomplete(deps: CommandDeps): InteractionHandler {
   };
 }
 
-export function createModInfoCommand(deps: CommandDeps): InteractionHandler {
+/** The Info button under a message the bot sent: the same answer as `/info` for the mod named in the button. */
+export function createInfoButton(deps: CommandDeps): InteractionHandler {
   return async (interaction, ctx): Promise<InteractionResponse> => {
     const { messages } = ctx;
-    const targetId = interaction.data?.target_id;
-    const record = targetId === undefined ? null : await deps.store.getMessage(targetId);
-    if (record === null) return ephemeral(messages.infoMessageUnknown);
-    return showMod(deps, messages, record.packageId, [record.source]);
+    const mod = parseInfoButtonId(interaction.data?.custom_id ?? '', enabledSources(deps));
+    if (mod === null) return ephemeral(messages.unknownCommand);
+    return showMod(deps, messages, mod.packageId, [mod.source]);
   };
 }

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { AUTOCOMPLETE_MAX_RESULTS, AUTOCOMPLETE_MIN_PREFIX, AUTOCOMPLETE_OWNER_SCAN_LIMIT, CLOUDFLARE, OUTBOX_MAX_ATTEMPTS, TEMPLATE_MAX_CHARS } from '../core/constants.ts';
 import { eventId, outboxId, releaseKey } from '../core/ids.ts';
 import type { CommitBatch, Store } from '../core/ports.ts';
-import type { MessageRecord, ModEvent, ModThread, OutboxRow, PackageSnapshot, Subscription, SubscriptionTemplate } from '../core/types.ts';
+import type { ModEvent, ModThread, OutboxRow, PackageSnapshot, Subscription, SubscriptionTemplate } from '../core/types.ts';
 import { makeEvent, makeSnapshot, makeSubscription } from './fakes.ts';
 
 export interface StoreContractEnv {
@@ -977,58 +977,6 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
       });
     });
 
-    describe('message map', () => {
-      const message = (id: string, over: Partial<MessageRecord> = {}): MessageRecord => ({
-        messageId: id,
-        channelId: 'chan-1',
-        source: SOURCE,
-        packageId: 'Owner1-Mod1',
-        eventId: 'event-1',
-        createdAt: T0,
-        ...over,
-      });
-
-      it('returns null for an unknown message', async () => {
-        const { store } = await setup();
-        expect(await store.getMessage('missing')).toBeNull();
-      });
-
-      it('round-trips a record, with and without an event', async () => {
-        const { store } = await setup();
-        await store.putMessage(message('m1'));
-        await store.putMessage(message('m2', { eventId: null }));
-        expect(await store.getMessage('m1')).toEqual(message('m1'));
-        expect(await store.getMessage('m2')).toEqual(message('m2', { eventId: null }));
-      });
-
-      it('replaces the record when the same message is put again', async () => {
-        const { store } = await setup();
-        await store.putMessage(message('m1'));
-        await store.putMessage(message('m1', { packageId: 'Owner2-Mod2', createdAt: NOW }));
-        expect(await store.getMessage('m1')).toEqual(message('m1', { packageId: 'Owner2-Mod2', createdAt: NOW }));
-      });
-
-      it('purges records created before the cutoff and keeps the rest', async () => {
-        const { store } = await setup();
-        await store.putMessage(message('old', { createdAt: '2026-09-01T00:00:00.000Z' }));
-        await store.putMessage(message('edge', { createdAt: '2026-09-10T00:00:00.000Z' }));
-        await store.putMessage(message('new', { createdAt: NOW }));
-        expect(await store.purgeMessages('2026-09-10T00:00:00.000Z', 100)).toBe(1);
-        expect(await store.getMessage('old')).toBeNull();
-        expect(await store.getMessage('edge')).not.toBeNull();
-        expect(await store.getMessage('new')).not.toBeNull();
-      });
-
-      it('deletes at most `limit` records per call', async () => {
-        const { store } = await setup();
-        for (let i = 0; i < 5; i++) await store.putMessage(message(`m${i}`, { createdAt: '2026-09-01T00:00:00.000Z' }));
-        expect(await store.purgeMessages('2026-09-10T00:00:00.000Z', 2)).toBe(2);
-        expect(await store.purgeMessages('2026-09-10T00:00:00.000Z', 2)).toBe(2);
-        expect(await store.purgeMessages('2026-09-10T00:00:00.000Z', 2)).toBe(1);
-        expect(await store.purgeMessages('2026-09-10T00:00:00.000Z', 2)).toBe(0);
-      });
-    });
-
     describe('templates', () => {
       const botSub = (over: Partial<Subscription> = {}): Subscription => ({
         id: 'bot-1',
@@ -1328,17 +1276,6 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
         const heavy = Array.from({ length: AUTOCOMPLETE_OWNER_SCAN_LIMIT }, (_, i) => ({ owner: 'Aaa', name: `Mod${i}` }));
         await seed(store, [...heavy, { owner: 'Aab', name: 'Late' }]);
         expect(await store.searchOwners('Aa')).toEqual(['Aaa']);
-      });
-    });
-
-    describe('purgeMessages next to purgeDelivered', () => {
-      it('leaves the outbox alone', async () => {
-        const { store } = await setup();
-        const e = event(1);
-        await store.commit(batch([e], [row(SUB, e)]));
-        await store.putMessage({ messageId: 'm1', channelId: 'c', source: SOURCE, packageId: 'p', eventId: null, createdAt: '2026-01-01T00:00:00.000Z' });
-        await store.purgeMessages('2026-09-10T00:00:00.000Z', 10);
-        expect(await store.takeDue(NOW, 10)).toHaveLength(1);
       });
     });
 

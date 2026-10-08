@@ -2,6 +2,7 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { DISCORD } from '../core/constants.ts';
+import type { DiscordLinkButton } from '../core/types.ts';
 import { getMessages } from '../i18n/index.ts';
 import { makeEvent } from './__fixtures__/events.ts';
 import { buildActionRow, linkButtonUrl } from './components.ts';
@@ -80,7 +81,7 @@ describe('buildActionRow', () => {
         expect(built.type).toBe(1);
         expect(built.components.length).toBeGreaterThan(0);
         expect(built.components.length).toBeLessThanOrEqual(DISCORD.buttonsPerRow);
-        for (const b of built.components) {
+        for (const b of built.components as DiscordLinkButton[]) {
           expect(b.type).toBe(2);
           expect(b.style).toBe(5);
           expect(b.label.length).toBeGreaterThan(0);

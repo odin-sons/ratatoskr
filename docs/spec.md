@@ -538,8 +538,7 @@ allowance covers it and otherwise on the next one without spending an attempt. A
 thread younger than a minute that Discord reports as gone is not reset: the row
 retries with backoff. A subscription bound to one post whose post is gone fails
 delivery like any bad destination, unless the post is that young. Only
-`thread_per_mod` subscriptions write `mod_threads`; two of them in one channel that match the same mod share its thread and each posts its own copy there. `messages` rows are written
-for single-mod immediate messages and mod posts, never for a digest.
+`thread_per_mod` subscriptions write `mod_threads`; two of them in one channel that match the same mod share its thread and each posts its own copy there.
 
 A forum post costs one request; a message plus the thread opened on it, or a
 thread opened on an anchor plus the post into it, cost two; the per-tick send cap and the per-channel cap count requests. `/subscribe`
@@ -662,10 +661,12 @@ Channel and check that the subscription belongs to the place where they run.
 
 The default message template ends with an Info button whose `custom_id` is
 `info:<source>:<packageId>`; it is left out when that is longer than 100
-characters. Pressing it answers like `/info` for that mod. This replaces the "Mod
-info" message command and the `messages` table, so a custom template cannot break
-the lookup and no row is written per message. An admin who removes the button
-removes the lookup for that subscription; `/info` stays.
+characters. Pressing it answers like `/info` for that mod, to whoever presses it,
+and never shows an NSFW mod. Only a message the bot sends itself can carry the
+button, so a webhook message never has one. The button replaces the "Mod info"
+message command and the `messages` table, so a custom template cannot break the
+lookup and no row is written per message. An admin who removes the button removes
+the lookup for that subscription; `/info` stays.
 
 ## Volume
 

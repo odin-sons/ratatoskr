@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createExcludeCommand, createFilterAutocomplete, createFilterCommand, createIncludeCommand } from './commands/filter-edit.ts';
-import { createInfoAutocomplete, createInfoCommand, createModInfoCommand } from './commands/info.ts';
+import { INFO_BUTTON_PREFIX } from '../core/info-button.ts';
+import { createInfoAutocomplete, createInfoButton, createInfoCommand } from './commands/info.ts';
 import { createListCommand, createListPager, LIST_COMPONENT_PREFIX } from './commands/list.ts';
 import { createContinueCommand, createPauseCommand } from './commands/pause.ts';
 import { createSubscribeAutocomplete, createSubscribeCommand } from './commands/subscribe.ts';
 import { createUnsubscribeAutocomplete, createUnsubscribeCommand } from './commands/unsubscribe.ts';
 import type { CommandDeps } from './commands/deps.ts';
-import { INFO_COMMAND_NAME, MOD_INFO_COMMAND_NAME } from './definitions.ts';
+import { INFO_COMMAND_NAME } from './definitions.ts';
 import { createRegistry, type HandlerRegistry } from './router.ts';
 
 export { randomSubscriptionId, type CommandDeps } from './commands/deps.ts';
@@ -32,6 +33,6 @@ export function createCommandRegistry(deps: CommandDeps): HandlerRegistry {
   registry.components.set(LIST_COMPONENT_PREFIX, createListPager(deps));
   registry.commands.set(INFO_COMMAND_NAME, createInfoCommand(deps));
   registry.autocompletes.set(INFO_COMMAND_NAME, createInfoAutocomplete(deps));
-  registry.commands.set(MOD_INFO_COMMAND_NAME, createModInfoCommand(deps));
+  registry.components.set(INFO_BUTTON_PREFIX, createInfoButton(deps));
   return registry;
 }

@@ -9,11 +9,10 @@ import type { PackageSnapshot } from '../../core/types.ts';
 import { en } from '../../i18n/en.ts';
 import { ru } from '../../i18n/ru.ts';
 import { makeEvent, makeSnapshot } from '../../testing/fakes.ts';
-import { autocompleteOf, CHANNEL_ID, command, harness, inThread, interaction, THREAD_ID, type Harness } from './harness.ts';
+import { autocompleteOf, CHANNEL_ID, command, component, harness, inThread, THREAD_ID, type Harness } from './harness.ts';
 
 const THUNDERSTORE = 'thunderstore:valheim';
 const HEXIUM = 'hexium:valheim';
-const MESSAGE_ID = '923456789012345670';
 const NOBODY = { member: { permissions: '0', user: { id: '323456789012345678' } } };
 const EPHEMERAL_V2 = 64 | 32768;
 const state = (id: string) => ({ id, cursor: 'c', etag: null, bootstrapped: true, lastOkAt: null });
@@ -21,8 +20,6 @@ const state = (id: string) => ({ id, cursor: 'c', etag: null, bootstrapped: true
 type Options = NonNullable<Parameters<typeof harness>[0]>;
 type Create = (options?: Pick<Options, 'messages' | 'sources'>) => Harness<Store>;
 
-const modInfo = (targetId: string | undefined) =>
-  interaction({ data: { name: 'Mod info', type: 3, ...(targetId === undefined ? {} : { target_id: targetId }) }, ...NOBODY });
 const info = (options: Record<string, string> = {}, over: Record<string, unknown> = {}) => command('info', options, { ...NOBODY, ...over });
 
 const body = (response: { data?: Record<string, unknown> }): string => JSON.stringify(response.data?.components);
@@ -203,47 +200,52 @@ function suites(name: string, create: Create): void {
     });
   });
 
-  describe(`Mod info (${name})`, () => {
-    const record = { messageId: MESSAGE_ID, channelId: CHANNEL_ID, source: THUNDERSTORE, packageId: ID, eventId: null, createdAt: '2026-09-12T00:00:00.000Z' };
+  describe(`Info button (${name})`, () => {
+    const press = (customId: string, over: Record<string, unknown> = {}) => component(customId, { ...NOBODY, ...over });
+    const id = `info:${THUNDERSTORE}:${ID}`;
 
-    it('shows the mod behind a message of the message map, to a member without any permission', async () => {
+    it('shows the mod named in the button, to a member without any permission', async () => {
       const h = create();
       await seedMod(h.store);
-      await h.store.putMessage(record);
-      const response = await h.run(modInfo(MESSAGE_ID));
+      const response = await h.run(press(id));
       expect(response.data?.flags).toBe(EPHEMERAL_V2);
       expect(body(response)).toContain('Warfare');
       expect(body(response)).toContain('Fixed the sword');
     });
 
+    it('finds a source id that contains a colon among the configured sources', async () => {
+      const h = create();
+      await seedMod(h.store, { source: HEXIUM, packageId: 'hex-1', owner: 'Hex', name: 'Axe' });
+      expect(body(await h.run(press(`info:${HEXIUM}:hex-1`)))).toContain('Axe');
+    });
+
     it.each([
-      ['a message that is not in the map (too old, several mods or not mine)', MESSAGE_ID],
-      ['no target message at all', undefined],
-    ])('asks for /info on %s', async (_label, target) => {
+      ['a button of another source than the configured ones', `info:nexus:valheim:${ID}`],
+      ['a button without a mod', `info:${THUNDERSTORE}:`],
+      ['a button without a source', 'info:'],
+      ['a mangled id', 'info'],
+    ])('answers that it does not know %s', async (_label, customId) => {
       const h = create();
       await seedMod(h.store);
-      expect((await h.run(modInfo(target))).data).toMatchObject({ content: en.infoMessageUnknown, flags: 64 });
+      expect((await h.run(press(customId))).data).toMatchObject({ content: en.unknownCommand, flags: 64 });
     });
 
-    it('says the mod is unknown when the record outlived the mod', async () => {
+    it('says the mod is unknown when the message outlived the mod', async () => {
       const h = create();
-      await h.store.putMessage(record);
-      expect(String((await h.run(modInfo(MESSAGE_ID))).data?.content)).toContain('was not found');
+      expect(String((await h.run(press(id))).data?.content)).toContain('was not found');
     });
 
-    it('does not show an NSFW mod behind a message either', async () => {
+    it('does not show an NSFW mod behind a button either', async () => {
       const h = create();
       await seedMod(h.store, { isNsfw: true });
-      await h.store.putMessage(record);
-      expect(String((await h.run(modInfo(MESSAGE_ID))).data?.content)).toContain('was not found');
+      expect(String((await h.run(press(id))).data?.content)).toContain('was not found');
     });
 
     it('answers in the language of the deployment', async () => {
       const h = create({ messages: ru });
       await seedMod(h.store);
-      await h.store.putMessage(record);
-      expect(body(await h.run(modInfo(MESSAGE_ID)))).toContain('Изменения');
-      expect((await h.run(modInfo('923456789012345671'))).data?.content).toBe(ru.infoMessageUnknown);
+      expect(body(await h.run(press(id)))).toContain('Изменения');
+      expect((await h.run(press('info'))).data?.content).toBe(ru.unknownCommand);
     });
   });
 

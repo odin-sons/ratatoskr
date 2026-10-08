@@ -21,7 +21,7 @@ export function defaultImmediateSource(messages: Messages): string {
     `**${SECTION_EMOJI.categories} ${literal(messages.categories)}**`,
     '{categories}',
     '---',
-    '{buttons}',
+    '{buttons} {info_button}',
   ].join('\n');
 }
 

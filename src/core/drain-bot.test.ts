@@ -67,14 +67,11 @@ describe('drainOutbox: bot targets', () => {
     expect(h.store.pendingRows()).toEqual([]);
   });
 
-  it('sends an immediate message to the channel and records it, without a mod thread', async () => {
+  it('sends an immediate message to the channel, without a mod thread', async () => {
     const h = makeHarness();
-    const e = mod('Alpha');
-    await queue(h, makeBotSubscription(), [e]);
+    await queue(h, makeBotSubscription(), [mod('Alpha')]);
     await drain(h);
     expect(h.sender.calls[0]!.target).toEqual({ kind: 'bot', channelId: CHANNEL, threadId: null });
-    const messageId = (h.sender.results[0] as { messageId: string }).messageId;
-    expect(await h.store.getMessage(messageId)).toEqual({ messageId, channelId: CHANNEL, source: SOURCE, packageId: 'Owner-Alpha', eventId: e.id, createdAt: FIXED_NOW_ISO });
     expect(h.store.modThreads.size).toBe(0);
   });
 
@@ -87,13 +84,6 @@ describe('drainOutbox: bot targets', () => {
     expect(h.store.pendingRows()).toEqual([]);
   });
 
-  it('writes message rows only for immediate messages, never for a digest', async () => {
-    const h = makeHarness();
-    await queue(h, makeBotSubscription({ mode: 'digest' }), [mod('Alpha'), mod('Beta')]);
-    await drain(h);
-    expect(h.store.messages.size).toBe(0);
-  });
-
   it('a thread_per_mod subscription in digest mode sends a plain digest and writes no mod thread', async () => {
     const h = makeHarness();
     await queue(h, forum({ mode: 'digest' }), [mod('Alpha')]);
@@ -101,7 +91,6 @@ describe('drainOutbox: bot targets', () => {
     expect(h.sender.forumPosts).toEqual([]);
     expect(h.sender.calls).toHaveLength(1);
     expect(h.store.modThreads.size).toBe(0);
-    expect(h.store.messages.size).toBe(0);
   });
 
   it('leaves a bot subscription without a channel queued', async () => {
@@ -149,7 +138,6 @@ describe('drainOutbox: forum with thread_per_mod', () => {
     expect(h.sender.calls).toEqual([]);
     const saved = await h.store.getModThread(CHANNEL, SOURCE, 'Owner-Alpha');
     expect(saved).toMatchObject({ anchorMessageId: null, createdAt: FIXED_NOW_ISO });
-    expect([...h.store.messages.values()]).toEqual([expect.objectContaining({ channelId: saved!.threadId, packageId: 'Owner-Alpha', eventId: e.id })]);
     expect(h.store.pendingRows()).toEqual([]);
   });
 
@@ -168,8 +156,6 @@ describe('drainOutbox: forum with thread_per_mod', () => {
     await drain(h);
     expect(h.sender.forumPosts).toEqual([]);
     expect(h.sender.calls.map((c) => c.target)).toEqual([{ kind: 'bot', channelId: CHANNEL, threadId: OLD_THREAD }]);
-    const messageId = (h.sender.results[0] as { messageId: string }).messageId;
-    expect(await h.store.getMessage(messageId)).toMatchObject({ channelId: OLD_THREAD, eventId: e.id });
     expect((await h.store.getModThread(CHANNEL, SOURCE, 'Owner-Alpha'))!.createdAt).toBe('2026-09-01T00:00:00.000Z');
   });
 
@@ -208,7 +194,6 @@ describe('drainOutbox: text channel with thread_per_mod', () => {
     const mapped = (await h.store.getModThread(CHANNEL, SOURCE, 'Owner-Alpha'))!;
     expect(mapped).toMatchObject({ anchorMessageId: messageId, createdAt: FIXED_NOW_ISO });
     expect(mapped.threadId).not.toBe('');
-    expect(await h.store.getMessage(messageId)).toMatchObject({ channelId: CHANNEL });
     expect(report).toMatchObject({ sent: 1, failed: 0 });
     expect(h.store.pendingRows()).toEqual([]);
   });
@@ -542,13 +527,10 @@ describe('drainOutbox: writes after a successful send', () => {
     h.store.putModThread = async () => {
       throw new Error('D1 is down: secret-detail');
     };
-    h.store.putMessage = async () => {
-      throw new Error('D1 is down: secret-detail');
-    };
     const report = await drain(h);
     expect(report).toMatchObject({ sent: 1, failed: 0 });
     expect(h.store.pendingRows()).toEqual([]);
-    expect(warnings).toEqual(['outbox mapping write failed', 'outbox mapping write failed']);
+    expect(warnings).toEqual(['outbox mapping write failed']);
   });
 
   it('leaves the row queued when the thread lookup fails, so nothing is posted twice', async () => {

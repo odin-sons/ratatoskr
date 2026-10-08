@@ -9,8 +9,8 @@ const CHAT_COMMANDS = COMMAND_DEFINITIONS.filter((c): c is ChatCommandDefinition
 const NAME = /^[\p{Ll}\p{Lo}\p{N}_-]{1,32}$/u;
 
 describe('command definitions', () => {
-  it('describe subscribe, unsubscribe, pause, continue, filter, include, exclude, list, info and the Mod info message command', () => {
-    expect(COMMAND_DEFINITIONS.map((c) => c.name)).toEqual(['subscribe', 'unsubscribe', 'pause', 'continue', 'filter', 'include', 'exclude', 'list', 'info', 'Mod info']);
+  it('describe subscribe, unsubscribe, pause, continue, filter, include, exclude, list and info', () => {
+    expect(COMMAND_DEFINITIONS.map((c) => c.name)).toEqual(['subscribe', 'unsubscribe', 'pause', 'continue', 'filter', 'include', 'exclude', 'list', 'info']);
   });
 
   it('are served by the registry: every command, and every autocomplete option, has a handler', () => {
@@ -20,6 +20,7 @@ describe('command definitions', () => {
       if (definition.options?.some((o) => o.autocomplete)) expect(registry.autocompletes.has(definition.name), definition.name).toBe(true);
     }
     expect(registry.components.has('list')).toBe(true);
+    expect(registry.components.has('info')).toBe(true);
   });
 
   it.each(CHAT_COMMANDS.map((c) => [c.name, c] as const))('%s keeps to the Discord limits', (_name, command) => {
@@ -44,7 +45,7 @@ describe('command definitions', () => {
   });
 
   it('restrict the commands that change subscriptions to Manage Channel and leave the read-only ones open', () => {
-    const open = ['info', 'Mod info'];
+    const open = ['info'];
     for (const command of COMMAND_DEFINITIONS) {
       expect(command.default_member_permissions, command.name).toBe(open.includes(command.name) ? undefined : '16');
       expect(Object.hasOwn(command, 'default_member_permissions'), command.name).toBe(!open.includes(command.name));
@@ -55,13 +56,10 @@ describe('command definitions', () => {
     for (const command of COMMAND_DEFINITIONS) expect(command.dm_permission).toBe(false);
   });
 
-  it('give info an optional autocompleting mod and register Mod info as a nameable message command', () => {
+  it('give info an optional autocompleting mod', () => {
     const info = CHAT_COMMANDS.find((c) => c.name === 'info')!;
     expect(info.options).toEqual([expect.objectContaining({ name: 'mod', autocomplete: true, type: OPTION_TYPE.string })]);
     expect(info.options![0]!.required).toBeUndefined();
-    const modInfo = COMMAND_DEFINITIONS.find((c) => c.name === 'Mod info')!;
-    expect(modInfo).toEqual({ name: 'Mod info', description: '', type: 3, dm_permission: false });
-    expect(modInfo.name.length).toBeLessThanOrEqual(DISCORD_INTERACTION.commandNameMax);
   });
 
   it('give subscribe the documented options, with autocomplete on owner and mod and fixed choices on source, kind and mode', () => {

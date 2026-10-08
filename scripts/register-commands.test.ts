@@ -81,8 +81,9 @@ describe('the script', () => {
     expect(result.status).toBe(0);
     const printed = JSON.parse(result.stdout) as { name: string; type: number; default_member_permissions?: string }[];
     expect(printed).toEqual(JSON.parse(JSON.stringify(COMMAND_DEFINITIONS)));
-    expect(printed.map((c) => [c.name, c.type])).toEqual(expect.arrayContaining([['info', 1], ['Mod info', 3]]));
-    expect(printed.find((c) => c.name === 'Mod info')).not.toHaveProperty('default_member_permissions');
+    expect(printed.map((c) => [c.name, c.type])).toEqual(expect.arrayContaining([['info', 1]]));
+    expect(printed.find((c) => c.name === 'info')).not.toHaveProperty('default_member_permissions');
+    expect(printed.some((c) => c.name === 'Mod info')).toBe(false);
   });
 
   it('exits non-zero without the credentials, saying which are needed and nothing secret', () => {

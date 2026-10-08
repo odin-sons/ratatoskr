@@ -5,7 +5,6 @@ import type { CommitBatch, EventDetails, Store } from '../core/ports.ts';
 import type {
   AlertState,
   DueDelivery,
-  MessageRecord,
   ModEvent,
   ModThread,
   OutboxRow,
@@ -42,7 +41,6 @@ export class MemoryStore implements Store {
   readonly alertStates = new Map<string, AlertState>();
   readonly modThreads = new Map<string, ModThread>();
   readonly templates = new Map<string, SubscriptionTemplate>();
-  readonly messages = new Map<string, MessageRecord>();
 
   private readonly pairs = new Set<string>();
   private seq = 0;
@@ -203,26 +201,6 @@ export class MemoryStore implements Store {
 
   async deleteTemplate(subscriptionId: string, kind: TemplateKind): Promise<boolean> {
     return this.templates.delete(templateKey(subscriptionId, kind));
-  }
-
-  async putMessage(message: MessageRecord): Promise<void> {
-    this.messages.set(message.messageId, { ...message });
-  }
-
-  async getMessage(messageId: string): Promise<MessageRecord | null> {
-    const message = this.messages.get(messageId);
-    return message ? { ...message } : null;
-  }
-
-  async purgeMessages(olderThanIso: string, limit: number): Promise<number> {
-    let purged = 0;
-    for (const [id, message] of this.messages) {
-      if (purged >= limit) break;
-      if (message.createdAt >= olderThanIso) continue;
-      this.messages.delete(id);
-      purged += 1;
-    }
-    return purged;
   }
 
   async searchPackages(prefix: string, options: { sfwOnly?: boolean } = {}): Promise<PackageMatch[]> {

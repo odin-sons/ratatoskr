@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { FakeAdapter, FIXED_NOW_ISO, makeEvent, makeSnapshot, makeSubscription, okPoll } from '../testing/fakes.ts';
 import { makeHarness, type Harness } from '../testing/harness.ts';
-import { CADENCE, DELIVERED_RETENTION_DAYS, MESSAGE_PURGE_BATCH, MESSAGE_RETENTION_DAYS, OUTBOX_PURGE_BATCH } from './constants.ts';
+import { CADENCE, DELIVERED_RETENTION_DAYS, OUTBOX_PURGE_BATCH } from './constants.ts';
 import { eventId, outboxId } from './ids.ts';
 import { runReconcile, runTick } from './tick.ts';
 import type { PackageSnapshot } from './types.ts';
@@ -233,66 +233,6 @@ describe('runReconcile: purge of delivered rows', () => {
     } finally {
       warn.mockRestore();
     }
-  });
-
-  describe('bot message records', () => {
-    const record = (messageId: string, createdAtMs: number) => ({
-      messageId,
-      channelId: 'chan-1',
-      source: TS,
-      packageId: 'Own-Mod',
-      eventId: null,
-      createdAt: new Date(createdAtMs).toISOString(),
-    });
-
-    it('deletes records older than the message retention and keeps newer ones', async () => {
-      const h = makeHarness();
-      await h.store.putMessage(record('old', scheduled - (MESSAGE_RETENTION_DAYS + 1) * DAY_MS));
-      await h.store.putMessage(record('recent', scheduled - DAY_MS));
-      await runReconcile(h.deps, scheduled, 0);
-      expect(await h.store.getMessage('old')).toBeNull();
-      expect(await h.store.getMessage('recent')).not.toBeNull();
-    });
-
-    it('asks the store to delete at most one bounded batch', async () => {
-      const h = makeHarness();
-      const calls: [string, number][] = [];
-      h.store.purgeMessages = async (olderThan, limit) => {
-        calls.push([olderThan, limit]);
-        return 0;
-      };
-      await runReconcile(h.deps, scheduled, 0);
-      expect(calls).toEqual([[new Date(scheduled - MESSAGE_RETENTION_DAYS * DAY_MS).toISOString(), MESSAGE_PURGE_BATCH]]);
-    });
-
-    it('still purges delivered outbox rows when the message purge throws, and logs it without urls', async () => {
-      const h = makeHarness();
-      await withDeliveredRow(h, 'Old', scheduled - (DELIVERED_RETENTION_DAYS + 1) * DAY_MS);
-      h.store.purgeMessages = async () => {
-        throw new Error('D1 error near HTTPS://x.invalid/q');
-      };
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      try {
-        expect((await runReconcile(h.deps, scheduled, 0)).purged).toBe(1);
-        const lines = warn.mock.calls.map((c) => c.map(String).join(' '));
-        expect(lines).toHaveLength(1);
-        expect(lines[0]).toContain('message');
-        expect(lines[0]).not.toMatch(/x.invalid/i);
-      } finally {
-        warn.mockRestore();
-      }
-    });
-
-    it('never purges on a tick run', async () => {
-      const h = makeHarness();
-      let called = false;
-      h.store.purgeMessages = async () => {
-        called = true;
-        return 0;
-      };
-      await runTick(h.deps, scheduled);
-      expect(called).toBe(false);
-    });
   });
 
   it('never purges on a tick run', async () => {

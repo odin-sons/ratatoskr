@@ -20,7 +20,7 @@ import { targetKey } from './send-target.ts';
 import { sanitizeLogText } from './report.ts';
 import type { Language } from '../i18n/index.ts';
 import { hasWebhook } from './types.ts';
-import type { DiscordMessage, DueDelivery, MessageRecord, ModEvent, ModThread, OutboxRow, StoreEmojis, Subscription } from './types.ts';
+import type { DiscordMessage, DueDelivery, ModEvent, ModThread, OutboxRow, StoreEmojis, Subscription } from './types.ts';
 
 /** Presentation settings handed to every render call. */
 export interface RenderContext {
@@ -34,6 +34,8 @@ export interface RenderContext {
   optionalButtons?: boolean;
   /** `false` never shows the Changelog block, however long or short the excerpt. */
   includeChangelog?: boolean;
+  /** `true` adds the Info button, which only a message sent by the bot itself may carry. */
+  infoButton?: boolean;
   /** Source text of the template of the message of one event; the default template when absent. */
   immediateTemplate?: string;
   /** Source text of the template of the line of a mod in a digest; the default one when absent. */
@@ -306,6 +308,7 @@ function renderContext(drain: Drain, sub: Subscription): RenderContext {
   if (deps.ratatoskrEmoji !== undefined) context.ratatoskrEmoji = deps.ratatoskrEmoji;
   if (deps.locale !== undefined) context.locale = deps.locale;
   if (sub.filter.includeChangelog === false) context.includeChangelog = false;
+  if (sub.transport === 'bot') context.infoButton = true;
   const templates = drain.templates.get(sub.id);
   if (templates?.immediate !== undefined) context.immediateTemplate = templates.immediate;
   if (templates?.digestLine !== undefined) context.digestLineTemplate = templates.digestLine;
@@ -350,10 +353,6 @@ async function deliverImmediate(drain: Drain, sub: Subscription, target: SendTar
     }
   }
   if (failure === null) {
-    const landed = sent[0];
-    if (landed?.ok === true && landed.messageId !== undefined) {
-      await writeMapping(() => drain.deps.store.putMessage(messageRecord(drain, entry.delivery.event, landed.messageId!, landed.channelId ?? threadOrChannel(target))));
-    }
     await markDelivered(drain, entry.rows.map((r) => r.id));
   } else {
     const soft = softenFreshGone(drain, target, failure);
@@ -589,22 +588,6 @@ function threadName(event: ModEvent): string {
   return Array.from(name).slice(0, DISCORD_THREAD_NAME_MAX).join('');
 }
 
-function threadOrChannel(target: SendTarget): string {
-  if (target.kind === 'bot') return target.threadId ? target.threadId : target.channelId;
-  return '';
-}
-
-function messageRecord(drain: Drain, event: ModEvent, messageId: string, channelId: string): MessageRecord {
-  return {
-    messageId,
-    channelId,
-    source: event.pkg.source,
-    packageId: event.pkg.packageId,
-    eventId: event.id,
-    createdAt: drain.deps.now.toISOString(),
-  };
-}
-
 /** A failed map write only costs a later duplicate post; the message itself exists. */
 async function writeMapping(write: () => Promise<void>): Promise<void> {
   try {
@@ -700,9 +683,8 @@ async function runRoute(
     const res = await request<ForumPostResult>(drain, key, () => sender.createForumPost?.(channelId, threadName(event), message) ?? Promise.resolve(UNSUPPORTED));
     if (!res.result.ok) return fail({ result: res.result, attempted: res.attempted });
     drain.report.sent += 1;
-    const { threadId, messageId } = res.result;
+    const { threadId } = res.result;
     await writeMapping(() => store.putModThread({ channelId, source, packageId, threadId, anchorMessageId: null, createdAt: nowIso }));
-    await writeMapping(() => store.putMessage(messageRecord(drain, event, messageId, threadId)));
     return { ok: true };
   }
 
@@ -715,7 +697,6 @@ async function runRoute(
     if (messageId !== undefined) {
       const threadId = allowance(drain, key) >= 1 ? await openThreadOn(drain, target, event, messageId) : '';
       await writeMapping(() => store.putModThread({ channelId, source, packageId, threadId, anchorMessageId: messageId, createdAt: nowIso }));
-      await writeMapping(() => store.putMessage(messageRecord(drain, event, messageId, landed.channelId ?? channelId)));
     }
     return { ok: true };
   }
@@ -742,9 +723,6 @@ async function runRoute(
     return fail(failure, route.op === 'thread' && !failure.result.retryable && failure.result.gone === true);
   }
   drain.report.sent += 1;
-  const landed = res.result;
-  const messageId = landed.messageId;
-  if (messageId !== undefined) await writeMapping(() => store.putMessage(messageRecord(drain, event, messageId, landed.channelId ?? threadId)));
   return { ok: true };
 }
 

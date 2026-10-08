@@ -15,6 +15,7 @@ export const ru: Messages = {
   categories: 'Категории',
   fullChangelog: 'Полный список изменений',
   modPage: 'Страница мода',
+  infoButton: 'Инфо',
   download: 'Скачать',
   website: 'Сайт',
   updates: (count) => `${count} ${pick(russianPlural(count), { one: 'обновление', few: 'обновления', many: 'обновлений', other: 'обновления' })}`,
@@ -87,6 +88,5 @@ export const ru: Messages = {
   filterShowExcluded: (list) => `Никогда: ${list}`,
   filterShowFlags: (adult, changelog) => `Контент 18+: ${adult}, список изменений: ${changelog}`,
   infoNeedsMod: 'Выберите мод или запустите команду в ветке мода.',
-  infoMessageUnknown: 'Не могу понять, о каком моде это сообщение: оно слишком старое, содержит несколько модов или не моё. Используйте /info и выберите мод.',
   byteUnits: ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'],
 };

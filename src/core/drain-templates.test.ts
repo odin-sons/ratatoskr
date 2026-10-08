@@ -150,4 +150,16 @@ describe('drainOutbox: message templates', () => {
     expect(text).toContain('Alpha');
     expect(text).toContain('Beta');
   });
+
+  it('adds the Info button to the message of a bot subscription and never to a webhook message', async () => {
+    const h = makeHarness();
+    await queue(h, makeBotSubscription({ id: 'bot', mode: 'immediate' }), [mod('Alpha')]);
+    await queue(h, makeSubscription({ id: 'hook', mode: 'immediate' }), [mod('Beta')]);
+    await drain(h);
+    const rowOf = (payload: DiscordMessage) => ((payload.components![0] as DiscordContainer).components.at(-1) as { components: { custom_id?: string }[] }).components;
+    const bot = h.sender.calls.find((c) => c.target.kind === 'bot')!;
+    const hook = h.sender.calls.find((c) => c.target.kind === 'webhook')!;
+    expect(rowOf(bot.payload).at(-1)!.custom_id).toBe(`info:${SOURCE}:Owner-Alpha`);
+    expect(rowOf(hook.payload).some((button) => button.custom_id !== undefined)).toBe(false);
+  });
 });

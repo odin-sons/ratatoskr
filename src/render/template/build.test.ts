@@ -217,3 +217,35 @@ describe('any template', () => {
     );
   });
 });
+
+describe('the Info button', () => {
+  const lastRow = (message: DiscordMessage) => container(message).components.at(-1) as { type: number; components: { label: string; custom_id?: string; url?: string }[] };
+  const event = rich({ url: 'https://example.com/mod' });
+
+  it('is the last button of the default message of a bot, and only there', () => {
+    const asBot = lastRow(render(null, event, ctxOf({ infoButton: true })).message);
+    expect(asBot.components.at(-1)).toMatchObject({ type: 2, style: 2, label: 'Info', custom_id: `info:${event.pkg.source}:${event.pkg.packageId}` });
+    const asWebhook = lastRow(render(null, event, ctxOf()).message);
+    expect(asWebhook.components.every((button) => button.url !== undefined)).toBe(true);
+  });
+
+  it('stays when the optional buttons are left out, and is localized', () => {
+    const reduced = lastRow(render(null, event, ctxOf({ infoButton: true, optionalButtons: false })).message);
+    expect(reduced.components.map((button) => button.label)).toEqual(['Mod page', 'Info']);
+    expect(lastRow(render(null, event, ctxOf({ infoButton: true, locale: 'ru' })).message).components.at(-1)!.label).toBe('Инфо');
+  });
+
+  it('can be placed anywhere by a template, and is left out when the mod id is too long for a custom_id', () => {
+    const custom = lastRow(render('{owner}\n---\n{info_button}', event, ctxOf({ infoButton: true })).message);
+    expect(custom.components).toHaveLength(1);
+    const long = rich({ packageId: `Owner-${'x'.repeat(120)}`, url: 'https://example.com/mod' });
+    const row = lastRow(render(null, long, ctxOf({ infoButton: true })).message);
+    expect(row.components.some((button) => button.custom_id !== undefined)).toBe(false);
+    expect(assertWithinLimits(render(null, long, ctxOf({ infoButton: true })).message)).toEqual([]);
+  });
+
+  it('is not part of a message from a template without {info_button} or when the context says no', () => {
+    const none = render('{owner}\n---\n{buttons}', event, ctxOf({ infoButton: true })).message;
+    expect(lastRow(none).components.some((button) => button.custom_id !== undefined)).toBe(false);
+  });
+});

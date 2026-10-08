@@ -17,6 +17,8 @@ export interface RenderSettings {
   /** `false` never shows the Changelog block, however long or short the excerpt (default `true`). */
   includeChangelog?: boolean;
   /** Template of the message of one event; the default one when absent. */
+  /** `true` adds the Info button, which only a message sent by the bot itself may carry. */
+  infoButton?: boolean;
   immediateTemplate?: ParsedTemplate | string | null;
   /** Template of the line of a mod in a digest, used at level L0; the default one when absent. */
   digestLineTemplate?: ParsedTemplate | string | null;
@@ -29,6 +31,7 @@ export interface Ctx {
   ratatoskrEmoji: string | null;
   optionalButtons: boolean;
   includeChangelog: boolean;
+  infoButton: boolean;
   immediateTemplate: ParsedTemplate | null;
   digestLineTemplate: ParsedTemplate | null;
 }
@@ -60,6 +63,7 @@ export function makeCtx(settings: RenderSettings): Ctx {
     ratatoskrEmoji: resolveRatatoskrEmoji(settings.ratatoskrEmoji),
     optionalButtons: settings.optionalButtons !== false,
     includeChangelog: settings.includeChangelog !== false,
+    infoButton: settings.infoButton === true,
     immediateTemplate: resolveTemplate(settings.immediateTemplate),
     digestLineTemplate: resolveTemplate(settings.digestLineTemplate),
   };

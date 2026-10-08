@@ -35,7 +35,7 @@ const headerLines = (msg: DiscordMessage): string[] => headerText(msg).split('\n
 /** The action row's buttons, or `null` when the message has none (mod page, download and website were all invalid). */
 const buttons = (msg: DiscordMessage): DiscordLinkButton[] | null => {
   const row = blocks(msg).at(-1)!;
-  return row.type === 1 ? row.components : null;
+  return row.type === 1 ? (row.components as DiscordLinkButton[]) : null;
 };
 /** The trailing subtext block: a top-level sibling of the container, outside its coloured bar. */
 const sourceSubtext = (msg: DiscordMessage): string => (msg.components!.at(-1) as { type: 10; content: string }).content;

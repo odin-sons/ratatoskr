@@ -15,6 +15,7 @@ export const en: Messages = {
   categories: 'Categories',
   fullChangelog: 'Full changelog',
   modPage: 'Mod page',
+  infoButton: 'Info',
   download: 'Download',
   website: 'Website',
   updates: (count) => `${count} ${pick(englishPlural(count), { one: 'update', other: 'updates' })}`,
@@ -87,6 +88,5 @@ export const en: Messages = {
   filterShowExcluded: (list) => `Never: ${list}`,
   filterShowFlags: (adult, changelog) => `Adult content: ${adult}, changelog: ${changelog}`,
   infoNeedsMod: 'Pick a mod, or run this command inside a mod thread.',
-  infoMessageUnknown: 'I cannot tell which mod this message is about: it is too old, covers several mods or is not mine. Use /info and pick the mod.',
   byteUnits: ['B', 'KB', 'MB', 'GB', 'TB'],
 };

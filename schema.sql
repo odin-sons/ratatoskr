@@ -101,17 +101,6 @@ CREATE TABLE IF NOT EXISTS templates (
   PRIMARY KEY (subscription_id, kind)
 ) WITHOUT ROWID;
 
--- Bot messages about one mod; purged after 7 days by the reconcile cron.
-CREATE TABLE IF NOT EXISTS messages (
-  message_id TEXT PRIMARY KEY,
-  channel_id TEXT NOT NULL,
-  source TEXT NOT NULL,
-  package_id TEXT NOT NULL,
-  event_id TEXT,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_messages_created ON messages (created_at);
-
 CREATE TABLE IF NOT EXISTS outbox (
   id TEXT PRIMARY KEY,
   subscription_id TEXT NOT NULL,

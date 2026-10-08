@@ -57,7 +57,6 @@ describe('worst-case D1 writes of the bot tables', () => {
   // Assumption: no measurement exists yet.
   const SUBSCRIPTION_EDITS_PER_DAY = 500;
 
-  const messageWrites = SENDS_PER_DAY * writesPerRow('messages') * 2;
   const NEW_MODS_PER_DAY = 50;
   const GUILDS_IN_SPEC_VOLUME = 2;
   const THREAD_CHANNELS = GUILDS_IN_SPEC_VOLUME * MAX_SUBSCRIPTIONS_PER_GUILD;
@@ -71,15 +70,9 @@ describe('worst-case D1 writes of the bot tables', () => {
   const templateWrites = TEMPLATE_EDITS_PER_DAY * writesPerRow('templates');
 
   it('counts the indexes the schema really has', () => {
-    expect(writesPerRow('messages')).toBe(3);
     expect(writesPerRow('mod_threads')).toBe(3);
     expect(writesPerRow('packages')).toBe(4);
     expect(writesPerRow('templates')).toBeLessThanOrEqual(2);
-  });
-
-  it('each send writes one message record and the purge deletes it again', () => {
-    expect(messageWrites).toBe(SENDS_PER_DAY * 6);
-    expect(messageWrites).toBeLessThanOrEqual(D1_FREE.rowsWrittenPerDay / 2);
   });
 
   it('a thread per new mod and thread channel stays within a sixth of the daily row-write limit', () => {
@@ -87,8 +80,8 @@ describe('worst-case D1 writes of the bot tables', () => {
     expect(threadWrites).toBeLessThanOrEqual(D1_FREE.rowsWrittenPerDay / 6);
   });
 
-  it('the two package indexes, the messages, the threads and the subscription edits on top of the measured writes stay within the limit', () => {
-    const total = MEASURED_WRITES_PER_DAY + packageIndexWrites + messageWrites + threadWrites + subscriptionWrites + templateWrites;
+  it('the two package indexes, the threads, the subscription and template edits on top of the measured writes stay within the limit', () => {
+    const total = MEASURED_WRITES_PER_DAY + packageIndexWrites + threadWrites + subscriptionWrites + templateWrites;
     expect(total).toBeLessThanOrEqual(D1_FREE.rowsWrittenPerDay);
   });
 });

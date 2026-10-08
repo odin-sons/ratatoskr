@@ -753,9 +753,6 @@ describe('D1 adapter', () => {
       await spy.deleteTemplate('bot1', 'immediate');
       await spy.getModThreadByThreadId('chan-1', 't1');
       await spy.deleteModThread('chan-1', SOURCE, 'Owner-Name');
-      await spy.putMessage({ messageId: 'm1', channelId: 'chan-1', source: SOURCE, packageId: 'Owner-Name', eventId: e.id, createdAt: '2026-09-19T00:00:00.000Z' });
-      await spy.getMessage('m1');
-      await spy.purgeMessages('2026-09-20T00:00:00.000Z', 10);
       await spy.searchPackages('Na');
       await spy.searchPackages('Na', { sfwOnly: true });
       await spy.searchOwners('Ow');
@@ -875,22 +872,15 @@ describe('D1 adapter', () => {
       expect(planOf(shim.preparedSql.find((q) => q.endsWith('WHERE guild_id = ?'))!, 'guild-1').some((d) => d.includes('idx_subscriptions_guild'))).toBe(true);
     });
 
-    it('purgeMessages deletes through the created_at index', async () => {
-      await store.purgeMessages('2026-09-20T00:00:00.000Z', 10);
-      const plan = planOf(shim.preparedSql.find((q) => q.startsWith('DELETE FROM messages'))!, '2026-09-20T00:00:00.000Z', 10);
-      expect(plan.some((d) => d.includes('idx_messages_created'))).toBe(true);
-    });
-
     it('deleteSubscription finds the outbox rows through the (subscription, event) unique index', async () => {
       await store.deleteSubscription('sub1');
       const plan = planOf(shim.preparedSql.find((q) => q.startsWith('DELETE FROM outbox WHERE subscription_id'))!, 'sub1');
       expect(plan.some((d) => d.includes('SEARCH') && d.includes('autoindex'))).toBe(true);
     });
 
-    it('mod thread and message lookups go through their primary keys', async () => {
+    it('the mod thread lookup goes through its primary key', async () => {
       await store.getModThread('c', SOURCE, 'p');
-      await store.getMessage('m');
-      for (const sql of shim.preparedSql.filter((q) => q.includes('FROM mod_threads') || q.includes('FROM messages WHERE message_id = ?'))) {
+      for (const sql of shim.preparedSql.filter((q) => q.includes('FROM mod_threads'))) {
         const plan = planOf(sql, ...Array.from({ length: (sql.match(/\?/g) ?? []).length }, () => 'x'));
         expect(plan.some((d) => d.startsWith('SEARCH') && d.includes('autoindex'))).toBe(true);
       }

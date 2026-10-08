@@ -16,7 +16,6 @@ import type {
   DeliveryMode,
   DueDelivery,
   EventKind,
-  MessageRecord,
   ModEvent,
   ModThread,
   PackageMatch,
@@ -110,15 +109,6 @@ interface ModThreadCols {
   created_at: string;
 }
 
-interface MessageCols {
-  message_id: string;
-  channel_id: string;
-  source: string;
-  package_id: string;
-  event_id: string | null;
-  created_at: string;
-}
-
 interface OutboxCols {
   id: string;
   subscription_id: string;
@@ -205,7 +195,6 @@ const SUBSCRIPTION_READ_COLUMNS: readonly (keyof SubscriptionCols)[] = [
   'channel_kind',
 ];
 const MOD_THREAD_COLUMNS = ['channel_id', 'source', 'package_id', 'thread_id', 'anchor_message_id', 'created_at'] as const satisfies readonly (keyof ModThreadCols)[];
-const MESSAGE_COLUMNS = ['message_id', 'channel_id', 'source', 'package_id', 'event_id', 'created_at'] as const satisfies readonly (keyof MessageCols)[];
 
 function selectColumns(table: string, alias: string, columns: readonly string[]): string {
   return columns.map((c) => `${table}.${c} AS ${alias}_${c}`).join(', ');
@@ -237,12 +226,9 @@ const SQL_SUBSCRIPTION_EXISTS = 'SELECT id FROM subscriptions WHERE id = ?';
 const SQL_GET_MOD_THREAD = `SELECT ${MOD_THREAD_COLUMNS.join(', ')} FROM mod_threads WHERE channel_id = ? AND source = ? AND package_id = ?`;
 const SQL_PUT_MOD_THREAD = `INSERT INTO mod_threads (${MOD_THREAD_COLUMNS.join(', ')}) VALUES (${placeholders(MOD_THREAD_COLUMNS.length)}) ON CONFLICT (channel_id, source, package_id) DO UPDATE SET thread_id = excluded.thread_id, anchor_message_id = excluded.anchor_message_id, created_at = excluded.created_at`;
 const SQL_DELETE_MOD_THREAD = 'DELETE FROM mod_threads WHERE channel_id = ? AND source = ? AND package_id = ?';
-const SQL_GET_MESSAGE = `SELECT ${MESSAGE_COLUMNS.join(', ')} FROM messages WHERE message_id = ?`;
-const SQL_PUT_MESSAGE = `INSERT INTO messages (${MESSAGE_COLUMNS.join(', ')}) VALUES (${placeholders(MESSAGE_COLUMNS.length)}) ON CONFLICT (message_id) DO UPDATE SET channel_id = excluded.channel_id, source = excluded.source, package_id = excluded.package_id, event_id = excluded.event_id, created_at = excluded.created_at`;
 const SQL_GET_MOD_THREAD_BY_THREAD = `SELECT ${MOD_THREAD_COLUMNS.join(', ')} FROM mod_threads WHERE channel_id = ? AND thread_id = ? LIMIT 1`;
 const sqlPackagesById = (sources: number): string => `SELECT ${PACKAGE_READ_COLUMNS.join(', ')} FROM packages WHERE source IN (${placeholders(sources)}) AND package_id = ?`;
 const SQL_EVENT_BY_ID = `SELECT ${EVENT_JOIN_SELECT} FROM events e ${EVENT_JOIN_PACKAGES} WHERE e.id = ?`;
-const SQL_PURGE_MESSAGES = 'DELETE FROM messages WHERE message_id IN (SELECT message_id FROM messages WHERE created_at < ? LIMIT ?)';
 const SQL_SEARCH_PACKAGES = 'SELECT source, package_id, owner, name FROM packages WHERE name COLLATE NOCASE >= ? AND name COLLATE NOCASE < ? ORDER BY name COLLATE NOCASE LIMIT ?';
 const SQL_SEARCH_PACKAGES_SFW = 'SELECT source, package_id, owner, name FROM packages WHERE name COLLATE NOCASE >= ? AND name COLLATE NOCASE < ? AND is_nsfw = 0 ORDER BY name COLLATE NOCASE LIMIT ?';
 const sqlPackageExists = (sources: number): string => `SELECT 1 AS found FROM packages WHERE source IN (${placeholders(sources)}) AND package_id = ? LIMIT 1`;
@@ -507,31 +493,6 @@ export class D1Store implements Store {
   async deleteTemplate(subscriptionId: string, kind: TemplateKind): Promise<boolean> {
     const result = await this.db.prepare(SQL_DELETE_TEMPLATE).bind(subscriptionId, kind).run();
     return result.meta.changes > 0;
-  }
-
-  async putMessage(message: MessageRecord): Promise<void> {
-    await this.db
-      .prepare(SQL_PUT_MESSAGE)
-      .bind(message.messageId, message.channelId, message.source, message.packageId, message.eventId, message.createdAt)
-      .run();
-  }
-
-  async getMessage(messageId: string): Promise<MessageRecord | null> {
-    const row = await this.db.prepare(SQL_GET_MESSAGE).bind(messageId).first<MessageCols>();
-    if (row === null) return null;
-    return {
-      messageId: row.message_id,
-      channelId: row.channel_id,
-      source: row.source,
-      packageId: row.package_id,
-      eventId: row.event_id,
-      createdAt: row.created_at,
-    };
-  }
-
-  async purgeMessages(olderThanIso: string, limit: number): Promise<number> {
-    const result = await this.db.prepare(SQL_PURGE_MESSAGES).bind(olderThanIso, limit).run();
-    return result.meta.changes;
   }
 
   async searchPackages(prefix: string, options: { sfwOnly?: boolean } = {}): Promise<PackageMatch[]> {

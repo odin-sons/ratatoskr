@@ -385,10 +385,11 @@ describe('schema upgrade from a database without the bot columns of subscription
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
     expect(indexNames(shim)).toEqual(
-      expect.arrayContaining(['idx_subscriptions_enabled', 'idx_subscriptions_channel', 'idx_subscriptions_guild', 'idx_packages_owner', 'idx_packages_name', 'idx_messages_created']),
+      expect.arrayContaining(['idx_subscriptions_enabled', 'idx_subscriptions_channel', 'idx_subscriptions_guild', 'idx_packages_owner', 'idx_packages_name']),
     );
     const tables = (shim.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((r) => r.name);
-    expect(tables).toEqual(expect.arrayContaining(['mod_threads', 'messages']));
+    expect(tables).toEqual(expect.arrayContaining(['mod_threads']));
+    expect(tables).not.toContain('messages');
     expect(tables).not.toContain('subscriptions_new');
   });
 

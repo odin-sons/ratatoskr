@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { DISCORD } from '../core/constants.ts';
-import type { DiscordActionRow, DiscordContainer, DiscordEmbed, DiscordLinkButton, DiscordMessage, DiscordThumbnail, DiscordTopComponent } from '../core/types.ts';
+import type { DiscordActionRow, DiscordButton, DiscordContainer, DiscordEmbed, DiscordMessage, DiscordThumbnail, DiscordTopComponent } from '../core/types.ts';
 
 type Nested = DiscordTopComponent | DiscordContainer['components'][number];
 
@@ -18,7 +18,7 @@ export function measureMessage(msg: DiscordMessage): number {
   return total;
 }
 
-type Visited = Nested | DiscordLinkButton | DiscordThumbnail;
+type Visited = Nested | DiscordButton | DiscordThumbnail;
 
 function walk(components: readonly Nested[], visit: (component: Visited) => void): void {
   for (const component of components) {
@@ -99,9 +99,14 @@ function checkRow(at: string, row: DiscordActionRow, over: (label: string, actua
   row.components.forEach((button, j) => {
     const where = `${at}.components[${j}]`;
     over(`${where}.label`, button.label.length, DISCORD.buttonLabelMax);
-    over(`${where}.url`, button.url.length, DISCORD.buttonUrlMax);
     if (button.label.length === 0) errors.push(`${where}.label is empty`);
-    if (!/^https?:\/\//.test(button.url)) errors.push(`${where}.url must be http(s)`);
+    if ('custom_id' in button) {
+      over(`${where}.custom_id`, button.custom_id.length, DISCORD.customIdMax);
+      if (button.custom_id.length === 0) errors.push(`${where}.custom_id is empty`);
+    } else {
+      over(`${where}.url`, button.url.length, DISCORD.buttonUrlMax);
+      if (!/^https?:\/\//.test(button.url)) errors.push(`${where}.url must be http(s)`);
+    }
     if (button.emoji !== undefined && button.emoji.name.length === 0) errors.push(`${where}.emoji.name is empty`);
   });
 }

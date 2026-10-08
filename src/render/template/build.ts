@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { DISCORD } from '../../core/constants.ts';
-import type { DiscordActionRow, DiscordContainer, DiscordMessage, DiscordSeparator, ModEvent } from '../../core/types.ts';
-import { downloadButton, linkButtonUrl, pageButton, rowOf, websiteButton } from '../components.ts';
+import type { DiscordActionRow, DiscordButton, DiscordContainer, DiscordMessage, DiscordSeparator, ModEvent } from '../../core/types.ts';
+import { downloadButton, infoButton, linkButtonUrl, pageButton, rowOf, websiteButton } from '../components.ts';
 import type { Ctx } from '../context.ts';
 import { sourceSubtext } from '../layout.ts';
 import { assertWithinLimits } from '../limits.ts';
@@ -69,7 +69,7 @@ function renderParts(parts: readonly Part[], vc: VarContext, tally: Tally): stri
 function rowFor(line: RowLine, vc: VarContext): DiscordActionRow | null {
   const { event, ctx } = vc;
   const optional = ctx.optionalButtons && !vc.dropOptional;
-  const buttons = line.buttons.flatMap((name) => {
+  const buttons = line.buttons.flatMap((name): (DiscordButton | null)[] => {
     switch (name) {
       case 'buttons':
         return optional ? [pageButton(event, ctx), downloadButton(event, ctx), websiteButton(event, ctx)] : [pageButton(event, ctx)];
@@ -79,6 +79,8 @@ function rowFor(line: RowLine, vc: VarContext): DiscordActionRow | null {
         return optional ? [downloadButton(event, ctx)] : [];
       case 'website_button':
         return optional ? [websiteButton(event, ctx)] : [];
+      case 'info_button':
+        return [infoButton(event, ctx)];
       default:
         return [];
     }

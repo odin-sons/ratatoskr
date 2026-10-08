@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { DISCORD } from '../core/constants.ts';
 import { hasDeliverableHost } from '../text/url.ts';
-import type { DiscordActionRow, DiscordButtonEmoji, DiscordLinkButton, ModEvent } from '../core/types.ts';
+import type { DiscordActionRow, DiscordButton, DiscordButtonEmoji, DiscordCustomButton, DiscordLinkButton, ModEvent } from '../core/types.ts';
+import { infoButtonId } from '../core/info-button.ts';
 import type { Ctx } from './context.ts';
 import { buttonEmoji } from './emoji.ts';
-import { BUTTON_EMOJI } from './layout.ts';
+import { BUTTON_EMOJI, SECTION_EMOJI } from './layout.ts';
 import { STORES } from './stores.ts';
 import { safeUrl } from './text.ts';
 
@@ -56,9 +57,21 @@ export function websiteButton(event: ModEvent, ctx: Ctx): DiscordLinkButton | nu
   return button(ctx.messages.website, event.pkg.websiteUrl, BUTTON_EMOJI.website);
 }
 
+/** The Info button of a mod; null for a message that is not sent by the bot, or when the mod's id is too long for a `custom_id`. */
+export function infoButton(event: ModEvent, ctx: Ctx): DiscordCustomButton | null {
+  if (!ctx.infoButton) return null;
+  const id = infoButtonId(event.pkg.source, event.pkg.packageId);
+  const label = ctx.messages.infoButton;
+  if (id === null || label.length === 0 || label.length > DISCORD.buttonLabelMax) return null;
+  const built: DiscordCustomButton = { type: 2, style: 2, label, custom_id: id };
+  const icon = buttonEmoji(SECTION_EMOJI.info);
+  if (icon !== null) built.emoji = icon;
+  return built;
+}
+
 /** A row of the buttons that exist, at most `DISCORD.buttonsPerRow`; null when none does, since an empty row is invalid. */
-export function rowOf(candidates: readonly (DiscordLinkButton | null)[]): DiscordActionRow | null {
-  const buttons: DiscordLinkButton[] = [];
+export function rowOf(candidates: readonly (DiscordButton | null)[]): DiscordActionRow | null {
+  const buttons: DiscordButton[] = [];
   for (const candidate of candidates) {
     if (candidate !== null && buttons.length < DISCORD.buttonsPerRow) buttons.push(candidate);
   }

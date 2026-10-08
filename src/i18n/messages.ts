@@ -18,6 +18,8 @@ export interface Messages {
   categories: string;
   fullChangelog: string;
   modPage: string;
+  /** Label of the Info button under a message. */
+  infoButton: string;
   download: string;
   website: string;
   /** Count line of a compact store list, e.g. `37 updates`. */
@@ -104,7 +106,6 @@ export interface Messages {
   filterShowFlags(adult: string, changelog: string): string;
   /** `/info` and the "Mod info" message command. */
   infoNeedsMod: string;
-  infoMessageUnknown: string;
   /** B, KB, MB, GB, TB. */
   byteUnits: readonly [string, string, string, string, string];
 }

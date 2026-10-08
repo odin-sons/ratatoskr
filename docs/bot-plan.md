@@ -18,7 +18,7 @@ merges.
 | 5 | #42 | `/subscribe`, `/unsubscribe`, `/list`, `register-commands` | #41 |
 | 6 | #43 | Thread routing in `drain.ts`, per-mod forum posts, delivery into one post or thread | #39, #40, #42 |
 | 7 | #44 | `alsoMatch`, `/filter`, `/include`, `/exclude`, autocomplete | #42 |
-| 7 | #45 | `/info`, "Mod info" message command | #39, #40, #42 |
+| 7 | #45 | `/info` (the Info button of #68 replaced the "Mod info" message command) | #39, #40, #42 |
 | 7 | #51 | `/pause`, `/continue` | #39, #42 |
 | 8 | #46 | Setup guide | all of the above |
 

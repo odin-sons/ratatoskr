@@ -188,17 +188,6 @@ export interface SubscriptionTemplate {
   updatedAt: string;
 }
 
-/** A bot message about one mod, so a message command can find the mod behind it. */
-export interface MessageRecord {
-  messageId: string;
-  channelId: string;
-  source: SourceId;
-  packageId: string;
-  eventId: string | null;
-  /** ISO-8601, UTC. */
-  createdAt: string;
-}
-
 /** A package matched by autocomplete. */
 export interface PackageMatch {
   source: SourceId;
@@ -255,9 +244,20 @@ export interface DiscordLinkButton {
   emoji?: DiscordButtonEmoji;
 }
 
+/** A button that calls back to the bot; only messages sent by the bot itself may carry one. */
+export interface DiscordCustomButton {
+  type: 2;
+  style: 2;
+  label: string;
+  custom_id: string;
+  emoji?: DiscordButtonEmoji;
+}
+
+export type DiscordButton = DiscordLinkButton | DiscordCustomButton;
+
 export interface DiscordActionRow {
   type: 1;
-  components: DiscordLinkButton[];
+  components: DiscordButton[];
 }
 
 /** Components V2 building blocks (message flag 1 << 15). */
