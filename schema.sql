@@ -8,7 +8,8 @@
 -- created before `subscriptions.thread_id` existed needs migrations/0004_subscription_thread_id.sql once, and one
 -- created before the bot columns of `subscriptions` existed needs migrations/0005_bot_subscriptions.sql once, one created
 -- before `subscriptions.channel_kind` existed needs migrations/0006_subscription_channel_kind.sql once, and one created before `/info`
--- needs migrations/0007_mod_threads_thread_index.sql once (applying this file creates the same index); run them before this file.
+-- needs migrations/0007_mod_threads_thread_index.sql once, and one created before message templates needs migrations/0008_templates.sql once
+-- (applying this file creates the same index and table); run them before this file.
 
 CREATE TABLE IF NOT EXISTS sources (
   id TEXT PRIMARY KEY,
@@ -90,6 +91,15 @@ CREATE TABLE IF NOT EXISTS mod_threads (
   PRIMARY KEY (channel_id, source, package_id)
 );
 CREATE INDEX IF NOT EXISTS idx_mod_threads_thread ON mod_threads (channel_id, thread_id);
+
+-- Message templates of a subscription (docs/templates.md): the message of an event and the line of a mod in a digest.
+CREATE TABLE IF NOT EXISTS templates (
+  subscription_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('immediate', 'digest_line')),
+  body TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (subscription_id, kind)
+) WITHOUT ROWID;
 
 -- Bot messages about one mod; purged after 7 days by the reconcile cron.
 CREATE TABLE IF NOT EXISTS messages (

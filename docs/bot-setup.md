@@ -39,12 +39,13 @@ logs one line per run until the token is set.
 
 ## 3. Migrate the database and deploy
 
-A database created before 2.0.0 needs three migrations, once, in this order:
+A database created before 2.0.0 needs four migrations, once, in this order:
 
 ```sh
 pnpm run wrangler d1 execute <database name> --remote --file=migrations/0005_bot_subscriptions.sql
 pnpm run wrangler d1 execute <database name> --remote --file=migrations/0006_subscription_channel_kind.sql
 pnpm run wrangler d1 execute <database name> --remote --file=migrations/0007_mod_threads_thread_index.sql
+pnpm run wrangler d1 execute <database name> --remote --file=migrations/0008_templates.sql
 ```
 
 A fresh database gets everything from `schema.sql`. Then deploy as usual

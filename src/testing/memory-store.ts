@@ -15,6 +15,8 @@ import type {
   SourceState,
   Subscription,
   SubscriptionPatch,
+  SubscriptionTemplate,
+  TemplateKind,
 } from '../core/types.ts';
 
 export interface StoredOutboxRow extends OutboxRow {
@@ -25,6 +27,8 @@ export interface StoredOutboxRow extends OutboxRow {
 }
 
 const pkgKey = (source: SourceId, packageId: string): string => `${source}|${packageId}`;
+const templateKey = (subscriptionId: string, kind: TemplateKind): string => `${subscriptionId}|${kind}`;
+
 const threadKey = (channelId: string, source: SourceId, packageId: string): string => `${channelId}|${source}|${packageId}`;
 const pairKey = (subscriptionId: string, eventId: string): string => `${subscriptionId}|${eventId}`;
 
@@ -37,6 +41,7 @@ export class MemoryStore implements Store {
   readonly outbox = new Map<string, StoredOutboxRow>();
   readonly alertStates = new Map<string, AlertState>();
   readonly modThreads = new Map<string, ModThread>();
+  readonly templates = new Map<string, SubscriptionTemplate>();
   readonly messages = new Map<string, MessageRecord>();
 
   private readonly pairs = new Set<string>();
@@ -137,6 +142,7 @@ export class MemoryStore implements Store {
 
   async deleteSubscription(id: string): Promise<boolean> {
     await this.clearUndelivered([id]);
+    for (const kind of ['immediate', 'digest_line'] as const) this.templates.delete(templateKey(id, kind));
     return this.subscriptions.delete(id);
   }
 
@@ -184,6 +190,19 @@ export class MemoryStore implements Store {
 
   async deleteModThread(channelId: string, source: SourceId, packageId: string): Promise<void> {
     this.modThreads.delete(threadKey(channelId, source, packageId));
+  }
+
+  async getTemplates(subscriptionIds: string[]): Promise<SubscriptionTemplate[]> {
+    const wanted = new Set(subscriptionIds);
+    return [...this.templates.values()].filter((template) => wanted.has(template.subscriptionId)).map((template) => ({ ...template }));
+  }
+
+  async setTemplate(template: SubscriptionTemplate): Promise<void> {
+    this.templates.set(templateKey(template.subscriptionId, template.kind), { ...template });
+  }
+
+  async deleteTemplate(subscriptionId: string, kind: TemplateKind): Promise<boolean> {
+    return this.templates.delete(templateKey(subscriptionId, kind));
   }
 
   async putMessage(message: MessageRecord): Promise<void> {

@@ -65,11 +65,16 @@ describe('worst-case D1 writes of the bot tables', () => {
   const threadWrites = threadsPerDay * writesPerRow('mod_threads');
   const packageIndexWrites = PACKAGE_UPSERTS_PER_DAY * (writesPerRow('packages') - 2);
   const subscriptionWrites = SUBSCRIPTION_EDITS_PER_DAY * writesPerRow('subscriptions');
+  // Assumption: no measurement exists yet; a template is edited by hand.
+  const TEMPLATE_EDITS_PER_DAY = 50;
+  // A WITHOUT ROWID table is its own primary key index, so counting the autoindex as well can only overstate the writes.
+  const templateWrites = TEMPLATE_EDITS_PER_DAY * writesPerRow('templates');
 
   it('counts the indexes the schema really has', () => {
     expect(writesPerRow('messages')).toBe(3);
     expect(writesPerRow('mod_threads')).toBe(3);
     expect(writesPerRow('packages')).toBe(4);
+    expect(writesPerRow('templates')).toBeLessThanOrEqual(2);
   });
 
   it('each send writes one message record and the purge deletes it again', () => {
@@ -83,7 +88,7 @@ describe('worst-case D1 writes of the bot tables', () => {
   });
 
   it('the two package indexes, the messages, the threads and the subscription edits on top of the measured writes stay within the limit', () => {
-    const total = MEASURED_WRITES_PER_DAY + packageIndexWrites + messageWrites + threadWrites + subscriptionWrites;
+    const total = MEASURED_WRITES_PER_DAY + packageIndexWrites + messageWrites + threadWrites + subscriptionWrites + templateWrites;
     expect(total).toBeLessThanOrEqual(D1_FREE.rowsWrittenPerDay);
   });
 });

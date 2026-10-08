@@ -7,6 +7,8 @@ import type {
   MessageRecord,
   ModEvent,
   ModThread,
+  SubscriptionTemplate,
+  TemplateKind,
   OutboxRow,
   PackageMatch,
   PackageSnapshot,
@@ -85,6 +87,12 @@ export interface Store {
   getModThreadByThreadId(channelId: string, threadId: string): Promise<ModThread | null>;
 
   deleteModThread(channelId: string, source: SourceId, packageId: string): Promise<void>;
+  /** The templates of these subscriptions, in one read; a subscription without a template adds nothing. */
+  getTemplates(subscriptionIds: string[]): Promise<SubscriptionTemplate[]>;
+  /** Stores a template, replacing the one of the same subscription and kind. */
+  setTemplate(template: SubscriptionTemplate): Promise<void>;
+  /** Removes a template; false when there was none. */
+  deleteTemplate(subscriptionId: string, kind: TemplateKind): Promise<boolean>;
 
   /** Inserts or replaces the record of a bot message. */
   putMessage(message: MessageRecord): Promise<void>;

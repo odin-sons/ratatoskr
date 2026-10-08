@@ -14,6 +14,7 @@ const MIGRATION_LIKES_WEBSITE = readFileSync(join(ROOT, 'migrations/0003_package
 const MIGRATION_THREAD_ID = readFileSync(join(ROOT, 'migrations/0004_subscription_thread_id.sql'), 'utf8');
 const MIGRATION_BOT = readFileSync(join(ROOT, 'migrations/0005_bot_subscriptions.sql'), 'utf8');
 const MIGRATION_CHANNEL_KIND = readFileSync(join(ROOT, 'migrations/0006_subscription_channel_kind.sql'), 'utf8');
+const MIGRATION_TEMPLATES = readFileSync(join(ROOT, 'migrations/0008_templates.sql'), 'utf8');
 
 const SOURCE = 'thunderstore:valheim';
 const NOW = '2026-09-19T12:00:00.000Z';
@@ -74,7 +75,7 @@ describe('schema upgrade from a database without outbox.delivered_at', () => {
 
   it('the migration adds the column and both partial indexes, then schema.sql applies cleanly, twice', () => {
     const shim = legacyDatabase();
-    for (const migration of [MIGRATION, MIGRATION_THREAD_ID, MIGRATION_BOT, MIGRATION_CHANNEL_KIND]) shim.db.exec(migration);
+    for (const migration of [MIGRATION, MIGRATION_THREAD_ID, MIGRATION_BOT, MIGRATION_CHANNEL_KIND, MIGRATION_TEMPLATES]) shim.db.exec(migration);
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
     const names = indexNames(shim);
@@ -431,6 +432,41 @@ describe('schema upgrade from a database without subscriptions.channel_kind', ()
     const shim = databaseBeforeChannelKind();
     shim.db.exec(MIGRATION_CHANNEL_KIND);
     expect(() => shim.db.exec(MIGRATION_CHANNEL_KIND)).toThrow(/duplicate column/);
+    expect(() => shim.db.exec(SCHEMA)).not.toThrow();
+    expect(() => shim.db.exec(SCHEMA)).not.toThrow();
+  });
+});
+
+describe('schema upgrade from a database without the templates table', () => {
+  const SCHEMA_BEFORE_TEMPLATES = SCHEMA.replace(/-- Message templates of a subscription[\s\S]*?WITHOUT ROWID;/, '');
+
+  function databaseBeforeTemplates(): D1Shim {
+    const shim = new D1Shim();
+    shim.db.exec(SCHEMA_BEFORE_TEMPLATES);
+    shim.db.prepare("INSERT INTO subscriptions (id, guild_id, transport, channel_id, mode) VALUES ('bot1', 'g', 'bot', 'c1', 'immediate')").run();
+    return shim;
+  }
+
+  it('the fixture really lacks the table and the store fails on it', async () => {
+    expect(SCHEMA_BEFORE_TEMPLATES).not.toContain('CREATE TABLE IF NOT EXISTS templates');
+    await expect(new D1Store(databaseBeforeTemplates().asD1()).getTemplates(['bot1'])).rejects.toThrow(/templates/);
+  });
+
+  it('adds the table, keeps the subscriptions, stores both kinds and rejects another kind', async () => {
+    const shim = databaseBeforeTemplates();
+    shim.db.exec(MIGRATION_TEMPLATES);
+    const store = new D1Store(shim.asD1());
+    expect((await store.listSubscriptions()).map((s) => s.id)).toEqual(['bot1']);
+    await store.setTemplate({ subscriptionId: 'bot1', kind: 'immediate', body: '{name}', updatedAt: NOW });
+    await store.setTemplate({ subscriptionId: 'bot1', kind: 'digest_line', body: '{name} {version}', updatedAt: NOW });
+    expect(await store.getTemplates(['bot1'])).toHaveLength(2);
+    expect(() => shim.db.prepare("INSERT INTO templates (subscription_id, kind, body, updated_at) VALUES ('bot1', 'other', 'x', 'y')").run()).toThrow(/CHECK/);
+  });
+
+  it('is safe to repeat, and schema.sql applies cleanly afterwards, twice', () => {
+    const shim = databaseBeforeTemplates();
+    shim.db.exec(MIGRATION_TEMPLATES);
+    expect(() => shim.db.exec(MIGRATION_TEMPLATES)).not.toThrow();
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
     expect(() => shim.db.exec(SCHEMA)).not.toThrow();
   });

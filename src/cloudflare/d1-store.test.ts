@@ -445,7 +445,7 @@ describe('D1 adapter', () => {
       expect(shim.preparedSql).toEqual(['UPDATE subscriptions SET label = ?, paused_until = ? WHERE id = ?']);
     });
 
-    it('deletes the subscription and its undelivered outbox rows in one transactional batch', async () => {
+    it('deletes the subscription, its templates and its undelivered outbox rows in one transactional batch', async () => {
       addSub(shim, 'sub1');
       const delivered = ev(pkg('A-One'));
       const pending = ev(pkg('B-Two'));
@@ -453,7 +453,7 @@ describe('D1 adapter', () => {
       await store.markDelivered([ob('sub1', delivered).id], '2026-09-19T00:00:00.000Z');
       shim.batchSizes.length = 0;
       expect(await store.deleteSubscription('sub1')).toBe(true);
-      expect(shim.batchSizes).toEqual([2]);
+      expect(shim.batchSizes).toEqual([3]);
       expect(count(shim, 'subscriptions')).toBe(0);
       expect(shim.db.prepare('SELECT event_id FROM outbox').all()).toEqual([{ event_id: delivered.id }]);
     });
@@ -748,6 +748,9 @@ describe('D1 adapter', () => {
       await spy.countSubscriptions();
       await spy.putModThread({ channelId: 'chan-1', source: SOURCE, packageId: 'Owner-Name', threadId: 't1', anchorMessageId: null, createdAt: '2026-09-19T00:00:00.000Z' });
       await spy.getModThread('chan-1', SOURCE, 'Owner-Name');
+      await spy.setTemplate({ subscriptionId: 'bot1', kind: 'immediate', body: '{name}', updatedAt: '2026-09-19T00:00:00.000Z' });
+      await spy.getTemplates(['bot1', 'bot2']);
+      await spy.deleteTemplate('bot1', 'immediate');
       await spy.getModThreadByThreadId('chan-1', 't1');
       await spy.deleteModThread('chan-1', SOURCE, 'Owner-Name');
       await spy.putMessage({ messageId: 'm1', channelId: 'chan-1', source: SOURCE, packageId: 'Owner-Name', eventId: e.id, createdAt: '2026-09-19T00:00:00.000Z' });

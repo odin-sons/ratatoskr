@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
-import { AUTOCOMPLETE_MAX_RESULTS, AUTOCOMPLETE_MIN_PREFIX, AUTOCOMPLETE_OWNER_SCAN_LIMIT, CLOUDFLARE, OUTBOX_MAX_ATTEMPTS } from '../core/constants.ts';
+import { AUTOCOMPLETE_MAX_RESULTS, AUTOCOMPLETE_MIN_PREFIX, AUTOCOMPLETE_OWNER_SCAN_LIMIT, CLOUDFLARE, OUTBOX_MAX_ATTEMPTS, TEMPLATE_MAX_CHARS } from '../core/constants.ts';
 import { eventId, outboxId, releaseKey } from '../core/ids.ts';
 import type { CommitBatch, Store } from '../core/ports.ts';
-import type { MessageRecord, ModEvent, ModThread, OutboxRow, PackageSnapshot, Subscription } from '../core/types.ts';
+import type { MessageRecord, ModEvent, ModThread, OutboxRow, PackageSnapshot, Subscription, SubscriptionTemplate } from '../core/types.ts';
 import { makeEvent, makeSnapshot, makeSubscription } from './fakes.ts';
 
 export interface StoreContractEnv {
@@ -1026,6 +1026,89 @@ export function runStoreContract(name: string, create: () => Promise<StoreContra
         expect(await store.purgeMessages('2026-09-10T00:00:00.000Z', 2)).toBe(2);
         expect(await store.purgeMessages('2026-09-10T00:00:00.000Z', 2)).toBe(1);
         expect(await store.purgeMessages('2026-09-10T00:00:00.000Z', 2)).toBe(0);
+      });
+    });
+
+    describe('templates', () => {
+      const botSub = (over: Partial<Subscription> = {}): Subscription => ({
+        id: 'bot-1',
+        guildId: 'guild-1',
+        transport: 'bot',
+        channelId: 'chan-1',
+        filter: {},
+        mode: 'immediate',
+        digestIntervalMin: 30,
+        enabled: true,
+        ...over,
+      });
+      const template =(over: Partial<SubscriptionTemplate> = {}): SubscriptionTemplate => ({
+        subscriptionId: 'bot-1',
+        kind: 'immediate',
+        body: '{name:link} {versions}\n---\n{buttons}',
+        updatedAt: T0,
+        ...over,
+      });
+
+      it('returns nothing for subscriptions without a template, and for an empty list', async () => {
+        const { store } = await setup();
+        expect(await store.getTemplates(['bot-1', 'nobody'])).toEqual([]);
+        expect(await store.getTemplates([])).toEqual([]);
+      });
+
+      it('round-trips both kinds of one subscription and keeps them apart', async () => {
+        const { store } = await setup();
+        await store.setTemplate(template());
+        await store.setTemplate(template({ kind: 'digest_line', body: '{name} {version}' }));
+        const found = await store.getTemplates(['bot-1']);
+        expect(found).toHaveLength(2);
+        expect(found).toContainEqual(template());
+        expect(found).toContainEqual(template({ kind: 'digest_line', body: '{name} {version}' }));
+      });
+
+      it('replaces the template of the same subscription and kind', async () => {
+        const { store } = await setup();
+        await store.setTemplate(template());
+        await store.setTemplate(template({ body: 'changed', updatedAt: NOW }));
+        expect(await store.getTemplates(['bot-1'])).toEqual([template({ body: 'changed', updatedAt: NOW })]);
+      });
+
+      it('reads only the templates of the subscriptions asked for, in one call, however many', async () => {
+        const { store } = await setup();
+        for (let i = 0; i < 250; i += 1) await store.setTemplate(template({ subscriptionId: `sub-${i}`, body: `body ${i}` }));
+        const ids = Array.from({ length: 200 }, (_, i) => `sub-${i + 25}`);
+        const found = await store.getTemplates([...ids, ...ids]);
+        expect(found).toHaveLength(200);
+        expect(new Set(found.map((t) => t.subscriptionId))).toEqual(new Set(ids));
+        expect(found.find((t) => t.subscriptionId === 'sub-30')!.body).toBe('body 30');
+      });
+
+      it('keeps a body of the maximum length and multi-line text intact', async () => {
+        const { store } = await setup();
+        const body = `${'line {name}\n'.repeat(160)}`.slice(0, TEMPLATE_MAX_CHARS);
+        await store.setTemplate(template({ body }));
+        expect((await store.getTemplates(['bot-1']))[0]!.body).toBe(body);
+      });
+
+      it('deletes one kind of one subscription and says whether there was one', async () => {
+        const { store } = await setup();
+        await store.setTemplate(template());
+        await store.setTemplate(template({ kind: 'digest_line' }));
+        await store.setTemplate(template({ subscriptionId: 'bot-2' }));
+        expect(await store.deleteTemplate('bot-1', 'immediate')).toBe(true);
+        expect(await store.deleteTemplate('bot-1', 'immediate')).toBe(false);
+        expect(await store.deleteTemplate('nobody', 'immediate')).toBe(false);
+        expect((await store.getTemplates(['bot-1', 'bot-2'])).map((t) => `${t.subscriptionId}:${t.kind}`).sort()).toEqual(['bot-1:digest_line', 'bot-2:immediate']);
+      });
+
+      it('goes away with its subscription and with nothing else', async () => {
+        const { store } = await setup();
+        await store.createSubscription(botSub());
+        await store.createSubscription(botSub({ id: 'bot-2' }));
+        await store.setTemplate(template());
+        await store.setTemplate(template({ kind: 'digest_line' }));
+        await store.setTemplate(template({ subscriptionId: 'bot-2' }));
+        expect(await store.deleteSubscription('bot-1')).toBe(true);
+        expect(await store.getTemplates(['bot-1', 'bot-2'])).toEqual([template({ subscriptionId: 'bot-2' })]);
       });
     });
 

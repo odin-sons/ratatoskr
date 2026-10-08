@@ -27,7 +27,9 @@ import type {
   StoreKind,
   Subscription,
   SubscriptionPatch,
+  SubscriptionTemplate,
   SubscriptionTransport,
+  TemplateKind,
 } from '../core/types.ts';
 import { D1_MAX_BATCH_STATEMENTS } from './limits.ts';
 
@@ -90,6 +92,13 @@ interface SubscriptionCols {
   thread_per_mod: number;
   paused_until: number;
   channel_kind: string;
+}
+
+interface TemplateCols {
+  subscription_id: string;
+  kind: string;
+  body: string;
+  updated_at: string;
 }
 
 interface ModThreadCols {
@@ -218,6 +227,12 @@ const SQL_CREATE_SUBSCRIPTION = `INSERT INTO subscriptions (${SUBSCRIPTION_READ_
 const SQL_SET_PAUSED_UNTIL = 'UPDATE subscriptions SET paused_until = ? WHERE id = ?';
 const SQL_DELETE_SUBSCRIPTION_OUTBOX = 'DELETE FROM outbox WHERE subscription_id = ? AND delivered_at IS NULL';
 const SQL_DELETE_SUBSCRIPTION = 'DELETE FROM subscriptions WHERE id = ?';
+const SQL_DELETE_SUBSCRIPTION_TEMPLATES = 'DELETE FROM templates WHERE subscription_id = ?';
+const SQL_SET_TEMPLATE =
+  'INSERT INTO templates (subscription_id, kind, body, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (subscription_id, kind) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at';
+const SQL_DELETE_TEMPLATE = 'DELETE FROM templates WHERE subscription_id = ? AND kind = ?';
+const sqlGetTemplates = (count: number): string => `SELECT subscription_id, kind, body, updated_at FROM templates WHERE subscription_id IN (${placeholders(count)})`;
+const TEMPLATE_READ_CHUNK = 90;
 const SQL_SUBSCRIPTION_EXISTS = 'SELECT id FROM subscriptions WHERE id = ?';
 const SQL_GET_MOD_THREAD = `SELECT ${MOD_THREAD_COLUMNS.join(', ')} FROM mod_threads WHERE channel_id = ? AND source = ? AND package_id = ?`;
 const SQL_PUT_MOD_THREAD = `INSERT INTO mod_threads (${MOD_THREAD_COLUMNS.join(', ')}) VALUES (${placeholders(MOD_THREAD_COLUMNS.length)}) ON CONFLICT (channel_id, source, package_id) DO UPDATE SET thread_id = excluded.thread_id, anchor_message_id = excluded.anchor_message_id, created_at = excluded.created_at`;
@@ -422,9 +437,10 @@ export class D1Store implements Store {
   async deleteSubscription(id: string): Promise<boolean> {
     const results = await this.db.batch([
       this.db.prepare(SQL_DELETE_SUBSCRIPTION_OUTBOX).bind(id),
+      this.db.prepare(SQL_DELETE_SUBSCRIPTION_TEMPLATES).bind(id),
       this.db.prepare(SQL_DELETE_SUBSCRIPTION).bind(id),
     ]);
-    return results[1]!.meta.changes > 0;
+    return results[2]!.meta.changes > 0;
   }
 
   async setPausedUntil(subscriptionIds: string[], until: number): Promise<void> {
@@ -471,6 +487,26 @@ export class D1Store implements Store {
 
   async deleteModThread(channelId: string, source: SourceId, packageId: string): Promise<void> {
     await this.db.prepare(SQL_DELETE_MOD_THREAD).bind(channelId, source, packageId).run();
+  }
+
+  async getTemplates(subscriptionIds: string[]): Promise<SubscriptionTemplate[]> {
+    const out: SubscriptionTemplate[] = [];
+    for (const ids of chunk([...new Set(subscriptionIds)], TEMPLATE_READ_CHUNK)) {
+      const { results } = await this.db.prepare(sqlGetTemplates(ids.length)).bind(...ids).all<TemplateCols>();
+      for (const row of results) {
+        if (row.kind === 'immediate' || row.kind === 'digest_line') out.push({ subscriptionId: row.subscription_id, kind: row.kind, body: row.body, updatedAt: row.updated_at });
+      }
+    }
+    return out;
+  }
+
+  async setTemplate(template: SubscriptionTemplate): Promise<void> {
+    await this.db.prepare(SQL_SET_TEMPLATE).bind(template.subscriptionId, template.kind, template.body, template.updatedAt).run();
+  }
+
+  async deleteTemplate(subscriptionId: string, kind: TemplateKind): Promise<boolean> {
+    const result = await this.db.prepare(SQL_DELETE_TEMPLATE).bind(subscriptionId, kind).run();
+    return result.meta.changes > 0;
   }
 
   async putMessage(message: MessageRecord): Promise<void> {

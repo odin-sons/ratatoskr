@@ -176,6 +176,18 @@ export interface ModThread {
   createdAt: string;
 }
 
+/** Which message a template shapes. */
+export type TemplateKind = 'immediate' | 'digest_line';
+
+/** The text of a message template of one subscription. */
+export interface SubscriptionTemplate {
+  subscriptionId: string;
+  kind: TemplateKind;
+  body: string;
+  /** ISO-8601, UTC. */
+  updatedAt: string;
+}
+
 /** A bot message about one mod, so a message command can find the mod behind it. */
 export interface MessageRecord {
   messageId: string;
