@@ -50,6 +50,8 @@ async function showMod(deps: CommandDeps, messages: Messages, packageId: string,
     messages,
     storeEmojis: resolveStoreEmojis(deps.storeEmojis),
     ratatoskrEmoji: resolveRatatoskrEmoji(deps.ratatoskrEmoji),
+    immediateTemplate: null,
+    digestLineTemplate: null,
     optionalButtons: true,
     includeChangelog: true,
   });

@@ -3,6 +3,8 @@ import type { ModEvent, StoreKind } from '../core/types.ts';
 import { getMessages, type Messages } from '../i18n/index.ts';
 import { CAPS } from './layout.ts';
 import { STORE_ORDER } from './stores.ts';
+import type { ParsedTemplate } from './template/parse.ts';
+import { renderLine, type LineContext } from './template/line.ts';
 import { formatBytes, inline, mdLink, safeUrl } from './text.ts';
 
 export type Level = 0 | 1 | 2 | 3 | 4;
@@ -55,12 +57,18 @@ function versions(p: Prepared): string {
   return p.from ? `${p.from} → ${p.to}` : p.to;
 }
 
-function itemLine(p: Prepared, level: 0 | 1 | 2 | 4): string {
+/** The list line template of a digest and what its variables need besides the mod. */
+export interface LineOptions {
+  template: ParsedTemplate | null;
+  context: LineContext;
+}
+
+const NO_LINE_OPTIONS: LineOptions = { template: null, context: { storeEmojis: {} } };
+
+function itemLine(p: Prepared, level: 0 | 1 | 2 | 4, line: LineOptions): string {
   switch (level) {
-    case 0: {
-      const tail = [p.owner, p.size].filter(Boolean).join(' · ');
-      return `${link(p, true)} ${versions(p)}${tail ? ` · ${tail}` : ''}`;
-    }
+    case 0:
+      return renderLine(line.template, p, line.context);
     case 1:
       return `${link(p, true)} ${versions(p)}`;
     case 2:
@@ -101,7 +109,7 @@ function groupedLines(items: Prepared[]): Line[] {
 }
 
 /** Renders every item at one level; store order is fixed and empty stores are omitted. */
-export function renderBlocks(items: readonly Prepared[], level: Level): Block[] {
+export function renderBlocks(items: readonly Prepared[], level: Level, line: LineOptions = NO_LINE_OPTIONS): Block[] {
   const byStore = new Map<StoreKind, Prepared[]>();
   for (const p of items) {
     const list = byStore.get(p.store);
@@ -112,7 +120,7 @@ export function renderBlocks(items: readonly Prepared[], level: Level): Block[] 
   for (const store of STORE_ORDER) {
     const list = byStore.get(store);
     if (!list) continue;
-    const lines: Line[] = level === 3 ? groupedLines(list) : list.map((p) => ({ text: itemLine(p, level), count: 1 }));
+    const lines: Line[] = level === 3 ? groupedLines(list) : list.map((p) => ({ text: itemLine(p, level, line), count: 1 }));
     blocks.push({ store, lines });
   }
   return blocks;

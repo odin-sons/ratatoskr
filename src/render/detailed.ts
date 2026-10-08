@@ -30,29 +30,44 @@ function unixSeconds(ms: number): number | null {
   return Number.isFinite(ms) && ms > 0 ? Math.floor(ms / 1000) : null;
 }
 
-function relativeTimestamp(event: ModEvent, now: Date): string | null {
+export function relativeTimestamp(event: ModEvent, now: Date): string | null {
   const seconds = unixSeconds(Date.parse(event.pkg.updatedAt)) ?? unixSeconds(Date.parse(event.createdAt)) ?? unixSeconds(now.getTime());
   return seconds === null ? null : `<t:${seconds}:${DISCORD.timestampStyleRelative}>`;
 }
 
-function titleLine(event: ModEvent, storeEmoji: string, unnamed: string): string {
+export function titleLine(event: ModEvent, storeEmoji: string, unnamed: string): string {
   const text = inlineTitle(event.pkg.name, CAPS.name) || unnamed;
   const url = safeUrl(event.pkg.url);
   return `## ${storeEmoji ? `${storeEmoji} ` : ''}${url ? mdLink(text, url) : text}`;
 }
 
-function kindLine(event: ModEvent, ctx: Ctx, now: Date): string {
+/** "New by Author" or "Updated by Author", or the anonymous wording when the owner is empty. */
+export function kindLabel(event: ModEvent, ctx: Ctx): string {
   const { messages } = ctx;
   const owner = inline(event.pkg.owner, CAPS.owner);
   const isNew = event.kind === 'new';
-  const label = owner ? (isNew ? messages.newBy(owner) : messages.updatedBy(owner)) : isNew ? messages.newAnonymous : messages.updatedAnonymous;
-  const to = inline(event.versionTo, CAPS.version) || '?';
-  const from = !isNew && event.versionFrom ? inline(event.versionFrom, CAPS.version) : '';
-  const parts = [`${KIND_EMOJI[event.kind]} ${label}`, from ? `${from} → ${to}` : to, relativeTimestamp(event, now)];
+  return owner ? (isNew ? messages.newBy(owner) : messages.updatedBy(owner)) : isNew ? messages.newAnonymous : messages.updatedAnonymous;
+}
+
+export function versionTo(event: ModEvent): string {
+  return inline(event.versionTo, CAPS.version) || '?';
+}
+
+export function versionFrom(event: ModEvent): string {
+  return event.kind !== 'new' && event.versionFrom ? inline(event.versionFrom, CAPS.version) : '';
+}
+
+export function versionsText(event: ModEvent): string {
+  const from = versionFrom(event);
+  return from ? `${from} → ${versionTo(event)}` : versionTo(event);
+}
+
+export function kindLine(event: ModEvent, ctx: Ctx, now: Date): string {
+  const parts = [`${KIND_EMOJI[event.kind]} ${kindLabel(event, ctx)}`, versionsText(event), relativeTimestamp(event, now)];
   return parts.filter(Boolean).join(INFO_SEP);
 }
 
-function infoLine(event: ModEvent, ctx: Ctx): string | null {
+export function infoLine(event: ModEvent, ctx: Ctx): string | null {
   const { messages } = ctx;
   const { pkg } = event;
   const parts: string[] = [];
@@ -66,7 +81,7 @@ function infoLine(event: ModEvent, ctx: Ctx): string | null {
   return parts.length === 0 ? null : `${SECTION_EMOJI.info} ${parts.join(INFO_SEP)}`;
 }
 
-function alsoOnLine(event: ModEvent, ctx: Ctx): string | null {
+export function alsoOnLine(event: ModEvent, ctx: Ctx): string | null {
   let line = '';
   let entries = 0;
   for (const other of event.alsoOn) {
@@ -82,13 +97,18 @@ function alsoOnLine(event: ModEvent, ctx: Ctx): string | null {
   return line || null;
 }
 
+/** The start of the description as one inline line of at most `max` characters; empty when there is none. */
+export function descriptionExcerpt(event: ModEvent, max: number = CAPS.excerpt): string {
+  return event.pkg.description ? inline(stripHtml(head(event.pkg.description, max * CAPS.rawFactor)), max) : '';
+}
+
 function header(event: ModEvent, ctx: Ctx, now: Date): string {
   const lines = [titleLine(event, ctx.storeEmojis[event.pkg.store] ?? '', ctx.messages.unnamed), kindLine(event, ctx, now)];
   const info = infoLine(event, ctx);
   if (info) lines.push(info);
   const also = alsoOnLine(event, ctx);
   if (also) lines.push(also);
-  const excerpt = event.pkg.description ? inline(stripHtml(head(event.pkg.description, CAPS.excerpt * CAPS.rawFactor)), CAPS.excerpt) : '';
+  const excerpt = descriptionExcerpt(event);
   // The "description" catalog message and SECTION_EMOJI.description stay defined for future template customisation,
   // even though the heading itself is not shown.
   if (excerpt) lines.push('', excerpt);
@@ -96,7 +116,7 @@ function header(event: ModEvent, ctx: Ctx, now: Date): string {
 }
 
 /** Splits an excerpt that ends with the changelog module's own full-changelog link into its text and link target. */
-function splitFullLink(text: string): { body: string; target: string | null } {
+export function splitFullLink(text: string): { body: string; target: string | null } {
   const at = text.lastIndexOf('\n') + 1;
   if (!text.startsWith(FULL_LINK_PREFIX, at) || !text.endsWith(')')) return { body: text, target: null };
   return { body: text.slice(0, Math.max(0, at - 1)), target: text.slice(at + FULL_LINK_PREFIX.length, -1) };
@@ -115,18 +135,18 @@ function mentionsLabel(body: string, label: string): boolean {
  * A new package has no prior version to change from, so it never carries a changelog: `event.changelog` is ignored
  * for `kind: 'new'` even if a source ever populated it.
  */
-function changelogExcerpt(event: ModEvent, ctx: Ctx): string | null {
+export function changelogExcerpt(event: ModEvent, ctx: Ctx, maxChars: number = CHANGELOG_DISPLAY_MAX): string | null {
   if (!ctx.includeChangelog || event.kind === 'new') return null;
   const label = ctx.messages.fullChangelog;
-  const cleaned = neutralizeMentions(stripUnsafeChars(head(event.changelog ?? '', CHANGELOG_DISPLAY_MAX * 4)));
+  const cleaned = neutralizeMentions(stripUnsafeChars(head(event.changelog ?? '', maxChars * 4)));
   const split = splitFullLink(cleaned.trimEnd());
   const fullUrl = split.target ?? safeUrl(event.changelogUrl);
   let body = split.body;
   if (label !== FULL_CHANGELOG_LABEL && mentionsLabel(body, label)) body = body.split('\n').map((line) => sanitizeLinks(line, label)).join('\n');
-  return finalizeExcerpt(body, { maxChars: CHANGELOG_DISPLAY_MAX, fullUrl, label, wordBoundary: true });
+  return finalizeExcerpt(body, { maxChars, fullUrl, label, wordBoundary: true });
 }
 
-function categoriesValue(categories: readonly string[]): string | null {
+export function categoriesValue(categories: readonly string[]): string | null {
   const shown: string[] = [];
   let length = 0;
   let cut = false;

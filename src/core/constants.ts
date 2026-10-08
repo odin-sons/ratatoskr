@@ -195,6 +195,12 @@ export const MAX_SUBSCRIPTIONS_TOTAL = 200;
 /** Most `alsoMatch` rules one subscription filter may hold. Source: product limit, docs/spec.md "Filter rules". */
 export const ALSO_MATCH_MAX_RULES = 20;
 
+/** Longest message template, in characters: what one Discord message of a user without a subscription can hold. Source: Discord message length limit. */
+export const TEMPLATE_MAX_CHARS = 2000;
+
+/** Variables a template may use; the rest are ignored. Source: product limit. */
+export const TEMPLATE_MAX_VARIABLES = 100;
+
 /** Most entries `/exclude` keeps in each of `excludePackages` and `excludeCategories`. Source: product limit. */
 export const EXCLUDE_LIST_MAX = 100;
 

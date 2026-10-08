@@ -66,8 +66,10 @@ The numbers in brackets are the most characters the form can show; a limit you
 write can only make a value shorter. Cutting happens on a line or word boundary,
 never inside a link, and an ellipsis marks the cut.
 
-In a digest line `title`, `kind_line`, `info_line`, `also_on`, `description`,
-`changelog`, `categories` and the buttons are not available; the rest are.
+In a digest line only `name`, `owner`, `store`, `store_emoji`, `version`,
+`version_from`, `versions`, `size` and `url` are available. A line is one line of
+text: several lines of the template are joined with a space, and a line longer than
+600 characters is replaced by the default line.
 
 ## The default templates
 
@@ -93,7 +95,7 @@ The message of an event:
 The labels follow the language of the deployment. The line of a mod in a digest:
 
 ```
-**{name:link}** {versions}(? · {owner})(? · {size})
+**{name:link}** {versions}(? · {owner}?)(? · {size}?)
 ```
 
 ## Examples

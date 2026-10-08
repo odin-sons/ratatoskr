@@ -38,10 +38,26 @@ function button(label: string, raw: string | null | undefined, emoji: string): D
  * Null when none of the candidates has a usable URL: an empty action row is not a valid component.
  */
 export function buildActionRow(event: ModEvent, ctx: Ctx): DiscordActionRow | null {
-  const { messages } = ctx;
+  const candidates = [pageButton(event, ctx)];
+  if (ctx.optionalButtons) candidates.push(downloadButton(event, ctx), websiteButton(event, ctx));
+  return rowOf(candidates);
+}
+
+export function pageButton(event: ModEvent, ctx: Ctx): DiscordLinkButton | null {
   const { pkg } = event;
-  const candidates = [button(messages.modPage, pkg.url, ctx.storeEmojis[pkg.store] ?? STORES[pkg.store].buttonEmoji)];
-  if (ctx.optionalButtons) candidates.push(button(messages.download, pkg.downloadUrl, BUTTON_EMOJI.download), button(messages.website, pkg.websiteUrl, BUTTON_EMOJI.website));
+  return button(ctx.messages.modPage, pkg.url, ctx.storeEmojis[pkg.store] ?? STORES[pkg.store].buttonEmoji);
+}
+
+export function downloadButton(event: ModEvent, ctx: Ctx): DiscordLinkButton | null {
+  return button(ctx.messages.download, event.pkg.downloadUrl, BUTTON_EMOJI.download);
+}
+
+export function websiteButton(event: ModEvent, ctx: Ctx): DiscordLinkButton | null {
+  return button(ctx.messages.website, event.pkg.websiteUrl, BUTTON_EMOJI.website);
+}
+
+/** A row of the buttons that exist, at most `DISCORD.buttonsPerRow`; null when none does, since an empty row is invalid. */
+export function rowOf(candidates: readonly (DiscordLinkButton | null)[]): DiscordActionRow | null {
   const buttons: DiscordLinkButton[] = [];
   for (const candidate of candidates) {
     if (candidate !== null && buttons.length < DISCORD.buttonsPerRow) buttons.push(candidate);

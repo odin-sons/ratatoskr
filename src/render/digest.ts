@@ -26,7 +26,7 @@ function pack(detailed: readonly DiscordEmbed[], compact: readonly Prepared[], l
   const packer = new Packer(ctx);
   for (const embed of detailed) packer.addEmbed(embed);
   if (separate) packer.startMessage();
-  for (const block of renderBlocks(compact, level)) packer.addBlock(block);
+  for (const block of renderBlocks(compact, level, { template: ctx.digestLineTemplate, context: { storeEmojis: ctx.storeEmojis } })) packer.addBlock(block);
   return packer.finish();
 }
 
