@@ -2,7 +2,7 @@
 import type { StoreEmojis } from '../core/types.ts';
 import { getMessages, type Language, type Messages } from '../i18n/index.ts';
 import { resolveRatatoskrEmoji, resolveStoreEmojis } from './emoji.ts';
-import type { ParsedTemplate } from './template/parse.ts';
+import { parseTemplate, type ParsedTemplate } from './template/parse.ts';
 
 /** Presentation settings shared by every render call; none of them changes which mods are shown. */
 export interface RenderSettings {
@@ -17,9 +17,9 @@ export interface RenderSettings {
   /** `false` never shows the Changelog block, however long or short the excerpt (default `true`). */
   includeChangelog?: boolean;
   /** Template of the message of one event; the default one when absent. */
-  immediateTemplate?: ParsedTemplate | null;
+  immediateTemplate?: ParsedTemplate | string | null;
   /** Template of the line of a mod in a digest, used at level L0; the default one when absent. */
-  digestLineTemplate?: ParsedTemplate | null;
+  digestLineTemplate?: ParsedTemplate | string | null;
 }
 
 /** Settings after validation. */
@@ -33,6 +33,26 @@ export interface Ctx {
   digestLineTemplate: ParsedTemplate | null;
 }
 
+const PARSED = new Map<string, ParsedTemplate>();
+const PARSED_MAX = 200;
+
+/** A template given as text is parsed once and remembered; one that shows nothing counts as no template. */
+function resolveTemplate(template: ParsedTemplate | string | null | undefined): ParsedTemplate | null {
+  if (template === undefined || template === null) return null;
+  let parsed: ParsedTemplate | undefined;
+  if (typeof template === 'string') {
+    parsed = PARSED.get(template);
+    if (parsed === undefined) {
+      parsed = parseTemplate(template);
+      if (PARSED.size >= PARSED_MAX) PARSED.clear();
+      PARSED.set(template, parsed);
+    }
+  } else {
+    parsed = template;
+  }
+  return parsed.blocks.length === 0 ? null : parsed;
+}
+
 export function makeCtx(settings: RenderSettings): Ctx {
   return {
     messages: getMessages(settings.locale),
@@ -40,7 +60,7 @@ export function makeCtx(settings: RenderSettings): Ctx {
     ratatoskrEmoji: resolveRatatoskrEmoji(settings.ratatoskrEmoji),
     optionalButtons: settings.optionalButtons !== false,
     includeChangelog: settings.includeChangelog !== false,
-    immediateTemplate: settings.immediateTemplate ?? null,
-    digestLineTemplate: settings.digestLineTemplate ?? null,
+    immediateTemplate: resolveTemplate(settings.immediateTemplate),
+    digestLineTemplate: resolveTemplate(settings.digestLineTemplate),
   };
 }

@@ -2,7 +2,7 @@
 import type { DiscordMessage, ModEvent } from '../core/types.ts';
 import { makeCtx, type RenderSettings } from './context.ts';
 import { planDigest, type RenderOptions } from './digest.ts';
-import { buildImmediate } from './immediate.ts';
+import { renderEvent } from './template/build.ts';
 
 export type { RenderOptions } from './digest.ts';
 export type { RenderSettings } from './context.ts';
@@ -13,6 +13,9 @@ export function renderDigest(events: ModEvent[], opts: RenderOptions): DiscordMe
   return planDigest(events, opts).messages;
 }
 
-export function renderImmediate(event: ModEvent, opts: RenderSettings & { now: Date }): DiscordMessage {
-  return buildImmediate(event, opts.now, makeCtx(opts));
+export function renderImmediate(event: ModEvent, opts: RenderSettings & { now: Date; onTemplateFallback?: () => void }): DiscordMessage {
+  const ctx = makeCtx(opts);
+  const result = renderEvent(ctx.immediateTemplate, event, opts.now, ctx);
+  if (result.fellBack) opts.onTemplateFallback?.();
+  return result.message;
 }

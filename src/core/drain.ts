@@ -34,6 +34,12 @@ export interface RenderContext {
   optionalButtons?: boolean;
   /** `false` never shows the Changelog block, however long or short the excerpt. */
   includeChangelog?: boolean;
+  /** Source text of the template of the message of one event; the default template when absent. */
+  immediateTemplate?: string;
+  /** Source text of the template of the line of a mod in a digest; the default one when absent. */
+  digestLineTemplate?: string;
+  /** Called when a template could not be used and the default one rendered the message. */
+  onTemplateFallback?: () => void;
 }
 
 export interface Renderer {
@@ -145,6 +151,9 @@ interface Drain {
   /** Webhooks that failed retryably in this drain, with the time their remaining rows become due again. */
   retryAt: Map<string, string>;
   unavailableLogged: boolean;
+  /** Template source texts of the subscriptions served in this drain. */
+  templates: Map<string, { immediate?: string; digestLine?: string }>;
+  templateFallbackSeen: boolean;
 }
 
 /**
@@ -174,6 +183,8 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainReport> {
     settled: new Set(),
     retryAt: new Map(),
     unavailableLogged: false,
+    templates: new Map(),
+    templateFallbackSeen: false,
   };
 
   let due: DueDelivery[];
@@ -186,6 +197,7 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainReport> {
 
   const groups = new Map<string, { sub: Subscription; target: SendTarget; items: DueDelivery[] }>();
   const rowsByWebhook = new Map<string, string[]>();
+  await loadTemplates(drain, due);
   for (const item of due) {
     const sub = item.subscription;
     const target = subscriptionTarget(sub);
@@ -207,6 +219,7 @@ export async function drainOutbox(deps: DrainDeps): Promise<DrainReport> {
       drain.report.error ??= errorMessage(err);
     }
   }
+  if (drain.templateFallbackSeen) console.warn('outbox template fell back to the default');
   for (const [webhook, retryAt] of drain.retryAt) {
     const ids = (rowsByWebhook.get(webhook) ?? []).filter((id) => !drain.settled.has(id));
     if (ids.length === 0) continue;
@@ -270,12 +283,37 @@ function allowance(drain: Drain, webhook: string): number {
   return Math.max(0, room);
 }
 
-function renderContext(deps: DrainDeps, sub: Subscription): RenderContext {
+/** Reads the templates of the subscriptions in this drain in one query; an unreadable store means default messages. */
+async function loadTemplates(drain: Drain, due: readonly DueDelivery[]): Promise<void> {
+  const ids = [...new Set(due.map((item) => item.subscription.id))];
+  if (ids.length === 0) return;
+  try {
+    for (const template of await drain.deps.store.getTemplates(ids)) {
+      const entry = drain.templates.get(template.subscriptionId) ?? {};
+      if (template.kind === 'immediate') entry.immediate = template.body;
+      else entry.digestLine = template.body;
+      drain.templates.set(template.subscriptionId, entry);
+    }
+  } catch {
+    console.warn('outbox templates could not be read');
+  }
+}
+
+function renderContext(drain: Drain, sub: Subscription): RenderContext {
+  const { deps } = drain;
   const context: RenderContext = {};
   if (deps.storeEmojis !== undefined) context.storeEmojis = deps.storeEmojis;
   if (deps.ratatoskrEmoji !== undefined) context.ratatoskrEmoji = deps.ratatoskrEmoji;
   if (deps.locale !== undefined) context.locale = deps.locale;
   if (sub.filter.includeChangelog === false) context.includeChangelog = false;
+  const templates = drain.templates.get(sub.id);
+  if (templates?.immediate !== undefined) context.immediateTemplate = templates.immediate;
+  if (templates?.digestLine !== undefined) context.digestLineTemplate = templates.digestLine;
+  if (templates !== undefined) {
+    context.onTemplateFallback = () => {
+      drain.templateFallbackSeen = true;
+    };
+  }
   return context;
 }
 
@@ -288,7 +326,7 @@ async function deliverImmediate(drain: Drain, sub: Subscription, target: SendTar
   }
   let message: DiscordMessage;
   try {
-    message = renderer.renderImmediate(entry.delivery.event, { now, ...renderContext(drain.deps, sub) });
+    message = renderer.renderImmediate(entry.delivery.event, { now, ...renderContext(drain, sub) });
   } catch {
     await parkUnrenderable(drain, [entry]);
     return;
@@ -332,7 +370,7 @@ function reducedMessage(drain: Drain, sub: Subscription, event: ModEvent, messag
   const { result } = failure;
   if (result.retryable || result.status !== 400 || message.components === undefined || allowance(drain, key) < 1) return null;
   try {
-    const reduced = drain.deps.renderer.renderImmediate(event, { now: drain.deps.now, ...renderContext(drain.deps, sub), optionalButtons: false });
+    const reduced = drain.deps.renderer.renderImmediate(event, { now: drain.deps.now, ...renderContext(drain, sub), optionalButtons: false });
     return JSON.stringify(reduced) === JSON.stringify(message) ? null : reduced;
   } catch {
     return null;
@@ -361,7 +399,7 @@ function cappedDetailed(entries: readonly CollapsedDelivery[], isWatchlistHit: (
 
 async function deliverDigest(drain: Drain, sub: Subscription, target: SendTarget, kept: CollapsedDelivery[], filter: CompiledFilter): Promise<void> {
   const { renderer, now } = drain.deps;
-  const context = renderContext(drain.deps, sub);
+  const context = renderContext(drain, sub);
   const key = targetKey(target);
   const rowCount = (entries: readonly CollapsedDelivery[]): number => entries.reduce((sum, k) => sum + k.rows.length, 0);
   const room = allowance(drain, key);

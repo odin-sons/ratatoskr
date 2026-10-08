@@ -986,7 +986,7 @@ describe('D1 adapter', () => {
       expect(report).toMatchObject({ failed: 1, sent: 0 });
       const updates = shim.preparedSql.filter((sql) => sql.startsWith('UPDATE outbox'));
       expect(updates).toHaveLength(2);
-      expect(shim.preparedSql.length).toBeLessThanOrEqual(1 + updates.length);
+      expect(shim.preparedSql.length).toBeLessThanOrEqual(2 + updates.length);
       expect((shim.db.prepare('SELECT COUNT(*) AS n FROM outbox WHERE attempts = 1').get() as { n: number }).n).toBe(events.length);
     });
   });
