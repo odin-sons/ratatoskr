@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { INTERACTION_TOKEN, SNOWFLAKE } from './constants.ts';
+import { INTERACTION_TOKEN, MODAL, SNOWFLAKE } from './constants.ts';
 
 export interface InteractionChannel {
   id: string;
@@ -13,6 +13,8 @@ export interface InteractionData {
   type?: number;
   custom_id?: string;
   options?: unknown[];
+  /** Values of the text inputs of a modal submit, by their `custom_id`. */
+  fields?: Record<string, string>;
 }
 
 /** The fields of a signed interaction payload the bot reads; everything else is dropped. */
@@ -50,15 +52,37 @@ function parseMember(value: unknown): Interaction['member'] {
   };
 }
 
+/** The text inputs of a modal submit: at most five, each a string of at most 4000 characters. */
+function parseFields(value: unknown): Record<string, string> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const fields: Record<string, string> = {};
+  let count = 0;
+  for (const row of value) {
+    if (!isRecord(row) || !Array.isArray(row.components)) continue;
+    for (const input of row.components) {
+      if (count >= MODAL.fieldsMax) break;
+      if (!isRecord(input) || input.type !== MODAL.textInput) continue;
+      const id = text(input.custom_id);
+      const content = text(input.value);
+      if (id === undefined || id === '' || content === undefined || content.length > MODAL.textInputMax) continue;
+      fields[id] = content;
+      count += 1;
+    }
+  }
+  return fields;
+}
+
 function parseData(value: unknown): InteractionData | undefined {
   if (!isRecord(value)) return undefined;
   const name = text(value.name);
   const customId = text(value.custom_id);
+  const fields = parseFields(value.components);
   return {
     ...(name === undefined ? {} : { name }),
     ...(typeof value.type === 'number' && Number.isInteger(value.type) ? { type: value.type } : {}),
     ...(customId === undefined ? {} : { custom_id: customId }),
     ...(Array.isArray(value.options) ? { options: value.options as unknown[] } : {}),
+    ...(fields === undefined ? {} : { fields }),
   };
 }
 

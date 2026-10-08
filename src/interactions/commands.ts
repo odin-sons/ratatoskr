@@ -4,6 +4,7 @@ import { INFO_BUTTON_PREFIX } from '../core/info-button.ts';
 import { createInfoAutocomplete, createInfoButton, createInfoCommand } from './commands/info.ts';
 import { createListCommand, createListPager, LIST_COMPONENT_PREFIX } from './commands/list.ts';
 import { createContinueCommand, createPauseCommand } from './commands/pause.ts';
+import { createTemplateCommand, createTemplateModal, TEMPLATE_MODAL_PREFIX } from './commands/template.ts';
 import { createSubscribeAutocomplete, createSubscribeCommand } from './commands/subscribe.ts';
 import { createUnsubscribeAutocomplete, createUnsubscribeCommand } from './commands/unsubscribe.ts';
 import type { CommandDeps } from './commands/deps.ts';
@@ -29,6 +30,9 @@ export function createCommandRegistry(deps: CommandDeps): HandlerRegistry {
   registry.autocompletes.set('include', createFilterAutocomplete(deps));
   registry.commands.set('exclude', createExcludeCommand(deps));
   registry.autocompletes.set('exclude', createFilterAutocomplete(deps));
+  registry.commands.set('template', createTemplateCommand(deps));
+  registry.autocompletes.set('template', createFilterAutocomplete(deps));
+  registry.modals.set(TEMPLATE_MODAL_PREFIX, createTemplateModal(deps));
   registry.commands.set('list', createListCommand(deps));
   registry.components.set(LIST_COMPONENT_PREFIX, createListPager(deps));
   registry.commands.set(INFO_COMMAND_NAME, createInfoCommand(deps));

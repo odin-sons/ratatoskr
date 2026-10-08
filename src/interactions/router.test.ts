@@ -6,7 +6,7 @@ import { ru } from '../i18n/ru.ts';
 import { createFakeFetch, json } from '../sources/__fixtures__/fake-fetch.ts';
 import { APP_ID, INTERACTION_ID, TOKEN_SENTINEL } from '../testing/signing.ts';
 import { INTERACTION_TYPE } from './constants.ts';
-import { autocomplete, defer, finishDeferred, reply } from './responses.ts';
+import { autocomplete, defer, finishDeferred, modal, reply } from './responses.ts';
 import { createRegistry, routeInteraction, type HandlerContext } from './router.ts';
 import { parseInteraction, type Interaction } from './types.ts';
 
@@ -240,4 +240,49 @@ describe('message command payload', () => {
     expect(make({ data: { name: 'x', type: 'three' } }).data).toEqual({ name: 'x' });
   });
 
+});
+
+describe('modals', () => {
+  const submit = (customId: string, rows: unknown[]) => make({ type: INTERACTION_TYPE.modalSubmit, data: { custom_id: customId, components: rows } });
+  const row = (id: string, value: unknown) => ({ type: 1, components: [{ type: 4, custom_id: id, value }] });
+
+  it('modal builds a type 9 response with one paragraph input per field, cut to Discord limits', () => {
+    const response = modal('template:abc:immediate', 'T'.repeat(100), [{ customId: 'body', label: 'L'.repeat(100), value: 'v', minLength: 1, maxLength: 2000, required: true }]);
+    expect(response.type).toBe(9);
+    expect(response.data).toMatchObject({ custom_id: 'template:abc:immediate' });
+    expect((response.data?.title as string).length).toBe(45);
+    expect(response.data?.components).toEqual([
+      { type: 1, components: [{ type: 4, custom_id: 'body', style: 2, label: 'L'.repeat(45), value: 'v', min_length: 1, max_length: 2000, required: true }] },
+    ]);
+  });
+
+  it('a modal response has no mentions field and is never ephemeral (it is not a message)', () => {
+    const response = modal('x', 't', [{ customId: 'a', label: 'l' }]);
+    expect(response.data).not.toHaveProperty('allowed_mentions');
+    expect(response.data).not.toHaveProperty('flags');
+  });
+
+  it('reads the text inputs of a modal submit by their custom_id and ignores everything else', () => {
+    const parsed = submit('template:abc:immediate', [row('body', 'hello'), { type: 1, components: [{ type: 3, custom_id: 'menu', values: ['x'] }] }, row('', 'no id'), row('n', 5), 'junk']);
+    expect(parsed.data?.fields).toEqual({ body: 'hello' });
+  });
+
+  it('keeps at most five inputs and drops a value over 4000 characters', () => {
+    const rows = Array.from({ length: 8 }, (_, i) => row(`f${i}`, 'v'));
+    expect(Object.keys(submit('x', rows).data?.fields ?? {})).toHaveLength(5);
+    expect(submit('x', [row('big', 'x'.repeat(4001))]).data?.fields).toEqual({});
+  });
+
+  it('routes a modal submit to the handler registered for the prefix of its custom_id', async () => {
+    const registry = createRegistry();
+    registry.modals.set('template', (interaction) => reply({ content: JSON.stringify(interaction.data?.fields) }));
+    const { ctx } = setup();
+    const response = await routeInteraction(registry, submit('template:abc:immediate', [row('body', 'hi')]), ctx);
+    expect(response.data?.content).toBe('{"body":"hi"}');
+  });
+
+  it('answers an unknown modal with the generic ephemeral message', async () => {
+    const response = await routeInteraction(createRegistry(), submit('nothing:1', [row('body', 'hi')]), setup().ctx);
+    expect(response.data).toMatchObject({ content: en.unknownCommand, flags: 64 });
+  });
 });

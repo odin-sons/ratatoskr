@@ -15,9 +15,11 @@ export interface HandlerRegistry {
   autocompletes: Map<string, InteractionHandler>;
   /** Message components, by the part of `custom_id` before the first `:`. */
   components: Map<string, InteractionHandler>;
+  /** Modal submits, by the part of `custom_id` before the first `:`. */
+  modals: Map<string, InteractionHandler>;
 }
 
-export const createRegistry = (): HandlerRegistry => ({ commands: new Map(), autocompletes: new Map(), components: new Map() });
+export const createRegistry = (): HandlerRegistry => ({ commands: new Map(), autocompletes: new Map(), components: new Map(), modals: new Map() });
 
 const componentPrefix = (customId: string): string => {
   const colon = customId.indexOf(':');
@@ -33,6 +35,8 @@ function pick(registry: HandlerRegistry, interaction: Interaction): InteractionH
       return name === undefined ? undefined : registry.autocompletes.get(name);
     case INTERACTION_TYPE.messageComponent:
       return customId === undefined ? undefined : registry.components.get(componentPrefix(customId));
+    case INTERACTION_TYPE.modalSubmit:
+      return customId === undefined ? undefined : registry.modals.get(componentPrefix(customId));
     default:
       return undefined;
   }

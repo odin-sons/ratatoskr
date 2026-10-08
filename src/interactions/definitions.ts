@@ -135,6 +135,31 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     { type: OPTION_TYPE.string, name: 'mod', description: 'One mod', autocomplete: true, max_length: SUBSCRIBE_TEXT_OPTION_MAX },
     { type: OPTION_TYPE.string, name: 'category', description: 'Mods in this category', max_length: SUBSCRIBE_TEXT_OPTION_MAX },
   ]),
+  command('template', 'Change how the messages of a subscription look', [
+    { type: OPTION_TYPE.string, name: 'subscription', description: 'The subscription', required: true, autocomplete: true },
+    {
+      type: OPTION_TYPE.string,
+      name: 'action',
+      description: 'What to do with the template',
+      required: true,
+      choices: [
+        { name: 'Edit', value: 'edit' },
+        { name: 'Show', value: 'show' },
+        { name: 'Preview', value: 'preview' },
+        { name: 'Reset to the default', value: 'reset' },
+      ],
+    },
+    {
+      type: OPTION_TYPE.string,
+      name: 'target',
+      description: 'Which template (default: the message)',
+      choices: [
+        { name: 'Message of one event', value: 'message' },
+        { name: 'Line of a mod in a digest', value: 'digest_line' },
+      ],
+    },
+    { type: OPTION_TYPE.string, name: 'mod', description: 'A mod to preview the template with', autocomplete: true, max_length: SUBSCRIBE_TEXT_OPTION_MAX },
+  ]),
   command('list', 'List the subscriptions here', [{ type: OPTION_TYPE.boolean, name: 'all', description: 'The whole server instead of this channel' }]),
   readOnly(
     command(INFO_COMMAND_NAME, 'Show details of a mod', [

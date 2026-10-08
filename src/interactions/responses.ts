@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { AUTOCOMPLETE_MAX_RESULTS, DISCORD_API_BASE, DISCORD_INTERACTION, DISCORD_SEND_TIMEOUT_MS } from '../core/constants.ts';
 import type { Messages } from '../i18n/index.ts';
-import { INTERACTION_CALLBACK, INTERACTION_TOKEN, MESSAGE_FLAG_EPHEMERAL, SNOWFLAKE } from './constants.ts';
+import { INTERACTION_CALLBACK, INTERACTION_TOKEN, MESSAGE_FLAG_EPHEMERAL, MODAL, SNOWFLAKE } from './constants.ts';
 import type { Interaction } from './types.ts';
 
 export interface InteractionMessage {
@@ -51,6 +51,39 @@ export const pong = (): InteractionResponse => ({ type: INTERACTION_CALLBACK.pon
 export const reply = (message: InteractionMessage, options: ReplyOptions = {}): InteractionResponse => ({
   type: INTERACTION_CALLBACK.channelMessage,
   data: messageData(message, options),
+});
+
+export interface ModalField {
+  customId: string;
+  label: string;
+  value?: string;
+  minLength?: number;
+  maxLength?: number;
+  required?: boolean;
+}
+
+/** Opens a modal with one paragraph input per field; the answer arrives as a modal submit with the same `custom_id`. */
+export const modal = (customId: string, title: string, fields: readonly ModalField[]): InteractionResponse => ({
+  type: INTERACTION_CALLBACK.modal,
+  data: {
+    custom_id: customId,
+    title: Array.from(title).slice(0, MODAL.titleMax).join(''),
+    components: fields.slice(0, MODAL.fieldsMax).map((field) => ({
+      type: MODAL.actionRow,
+      components: [
+        {
+          type: MODAL.textInput,
+          custom_id: field.customId,
+          style: MODAL.paragraph,
+          label: Array.from(field.label).slice(0, MODAL.labelMax).join(''),
+          ...(field.value === undefined ? {} : { value: field.value }),
+          ...(field.minLength === undefined ? {} : { min_length: field.minLength }),
+          ...(field.maxLength === undefined ? {} : { max_length: field.maxLength }),
+          ...(field.required === undefined ? {} : { required: field.required }),
+        },
+      ],
+    })),
+  },
 });
 
 /** Edits the message a component sits on. */

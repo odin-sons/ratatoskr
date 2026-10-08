@@ -638,8 +638,10 @@ Saving a template never fails because of its content. The reply to `/template`
 lists what is probably unintended: an unknown variable, an ignored form, a
 limit the variable cannot honour, a template with no link to the mod, a result
 that needs step 2 or later to fit. Discord gives no hints while a modal is being
-typed, so the warnings come with the reply and `/template preview` checks a
-template without saving it.
+typed, so the warnings come with the reply to the modal, together with a preview
+of the message or the line, built from a made-up update. `/template preview`
+shows the saved template (or the default one) again, for a real mod if `mod` is
+given, and lists the same notes.
 
 ### Storage and editing
 
@@ -650,8 +652,8 @@ templates of the subscriptions it serves in one query per run; they are not
 joined into `takeDue`, so a body is not repeated for each outbox row. Deleting a
 subscription deletes its templates.
 
-`/template` takes `subscription`, `action` (`edit`, `show`, `reset`, `preview`)
-and `target` (`message`, `digest_line`). `edit` answers with a modal that holds
+`/template` takes `subscription`, `action` (`edit`, `show`, `reset`, `preview`),
+`target` (`message`, `digest_line`) and, for `preview`, `mod`. `edit` answers with a modal that holds
 the current template, or the default one, in a single paragraph field; the submit
 is a separate interaction of type 5 whose `custom_id` carries only the
 subscription id and the target. Both the command and the submit need Manage

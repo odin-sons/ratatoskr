@@ -104,7 +104,29 @@ export interface Messages {
   filterShowRulesTitle: string;
   filterShowExcluded(list: string): string;
   filterShowFlags(adult: string, changelog: string): string;
-  /** `/info` and the "Mod info" message command. */
+  /** `/template`; `kind` is the localized name of a template, `name` the subscription. */
+  templateKindMessage: string;
+  templateKindDigestLine: string;
+  templateModalTitle(kind: string): string;
+  templateModalLabel: string;
+  templateSaved(name: string, kind: string): string;
+  templateEmptyBody: string;
+  templateTooLong(max: number): string;
+  templateReset(name: string, kind: string): string;
+  templateNothingToReset(name: string, kind: string): string;
+  templateShowCurrent(name: string, kind: string): string;
+  templateShowDefault(name: string, kind: string): string;
+  templatePreviewOf(name: string, kind: string): string;
+  templateNotes: string;
+  templateNoNotes: string;
+  warnUnknownVariable(name: string): string;
+  warnUnavailableInLine(name: string): string;
+  warnIgnoredForm(name: string, form: string): string;
+  warnNoModLink: string;
+  warnTooManyVariables: string;
+  warnShortened(step: number): string;
+  warnFellBack: string;
+  /** `/info` and the Info button. */
   infoNeedsMod: string;
   /** B, KB, MB, GB, TB. */
   byteUnits: readonly [string, string, string, string, string];

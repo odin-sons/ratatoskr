@@ -16,7 +16,22 @@ export const INTERACTION_CALLBACK = {
   deferredChannelMessage: 5,
   updateMessage: 7,
   autocompleteResult: 8,
+  modal: 9,
 } as const;
+
+/** Source: Discord developer docs, "Message Components" and "Modal" (text input type 4, paragraph style 2, limits of a modal). */
+export const MODAL = {
+  textInput: 4,
+  paragraph: 2,
+  actionRow: 1,
+  titleMax: 45,
+  labelMax: 45,
+  textInputMax: 4000,
+  fieldsMax: 5,
+} as const;
+
+/** Source: Discord developer docs, "Message" (Message Flags: IS_COMPONENTS_V2, 1 << 15). */
+export const MESSAGE_FLAG_V2 = 1 << 15;
 
 /** Source: Discord developer docs, "Message" (Message Flags: EPHEMERAL, 1 << 6). */
 export const MESSAGE_FLAG_EPHEMERAL = 1 << 6;

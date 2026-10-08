@@ -17,7 +17,7 @@ import { createSubscribeAutocomplete } from './subscribe.ts';
 import { createUnsubscribeAutocomplete, pickSubscription } from './unsubscribe.ts';
 import { display, subscriptionName, subscriptionsHere, summarizeFilter } from './view.ts';
 
-function guard(interaction: Interaction, messages: Messages): InteractionResponse | null {
+export function guard(interaction: Interaction, messages: Messages): InteractionResponse | null {
   const denied = requireManageChannel(interaction, messages);
   if (denied) return denied;
   const target = resolveTarget(interaction);
@@ -43,7 +43,7 @@ async function modExists(deps: CommandDeps, mod: string, sources: readonly strin
 }
 
 /** The subscription of the place the command was run in, by id or exact label. */
-async function subscriptionOf(deps: CommandDeps, interaction: Interaction, chosen: string | undefined): Promise<Subscription | undefined> {
+export async function subscriptionOf(deps: CommandDeps, interaction: Interaction, chosen: string | undefined): Promise<Subscription | undefined> {
   if (chosen === undefined || chosen.trim() === '') return undefined;
   return pickSubscription((await subscriptionsHere(deps.store, interaction)) ?? [], chosen);
 }

@@ -9,8 +9,8 @@ const CHAT_COMMANDS = COMMAND_DEFINITIONS.filter((c): c is ChatCommandDefinition
 const NAME = /^[\p{Ll}\p{Lo}\p{N}_-]{1,32}$/u;
 
 describe('command definitions', () => {
-  it('describe subscribe, unsubscribe, pause, continue, filter, include, exclude, list and info', () => {
-    expect(COMMAND_DEFINITIONS.map((c) => c.name)).toEqual(['subscribe', 'unsubscribe', 'pause', 'continue', 'filter', 'include', 'exclude', 'list', 'info']);
+  it('describe subscribe, unsubscribe, pause, continue, filter, include, exclude, template, list and info', () => {
+    expect(COMMAND_DEFINITIONS.map((c) => c.name)).toEqual(['subscribe', 'unsubscribe', 'pause', 'continue', 'filter', 'include', 'exclude', 'template', 'list', 'info']);
   });
 
   it('are served by the registry: every command, and every autocomplete option, has a handler', () => {
@@ -21,6 +21,7 @@ describe('command definitions', () => {
     }
     expect(registry.components.has('list')).toBe(true);
     expect(registry.components.has('info')).toBe(true);
+    expect(registry.modals.has('template')).toBe(true);
   });
 
   it.each(CHAT_COMMANDS.map((c) => [c.name, c] as const))('%s keeps to the Discord limits', (_name, command) => {

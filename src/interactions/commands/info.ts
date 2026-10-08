@@ -41,12 +41,18 @@ function infoEvent(pkg: PackageSnapshot, current: ModEvent | null): ModEvent {
   };
 }
 
-/** NSFW mods are never shown: the gate is fail-closed because `/info` has no subscription to opt in with. */
-async function showMod(deps: CommandDeps, messages: Messages, packageId: string, sources: SourceId[]): Promise<InteractionResponse> {
+/** The event of a mod's stored version, standing in for the mod as it is now; null for an unknown mod. NSFW mods are never returned. */
+export async function modEventFor(deps: CommandDeps, packageId: string, sources: SourceId[]): Promise<ModEvent | null> {
   const { store } = deps;
   const pkg = (await store.getPackagesById(packageId, sources)).find((candidate) => !candidate.isNsfw);
-  if (pkg === undefined) return ephemeral(messages.modNotFound(display(packageId)));
-  const event = infoEvent(pkg, await store.getEventById(eventId(pkg.source, pkg.packageId, pkg.version)));
+  if (pkg === undefined) return null;
+  return infoEvent(pkg, await store.getEventById(eventId(pkg.source, pkg.packageId, pkg.version)));
+}
+
+/** NSFW mods are never shown: the gate is fail-closed because `/info` has no subscription to opt in with. */
+async function showMod(deps: CommandDeps, messages: Messages, packageId: string, sources: SourceId[]): Promise<InteractionResponse> {
+  const event = await modEventFor(deps, packageId, sources);
+  if (event === null) return ephemeral(messages.modNotFound(display(packageId)));
   const rendered = buildImmediate(event, (deps.now ?? (() => new Date()))(), {
     messages,
     storeEmojis: resolveStoreEmojis(deps.storeEmojis),
