@@ -72,8 +72,9 @@ pnpm register-commands
 ```
 
 Run it again after an update that adds commands. The commands need the Manage
-Channel permission by default; `/info` and the "Mod info" message command are
-open to every member.
+Channel permission by default; `/info` and the Info button of a message are open
+to every member. How messages look can be changed per subscription with
+`/template`; see [docs/templates.md](templates.md).
 
 ## 6. Invite the bot
 

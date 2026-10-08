@@ -457,7 +457,7 @@ made inside a forum post or a thread delivers into that one post or thread, in
 Webhook subscriptions keep working unchanged. A bot subscription has no
 `webhook_url`.
 
-Two tables hold what the bot learns when it sends:
+One table holds what the bot learns when it sends:
 
 - `mod_threads (channel_id, source, package_id, thread_id, anchor_message_id,
   created_at)`, primary key `(channel_id, source, package_id)`: one thread per
@@ -465,12 +465,8 @@ Two tables hold what the bot learns when it sends:
   empty only while the thread of a text channel's anchor message could not be opened; the next delivery opens it. Migration
   `0007` adds `idx_mod_threads_thread (channel_id, thread_id)`, which `/info`
   uses to find the mod of the thread it runs in.
-- `messages (message_id, channel_id, source, package_id, event_id, created_at)`,
-  primary key `message_id`: written for immediate messages and for posts that
-  belong to one mod, read by `/info` and the "Mod info" message command. Rows
-  older than 7 days are purged in the reconcile cron, like delivered outbox rows;
-  the message command on an older message answers that the message is too old
-  and points to `/info`.
+  The mod behind a message is found through the Info button of the message, see
+  "Message templates"; no row is written per message.
 
 Autocomplete reads `packages` through the indexes
 `packages(owner COLLATE NOCASE)` and `packages(name COLLATE NOCASE)`, by prefix
@@ -498,7 +494,7 @@ label.
 | `/include` | Widens: adds a mod, an author (stored as a bare-owner `packages` entry), a category or a store as an `alsoMatch` rule; options given together form one rule (AND), `owner` with `mod` is refused, and a `mod` must exist. |
 | `/exclude` | Narrows: adds an owner or mod to `excludePackages` and a category to `excludeCategories` (at most 100 entries each; a `mod` must exist). |
 | `/info` | Shows a mod: name, author, latest version, store, links, downloads and likes where the source has them, and the last changelog. `mod` autocompletes; inside a mod's thread it is optional (the thread is matched to its mod through `mod_threads`). Open to every member, answered inline and ephemerally; NSFW mods are never shown. |
-| Mod info (message command) | Same answer for the mod behind a message, found through `messages`. A digest message with several mods asks for `/info`. |
+| `/template` | Edits the message template or the digest line template of a subscription; see "Message templates". The Info button of a message gives the same answer as `/info`. |
 
 `pnpm register-commands` registers the set with Discord. Everything a command
 changes is a plain row edit; queued outbox rows are re-checked against the
@@ -558,14 +554,118 @@ the parent's type; it refuses `thread_per_mod` when that fails. Without
   are constants in `src/core/constants.ts` (provisional: 10, 50 and 200) and are
   enforced by `/subscribe`. Every subscription adds outbox rows for each
   event it matches, so the caps protect the D1 write budget.
-- New writes per day: one `messages` row per immediate message, one
-  `mod_threads` row per mod and channel, and the subscription edits. They go
+- New writes per day: one `mod_threads` row per mod and channel, the
+  subscription edits and the template edits. They go
   into `d1-budget.test.ts` next to the existing guards.
 - A command costs a handful of D1 rows. Autocomplete costs one indexed prefix
   query per keystroke, for a prefix of at least 2 characters, with the worst
   case of rows read bounded in `d1-budget.test.ts`.
 - The fetch handler stays inside the 10 ms CPU budget: signature check, one or
   two D1 calls, one JSON response.
+
+## Message templates
+
+A subscription can carry two templates: one for the message of a single event
+(immediate mode) and one for the line of a mod in a digest. A subscription
+without a template gets the default ones, which render the messages the bot has
+always sent. The variables and examples are in `docs/templates.md`; this section
+fixes the rules the code has to follow.
+
+### Syntax
+
+A template is text in lines. Everything outside braces is literal.
+
+- `{name}` is a variable, `{name:arg:arg}` a variable with arguments. An argument
+  is a form (a word such as `short`, `medium`, `full` or `link`), a limit in
+  characters (`300`) or a limit in lines (`l3`), in any order. A form the variable
+  does not have is ignored; so is a second limit of the same kind (the last one
+  wins). An unknown variable renders as nothing.
+- `{{` and `}}` stand for the characters `{` and `}`.
+- A line that holds variables and whose variables are all empty is dropped. A
+  line without variables is always kept.
+- `(?` and `?)` mark an optional part: it is dropped when every variable inside is
+  empty, so a separator goes away with the value it separated. They do not nest.
+- A line that is exactly `---` ends the current block. A block is one Components
+  V2 text display; blocks are separated by a divider. A block that holds variables
+  and shows none of them is dropped together with its divider. Blank lines at the
+  start and end of a block are trimmed.
+- `{icon}` marks the block that gets the thumbnail. It renders as nothing, and the
+  thumbnail appears only when the mod has a usable icon URL.
+- A line made only of button variables (`{buttons}`, `{page_button}`,
+  `{download_button}`, `{website_button}`, `{info_button}`) becomes an action row
+  of at most five buttons, in the order written. A button without a usable URL
+  or `custom_id` is left out, and a row left empty is dropped.
+- A template is at most `TEMPLATE_MAX_CHARS` (2000) characters, which is also the
+  most a user can type in one Discord message without a subscription.
+
+### Safety
+
+Every value is made safe by the sanitizers the renderers already use (`inline`,
+`escapeTruncate`, `neutralizeMentions`, `stripUnsafeChars`, `safeUrl`) before it
+is placed in the template, so a mod name or a changelog cannot carry a mention,
+a control character or a broken link into a message. The literal text of a
+template is cleaned of control characters and cannot switch mentions on:
+`allowed_mentions.parse` stays `[]`. The notice with the link to the source of
+the bot (AGPL) is added to every message after the template and cannot be removed
+by it. The parser is a single linear pass over the text, with a cap on the number
+of variables, and never evaluates anything.
+
+### Limits and degradation
+
+The result must satisfy the Discord limits checked by `assertWithinLimits`
+(text of a Components V2 message, number of components, length of one text
+display, buttons per row). When it does not, the message is rendered again with
+the next step, until it does:
+
+1. as written;
+2. every form longer than `medium` becomes `medium`;
+3. every form longer than `short` becomes `short`;
+4. the optional blocks go: those that show only `changelog`, `description`,
+   `categories` or `also_on`, and the Download and Website buttons;
+5. the default template.
+
+The step is chosen for the whole message, never per block. The retry without the
+optional buttons after a 400 answer stays as it is. For a digest line the template
+replaces level L0 only; levels L1 to L4 are built in and apply when the digest
+does not fit, exactly as before.
+
+A template that is empty, cannot be loaded or fails while rendering falls back to
+the default template, and the Worker logs one generic line per run without the
+template text.
+
+### Warnings
+
+Saving a template never fails because of its content. The reply to `/template`
+lists what is probably unintended: an unknown variable, an ignored form, a
+limit the variable cannot honour, a template with no link to the mod, a result
+that needs step 2 or later to fit. Discord gives no hints while a modal is being
+typed, so the warnings come with the reply and `/template preview` checks a
+template without saving it.
+
+### Storage and editing
+
+The `templates` table holds `subscription_id`, `kind` (`immediate` or
+`digest_line`), `body` and `updated_at`, with the primary key
+`(subscription_id, kind)`, as a `WITHOUT ROWID` table. The drain reads the
+templates of the subscriptions it serves in one query per run; they are not
+joined into `takeDue`, so a body is not repeated for each outbox row. Deleting a
+subscription deletes its templates.
+
+`/template` takes `subscription`, `action` (`edit`, `show`, `reset`, `preview`)
+and `target` (`message`, `digest_line`). `edit` answers with a modal that holds
+the current template, or the default one, in a single paragraph field; the submit
+is a separate interaction of type 5 whose `custom_id` carries only the
+subscription id and the target. Both the command and the submit need Manage
+Channel and check that the subscription belongs to the place where they run.
+
+### The Info button
+
+The default message template ends with an Info button whose `custom_id` is
+`info:<source>:<packageId>`; it is left out when that is longer than 100
+characters. Pressing it answers like `/info` for that mod. This replaces the "Mod
+info" message command and the `messages` table, so a custom template cannot break
+the lookup and no row is written per message. An admin who removes the button
+removes the lookup for that subscription; `/info` stays.
 
 ## Volume
 
